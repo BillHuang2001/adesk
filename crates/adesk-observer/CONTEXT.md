@@ -99,6 +99,11 @@ Skeleton-phase module-level `#![allow(dead_code)]` blocks are gone; only `tests/
 - `src/service.rs` is ~838 production lines plus a ~990-line cohesive inline test module; the single-file layout is deliberate (one state machine, one lock, tests next to the code they pin). Do not split it to satisfy the ~1000-line soft threshold.
 - Item-level `#[allow(dead_code)]` remains on `Clock::until` and `EventJournal::oldest_seq` — test-only accessors; remove them only together with the tests that use them.
 - Waiters are cancellation-safe and `Send`: dropping the future unregisters the `PendingGuard`; never add a code path that registers a waiter without holding the guard.
+- `adesk_core::Observation` has **no `ts_ms` field**: resolution time is `elapsed_ms` (from the wait start) plus the `seq`/`last_commit_seq` watermarks. The crate exposes no event-history API; `snapshot()` returns counts only (`journal_len`, `events_dropped`).
+- `WaitSpec` has no `after_action`; action-correlated change waits use `ObserveSpec::new(Condition::Change).after_action(id)`.
+- Window-filtered `Observation::last_commit_seq` is the window's *absolute* commit watermark (non-zero even when `commits == 0`); unfiltered it is the global max across windows.
+- An already-quiet window does not resolve `wait_for_quiet` instantly: with no counted commit in the filter the anchor is the wait start (or the action `ts_ms`), so resolution is `anchor + quiet_ms` — or immediate with `quiet: false` when `after_action` is already older than `quiet_ms`.
+- `Observation::quiet` is the evidence flag above, *not* "condition met": `docs/protocol.md` §5.4 and the field's doc in `adesk-core` phrase it as the latter, but a timed-out `change` wait can legitimately carry `quiet: true`.
 ## Dependencies
 - `adesk-core` (landed): `RuntimeEvent`, `Observation`, `WindowId`, `ActionId`, `Position`, `Rect`, `Region`, `Error`/`ErrorCode`.
 - `tokio`: `sync` (`watch`), `time` (`Instant`, `sleep_until`); dev-only `test-util` for paused time.
