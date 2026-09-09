@@ -45,6 +45,18 @@ pub struct RunningServer {
     inner: Arc<RunningInner>,
 }
 
+/// Prints only the socket path: the handle's internals (compositor handle,
+/// observer, background tasks) are opaque runtime state, so the output stays
+/// small and stable. `adesk-testkit::TestRuntime` derives `Debug` and needs
+/// this impl.
+impl std::fmt::Debug for RunningServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningServer")
+            .field("socket_path", &self.socket_path())
+            .finish_non_exhaustive()
+    }
+}
+
 struct RunningInner {
     config: Arc<ServerConfig>,
     compositor: CompositorHandle,
