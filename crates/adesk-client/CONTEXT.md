@@ -139,10 +139,10 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 
 ## Notes for Agents
 
-- The workspace `members = ["crates/*"]` glob fails to load while any `crates/*` directory lacks a `Cargo.toml`; until every sibling crate has a manifest, validate standalone in a temp workspace containing `adesk-core`, a stub `adesk-proto` and this crate, then run `bash scripts/dev.sh cargo check --manifest-path <tmp>/Cargo.toml --all-targets` (bare `cargo` cannot link outside the dev shell; `scripts/dev.sh` is not executable in worktrees — invoke it through `bash`).
-- `cargo check --all-targets` does not compile doctests; run `cargo test --doc` in the temp workspace to verify the `lib.rs` example.
-- `tests/common/mod.rs` is a shared module (`mod common;` in each test file), not a test target; it carries `#![allow(dead_code)]` while the harness is a skeleton.
-- When implementing, keep the reader task free of `await` under the `pending` lock and never `unwrap()` a peer-controlled frame.
+- Bare `cargo` cannot link outside the Nix dev shell, and `scripts/dev.sh` is not executable in worktrees — always run `bash scripts/dev.sh cargo <args>`.
+- `cargo check --all-targets` does not compile doctests; `cargo test -p adesk-client` runs the `lib.rs` example (1 doctest).
+- `tests/common/mod.rs` is a shared module (`mod common;` in each test file), not a test target; it keeps `#![allow(dead_code)]` because each test target uses only a subset of the harness helpers.
+- Transport invariants: the reader task never `await`s while holding the `pending` lock and never `unwrap()`s a peer-controlled frame; `EVENT_CHANNEL_CAPACITY` (4096) is mirrored by the events lag test, so raising it means raising that test's emission count.
 
 ## See Also
 
