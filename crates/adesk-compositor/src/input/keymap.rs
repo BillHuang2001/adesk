@@ -136,4 +136,20 @@ mod tests {
         assert_eq!(table.resolve(0), None);
         assert_eq!(table.resolve(0xdead_beef), None);
     }
+
+    #[test]
+    fn uncompilable_settings_are_keyboard_errors() {
+        let settings = XkbSettings {
+            layout: "no_such_layout_xyz".to_owned(),
+            ..XkbSettings::us()
+        };
+        let error = KeymapTable::new(&settings)
+            .err()
+            .expect("a layout that does not exist must fail to compile");
+        let message = match error {
+            CompositorError::Keyboard(message) => message,
+            other => panic!("expected a keyboard error, got {other:?}"),
+        };
+        assert!(message.contains("no_such_layout_xyz"), "{message}");
+    }
 }
