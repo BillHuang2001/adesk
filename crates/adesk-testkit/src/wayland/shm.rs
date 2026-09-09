@@ -12,7 +12,9 @@
 //! `[B, G, R, A]` (`[b, g, r, 255]` for an opaque RGBA colour `[r, g, b, 255]`). The
 //! writer evaluates [`FillPattern::at`] in RGBA order and swaps the first and third byte
 //! when serialising, which is the single place that byte-order rule lives. Stride is
-//! always `width * 4` (no padding), so `len == stride * height`.
+//! always `width * 4` (no padding); an allocation is `stride * height` bytes rounded up
+//! to a 64-byte multiple, so [`ShmBuffer::len`] is the allocated length, not the exact
+//! pixel payload.
 //!
 //! ## Allocation
 //!
@@ -23,12 +25,14 @@
 
 use std::collections::HashSet;
 use std::fs::File;
+use std::os::fd::AsFd;
+use std::os::unix::fs::FileExt;
 
 use adesk_core::Size;
 use wayland_client::protocol::{wl_buffer, wl_shm, wl_shm_pool};
 use wayland_client::QueueHandle;
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
 
 use super::state::ClientState;
@@ -55,7 +59,8 @@ pub(crate) struct ShmBuffer {
     buffer: wl_buffer::WlBuffer,
     /// Byte offset of the buffer inside the pool.
     pub(crate) offset: usize,
-    /// Length of the buffer in bytes (`stride * height`).
+    /// Allocated length in bytes: `stride * height` rounded up to a 64-byte multiple, so
+    /// `free(offset, len)` returns exactly the range `alloc` reserved.
     pub(crate) len: usize,
     /// Pixel size the buffer was allocated for.
     size: Size,
@@ -76,8 +81,27 @@ impl ShmPool {
         qhandle: &QueueHandle<ClientState>,
         capacity: usize,
     ) -> Result<ShmPool> {
-        let _ = (shm, qhandle, capacity);
-        todo!("Phase 2: tempfile + set_len + wl_shm.create_pool(file.as_fd(), capacity)")
+        if capacity == 0 {
+            return Err(TestkitError::Unsupported(
+                "SHM pool capacity must be greater than zero".to_string(),
+            ));
+        }
+        let size = i32::try_from(capacity).map_err(|_| {
+            TestkitError::Unsupported(format!(
+                "SHM pool capacity {capacity} bytes exceeds the wl_shm i32 size limit"
+            ))
+        })?;
+        let file = tempfile::tempfile()?;
+        file.set_len(capacity as u64)?;
+        let pool = shm.create_pool(file.as_fd(), size, qhandle, ());
+        Ok(ShmPool {
+            pool,
+            file,
+            capacity,
+            free_list: Vec::new(),
+            next_offset: 0,
+            qhandle: qhandle.clone(),
+        })
     }
 
     /// Allocates a buffer of `size` filled with `fill`.
@@ -95,8 +119,54 @@ impl ShmPool {
     /// 4. `pool.create_buffer(offset as i32, w as i32, h as i32, (w * 4) as i32,
     ///    wl_shm::Format::Argb8888, &self.qhandle, ())`.
     pub(crate) fn alloc(&mut self, size: Size, fill: FillPattern) -> Result<ShmBuffer> {
-        let _ = (size, fill);
-        todo!("Phase 2: first-fit allocate, write the fill pattern, create the wl_buffer")
+        fill.require_opaque()?;
+        if size.w == 0 || size.h == 0 {
+            return Err(TestkitError::Unsupported(format!(
+                "cannot allocate a zero-sized SHM buffer ({}x{})",
+                size.w, size.h
+            )));
+        }
+        let stride = (size.w as usize).checked_mul(4).ok_or_else(|| {
+            TestkitError::Unsupported(format!("SHM stride overflows for width {}", size.w))
+        })?;
+        let len = stride
+            .checked_mul(size.h as usize)
+            .and_then(round_up_64)
+            .ok_or_else(|| {
+                TestkitError::Unsupported(format!(
+                    "SHM buffer size overflows for {}x{}",
+                    size.w, size.h
+                ))
+            })?;
+        let offset = self.take_range(len)?;
+
+        // Pixels go through positioned writes, one row at a time; the file is never mapped.
+        let mut row = vec![0u8; stride];
+        for y in 0..size.h {
+            for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
+                let [r, g, b, _] = fill.at(x as u32, y, size);
+                pixel.copy_from_slice(&[b, g, r, 255]);
+            }
+            self.file
+                .write_all_at(&row, (offset + y as usize * stride) as u64)?;
+        }
+
+        let buffer = self.pool.create_buffer(
+            offset as i32,
+            size.w as i32,
+            size.h as i32,
+            stride as i32,
+            wl_shm::Format::Argb8888,
+            &self.qhandle,
+            (),
+        );
+        Ok(ShmBuffer {
+            buffer,
+            offset,
+            len,
+            size,
+            fill,
+        })
     }
 
     /// Returns a previously allocated range to the free list.
@@ -105,8 +175,71 @@ impl ShmPool {
     /// possible. Ranges not handed out by [`alloc`](ShmPool::alloc) are ignored (they
     /// would indicate a bug in the caller, not in the pool).
     pub(crate) fn free(&mut self, offset: usize, len: usize) {
-        let _ = (offset, len);
-        todo!("Phase 2: push the range back onto the free list and coalesce")
+        if len == 0 {
+            return;
+        }
+        let Some(mut end) = offset.checked_add(len) else {
+            return;
+        };
+        // A range past the bump pointer (or past the pool) was never handed out; ignoring
+        // it keeps the free list from claiming bytes `take_range` may still bump into.
+        if end > self.capacity || end > self.next_offset {
+            return;
+        }
+        let mut start = offset;
+        // A range that overlaps an already free range was never handed out (or is being
+        // freed twice); ignoring it keeps the free list free of duplicates.
+        if self.free_list.iter().any(|&(free_start, free_len)| {
+            start < free_start.saturating_add(free_len) && free_start < end
+        }) {
+            return;
+        }
+        // Coalesce with every touching neighbour: one merge can make the next one adjacent.
+        loop {
+            let neighbour = self.free_list.iter().position(|&(free_start, free_len)| {
+                free_start.saturating_add(free_len) == start || end == free_start
+            });
+            match neighbour {
+                Some(index) => {
+                    let (free_start, free_len) = self.free_list.remove(index);
+                    start = start.min(free_start);
+                    end = end.max(free_start.saturating_add(free_len));
+                }
+                None => break,
+            }
+        }
+        self.free_list.push((start, end - start));
+    }
+
+    /// Reserves `len` bytes: the first free range that fits, else a bump from `next_offset`.
+    fn take_range(&mut self, len: usize) -> Result<usize> {
+        if let Some(index) = self
+            .free_list
+            .iter()
+            .position(|&(_, free_len)| free_len >= len)
+        {
+            let (offset, free_len) = self.free_list.remove(index);
+            let remainder = free_len - len;
+            if remainder > 0 {
+                self.free_list.push((offset + len, remainder));
+            }
+            return Ok(offset);
+        }
+        let end = self
+            .next_offset
+            .checked_add(len)
+            .filter(|&end| end <= self.capacity)
+            .ok_or_else(|| self.exhausted(len))?;
+        self.next_offset = end;
+        Ok(end - len)
+    }
+
+    /// The error returned when an allocation does not fit in the pool.
+    fn exhausted(&self, len: usize) -> TestkitError {
+        TestkitError::Unsupported(format!(
+            "SHM pool exhausted: {len} bytes requested, {} of {} bytes already handed out",
+            self.next_offset, self.capacity
+        ))
     }
 
     /// Total size of the backing file in bytes.
@@ -132,10 +265,19 @@ impl ShmBuffer {
     }
 }
 
+/// Rounds `len` up to a 64-byte multiple, or `None` when the addition overflows.
+///
+/// Every allocation starts on a 64-byte boundary, which is the alignment the compositor's
+/// pixman and GL upload paths are happiest with, and keeps `free(offset, len)` able to
+/// return exactly the reserved range.
+fn round_up_64(len: usize) -> Option<usize> {
+    len.checked_add(63).map(|len| len & !63)
+}
+
 /// The SHM formats the harness can write; `Argb8888` is the only one the client commits.
 ///
-/// Phase 2 uses this when seeding [`ClientState`] from the connect-time
-/// [`Globals`](super::Globals) snapshot.
+/// [`bind_globals`](super::protocol::bind_globals) uses this to seed the connect-time
+/// [`Globals`](super::Globals) snapshot, which in turn seeds [`ClientState`].
 pub(crate) fn supported_formats() -> HashSet<wl_shm::Format> {
     let mut formats = HashSet::new();
     formats.insert(wl_shm::Format::Argb8888);
