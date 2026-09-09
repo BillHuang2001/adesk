@@ -15,7 +15,7 @@ Phase 2 implements the bodies without changing the public API.
 Everything below is re-exported at the crate root; `adesk-testkit` is designed against exactly this surface.
 
 - `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>> }` (`src/config.rs`)
-  - `Default`/`new()`; `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
+  - `new(socket_path, compositor)` (the constructor `adesk-testkit`'s harness calls) and `Default` (environment-resolved socket path, compositor defaults); builders `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
   - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; identical to `adesk_client::default_socket_path`.
   - `parse_size("WxH")` / `parse_renderer("auto|gl|pixman")` are the CLI value parsers.
 - `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
@@ -108,6 +108,8 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 ## Design Decisions
 
+- **`ServerConfig::new(socket_path, compositor)` is a 2-argument constructor; defaults come from `Default`.** The objective pinned the struct, its builders and its default resolution but not the constructor arity; `adesk-testkit`'s harness (designed in parallel) calls `ServerConfig::new(socket_path, compositor).with_app_dirs(..)`, so the server matches the consumer. `Default` keeps the env-resolved socket path and compositor defaults.
+- **No dev-dependencies in Phase 1.** There are no test targets yet, and an unused `adesk-client` dev-dependency pulled a currently-broken sibling into `--all-targets` validation. Phase 2 adds `adesk-testkit`, `adesk-client` and `tempfile` together with `./tests/`.
 - **`Server::start` and `RunningServer::wait`/`shutdown` are async.** The objective's signature sketch omitted `async`, but compositor `wait_ready()`/`shutdown()` are async and the server is a tokio process; `adesk-testkit` must `.await` them. `registry() -> &Arc<AppRegistry>` (not `&AppRegistry`) is pinned so tests can clone the handle.
 - **One writer task per connection + bounded queue.** The read loop owns decoding/dispatch; a dedicated writer task owns the write half and is fed by an `mpsc::Sender<Frame>` (`ConnectionWriter`). Responses `send().await` (backpressure); subscription events `try_send` (drop, never block the pump). This keeps every request answered exactly once even while events stream.
 - **Ordered input queue is a fair `tokio::sync::Mutex` per session.** Input methods may expand into several compositor commands (`click` = move + down + up); the queue guarantees submission order per connection without serializing the whole connection.
@@ -133,14 +135,15 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 - **The root workspace does not load while `crates/adesk-testkit/` has no `Cargo.toml`** (`members = ["crates/*"]`). `./scripts/dev.sh cargo check -p adesk-server` therefore fails at workspace load; use `./check-standalone.sh` until testkit lands. This is a root-owned condition, not a server bug.
 - **`check-standalone.sh` exits 101 because three *siblings* do not compile at HEAD** (not because of this crate): `adesk-client` (`adesk_proto::{Request, Response}` / `Codec::new()` do not exist; `EventFrame.event` is `EventKind`, `data` is `EventPayload`), `adesk-inspector` (`adesk_render::Error` is really `RenderError`; `crop`/`downscale` are infallible), `adesk-compositor` (`WindowManager::new` takes `PolicyConfig`; `resolve_position` takes `Position` by value and returns `Option`). `adesk-server` itself is warning-free once those are reconciled — verified with a temp workspace that patches the sibling copies only; `clippy --no-deps -- -D warnings` is clean, while the unscoped clippy invocation fails on sibling lints.
 - **Phase 1 skeleton marker:** `src/lib.rs` carries `#![allow(dead_code, unused_variables)]` and `src/main.rs` the same allowance plus `unused_imports`, because `todo!()` bodies do not read their arguments or call the helpers yet. Remove them when Phase 2 lands (they hide real lints).
-- **No E2E test files exist yet.** `./tests/` holds only the plan (`./tests/CONTEXT.md`); the suites are written in Phase 2 once `adesk-testkit` lands a manifest and a dev-dependency can be declared.
+- **No E2E test files exist yet.** `./tests/` holds only the plan (`./tests/CONTEXT.md`); the suites land in Phase 2 together with the `adesk-testkit`/`adesk-client`/`tempfile` dev-dependencies.
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
 
 ## Test Strategy
 
 - **Unit level (in-module, Phase 2):** `config::parse_size/parse_renderer/default_socket_path`, `translate` (every bridge, both directions), `images::encode` (png/rgba8/scale), `subscriptions` (id allocation, filtering, removal on disconnect), `session::InputQueue` (FIFO), `shutdown::ShutdownHandle` (idempotence, `cancelled`), `inspection::InspectionCache`.
 - **E2E level (`./tests/`, Phase 2):** `adesk-testkit::TestRuntime::start()` on a temp socket with the pixman renderer plus `WaylandTestClient` and `adesk-client`; full plan in `./tests/CONTEXT.md`. No test may require a display, GPU, network or installed application.
-- **Validation command:** `bash crates/adesk-server/check-standalone.sh` (defaults to `check -p adesk-server --all-targets` inside the Nix dev shell). Once testkit lands: `./scripts/dev.sh cargo check -p adesk-server --all-targets`.
+- **Validation command:** `bash crates/adesk-server/check-standalone.sh` (defaults to `check -p adesk-server --all-targets` inside the Nix dev shell). It validates against the *real* siblings, so it stays red until the sibling compile errors above are fixed; `crates/adesk-testkit/check-standalone.sh` carries the temporary sibling patches if a runnable Phase-1 check is needed earlier. Once the root workspace loads: `./scripts/dev.sh cargo check -p adesk-server --all-targets`.
+- **Phase-1 sign-off evidence:** `cargo check -p adesk-server --all-targets` exit 0 and `clippy -p adesk-server --all-targets --no-deps -- -D warnings` exit 0 in a temp workspace whose sibling *copies* carry only the temporary reconciliation patches listed above; the server crate itself is warning-free.
 
 ## Notes for Agents
 

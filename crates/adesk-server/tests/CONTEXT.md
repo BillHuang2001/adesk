@@ -9,8 +9,8 @@ These tests are the acceptance gate for Phase 2 — they exercise the compositio
 
 Phase 1 status: **plan only**. No test files exist yet because `adesk-testkit`
 has no `Cargo.toml`, so a dev-dependency cannot be declared. When testkit lands:
-add `adesk-testkit.workspace = true` to `[dev-dependencies]` and write the suites
-below.
+add `adesk-testkit.workspace = true`, `adesk-client.workspace = true` and
+`tempfile.workspace = true` to `[dev-dependencies]` and write the suites below.
 
 ## Harness
 

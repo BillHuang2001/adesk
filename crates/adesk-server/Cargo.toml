@@ -40,8 +40,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# Used by the Phase 2 E2E suites in ./tests/ (see ./tests/CONTEXT.md).
-# `adesk-testkit` becomes a dev-dependency when that crate lands a manifest.
-[dev-dependencies]
-adesk-client.workspace = true
-tempfile.workspace = true
+# No dev-dependencies yet: Phase 1 has no test targets. Phase 2 adds
+# `adesk-testkit` (harness), `adesk-client` (protocol driver) and `tempfile`
+# (temp sockets) when `./tests/` suites land — see ./tests/CONTEXT.md.

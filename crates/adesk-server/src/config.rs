@@ -34,9 +34,16 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    /// A default configuration (equivalent to [`ServerConfig::default`]).
-    pub fn new() -> ServerConfig {
-        ServerConfig::default()
+    /// A configuration for `socket_path` and `compositor` (the constructor
+    /// `adesk-testkit`'s harness uses); `app_dirs` starts as `None`.
+    ///
+    /// Use [`ServerConfig::default`] for environment-resolved defaults.
+    pub fn new(socket_path: impl Into<PathBuf>, compositor: CompositorConfig) -> ServerConfig {
+        ServerConfig {
+            socket_path: socket_path.into(),
+            compositor,
+            app_dirs: None,
+        }
     }
 
     /// Overrides the socket path.
