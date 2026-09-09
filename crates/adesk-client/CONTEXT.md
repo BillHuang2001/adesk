@@ -115,7 +115,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 
 ## Dependencies
 
-- `adesk-core` (ids, geometry, `WindowInfo`/`AppInfo`, `Observation`, `RuntimeEvent`, `ErrorCode`, `ImageBuffer`), `adesk-proto` (wire frames/payloads), `tokio` (net/sync/io-util/rt), `futures` (`Stream`), `serde`/`serde_json`, `base64`, `image` (PNG decode), `thiserror`, `tracing`; dev: `tempfile`.
+- `adesk-core` (ids, geometry, `WindowInfo`/`AppInfo`, `Observation`, `RuntimeEvent`, `ErrorCode`, `ImageBuffer`), `adesk-proto` (wire frames/payloads), `tokio` (net/sync/io-util/rt), `futures` (`Stream`), `serde`/`serde_json`, `image` (PNG decode), `thiserror`, `tracing`; dev: `base64` (test payloads only — `src/` decodes via `ImagePayload::decode_data`), `tempfile`.
 - **Required `adesk-proto` surface** (the client's entire coupling — reconcile here first if proto's API differs):
   - `PROTOCOL_VERSION: u32`
   - `Codec` trait (`encode(&Frame) -> Result<Vec<u8>, _>`, `decode(&[u8]) -> Result<Frame, _>`, both terminator-free) implemented by the unit struct `NdjsonCodec`
