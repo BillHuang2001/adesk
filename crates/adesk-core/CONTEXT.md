@@ -45,7 +45,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 ### event (`src/event.rs`)
 - `EventKind` (9 variants, snake_case serde).
 - `RuntimeEvent` (9 struct variants, every one carrying `seq` + `ts_ms`) + `seq()`, `ts_ms()`, `window_id()`, `kind()`.
-- `Observation` (16 fields per core-api).
+- `Observation` (15 fields per core-api).
 - `RuntimeEvent` serde: internally tagged `{"type":"window_created",...}`; the external AGP event frame is `adesk-proto`'s shape.
 
 ### error (`src/error.rs`)
