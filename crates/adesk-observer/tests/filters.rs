@@ -4,24 +4,19 @@
 mod common;
 
 use adesk_core::{ActionId, ErrorCode, WindowId};
-use adesk_observer::{
-    Error, ObserverService, QuietSpec, StateSnapshot, WaitSpec, WindowSnapshot,
-};
+use adesk_observer::{Error, ObserverService, QuietSpec, StateSnapshot, WaitSpec, WindowSnapshot};
 
 /// Events before the action must not count.
 /// `record_action` at watermark 3, then commit seq 4 and commit seq 5.
 /// Expect: `after_action == Some(id)`, `commits == 2`, `last_commit_seq == 5`.
-#[tokio::test(start_paused = true)]async fn after_action_excludes_earlier_events() {
+#[tokio::test(start_paused = true)]
+async fn after_action_excludes_earlier_events() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     // Two pre-action commits advance the watermark to 3.
     observer.handle_event(&common::commit(2, 10, 7, 1, &[common::rect(0, 0, 4, 4)]));
     observer.handle_event(&common::commit(3, 20, 7, 2, &[common::rect(0, 0, 4, 4)]));
-    let action = observer.record_action(
-        adesk_observer::ActionKind::Click,
-        Some(WindowId(7)),
-        None,
-    );
+    let action = observer.record_action(adesk_observer::ActionKind::Click, Some(WindowId(7)), None);
     assert_eq!(action, ActionId(1), "the first recorded action is 1");
     assert_eq!(
         observer.action_seq(action),
@@ -29,7 +24,9 @@ use adesk_observer::{
         "the action is anchored at watermark 3"
     );
 
-    let spec = QuietSpec::new().window(WindowId(7)).after_action(ActionId(1));
+    let spec = QuietSpec::new()
+        .window(WindowId(7))
+        .after_action(ActionId(1));
     let handle = tokio::spawn({
         let observer = observer.clone();
         async move { observer.wait_for_quiet(spec).await }
@@ -53,13 +50,17 @@ use adesk_observer::{
 /// `after_action` naming an id the observer never allocated must fail with
 /// `Error::UnknownAction` (mapped to AGP `invalid_request`), never silently
 /// produce an observation.
-#[tokio::test(start_paused = true)]async fn after_action_unknown_action_is_error() {
+#[tokio::test(start_paused = true)]
+async fn after_action_unknown_action_is_error() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     let spec = QuietSpec::new()
         .window(WindowId(7))
         .after_action(ActionId(999));
-    let error: Error = observer.wait_for_quiet(spec).await.expect_err("unknown action");
+    let error: Error = observer
+        .wait_for_quiet(spec)
+        .await
+        .expect_err("unknown action");
     assert!(matches!(error, Error::UnknownAction(ActionId(999))));
 
     // Crate-boundary mapping: an unknown action is a bad request, not a wait error.
@@ -71,13 +72,17 @@ use adesk_observer::{
 /// `since_commit = 1`: commits 1 and 2 exist before the wait, commit 3 during.
 /// Expect: only commit 3 counts (`commits == 1`, `last_commit_seq == 3`);
 /// a lifecycle event during the wait still counts (not commit-numbered).
-#[tokio::test(start_paused = true)]async fn since_commit_filters_commits_only() {
+#[tokio::test(start_paused = true)]
+async fn since_commit_filters_commits_only() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     // Commits 1 and 2 already exist before the wait starts.
     observer.handle_event(&common::commit(2, 10, 7, 1, &[common::rect(0, 0, 2, 2)]));
     observer.handle_event(&common::commit(3, 20, 7, 2, &[common::rect(0, 0, 2, 2)]));
-    let spec = WaitSpec::new().window(WindowId(7)).since_commit(1).timeout_ms(100);
+    let spec = WaitSpec::new()
+        .window(WindowId(7))
+        .since_commit(1)
+        .timeout_ms(100);
     let handle = tokio::spawn({
         let observer = observer.clone();
         async move { observer.wait_for_change(spec).await }
@@ -104,7 +109,8 @@ use adesk_observer::{
 /// Two windows, commits on both; a window-filtered wait must only count its own
 /// window: `commits == 1`, `changed_regions` from that window only,
 /// `new_windows`/`destroyed_windows` only for the filtered window.
-#[tokio::test(start_paused = true)]async fn window_filter_ignores_other_windows() {
+#[tokio::test(start_paused = true)]
+async fn window_filter_ignores_other_windows() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     observer.handle_event(&common::created(2, 0, 8));
@@ -131,7 +137,10 @@ use adesk_observer::{
         vec![common::rect(10, 10, 4, 4)],
         "damage of other windows is not reported"
     );
-    assert_eq!(observation.last_commit_seq, 1, "window 7's commit watermark");
+    assert_eq!(
+        observation.last_commit_seq, 1,
+        "window 7's commit watermark"
+    );
     assert!(
         observation.new_windows.is_empty(),
         "window 9 was created, but it is not the filtered window"
@@ -148,7 +157,8 @@ use adesk_observer::{
 
 /// A wait on a window the observer never saw is `Error::UnknownWindow`
 /// (AGP `unknown_window`), not a timeout.
-#[tokio::test(start_paused = true)]async fn unknown_window_is_error() {
+#[tokio::test(start_paused = true)]
+async fn unknown_window_is_error() {
     let observer = ObserverService::new();
     let spec = WaitSpec::new().window(WindowId(99)).timeout_ms(50);
     let error: Error = observer
@@ -167,7 +177,8 @@ use adesk_observer::{
 /// plus a disjoint `(50,50,4,4)`.
 /// Expect: `changed_regions` is `Region::simplified()` of the union, clipped to
 /// the window geometry when known (via `resync`), sorted by `(y, x, h, w)`.
-#[tokio::test(start_paused = true)]async fn changed_regions_are_union_simplified_and_clipped() {
+#[tokio::test(start_paused = true)]
+async fn changed_regions_are_union_simplified_and_clipped() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     // Geometry must be known *before* the commits: damage is clipped to it.
@@ -225,7 +236,8 @@ use adesk_observer::{
 /// `popup_disappeared`.
 /// Expect: `title_changed == true`, `focus_changed == Some(true)`,
 /// `popups_appeared == [3]`, `popups_disappeared == [3]`.
-#[tokio::test(start_paused = true)]async fn title_focus_and_popup_flags_are_reported() {
+#[tokio::test(start_paused = true)]
+async fn title_focus_and_popup_flags_are_reported() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     let spec = WaitSpec::new().window(WindowId(7)).timeout_ms(100);
@@ -254,7 +266,8 @@ use adesk_observer::{
 /// Global (unfiltered) wait across two windows: one created, one destroyed.
 /// Expect: `new_windows == [WindowId(8)]`, `destroyed_windows == [WindowId(7)]`,
 /// `last_commit_seq` = global max, `window_id == None`.
-#[tokio::test(start_paused = true)]async fn new_and_destroyed_windows_are_reported_globally() {
+#[tokio::test(start_paused = true)]
+async fn new_and_destroyed_windows_are_reported_globally() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     let spec = WaitSpec::new().timeout_ms(100);
