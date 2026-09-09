@@ -1,0 +1,23 @@
+# adesk-app-registry — XDG application registry for the ADesk runtime.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift. Sync only: no tokio, no async, no Smithay. The only I/O is
+# filesystem reads during `AppRegistry::scan` and process spawn during
+# `AppRegistry::launch` (both behind injectable seams).
+[package]
+name = "adesk-app-registry"
+description = "ADesk XDG application registry: .desktop discovery/parsing, Exec field-code expansion, process launch and window correlation."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
