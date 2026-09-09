@@ -181,7 +181,7 @@ Validation recipe (all workspace members now have manifests, so the crate builds
 
 ## Dependencies
 
-- Internal: `adesk-core` (landed, implemented — domain types only), `adesk-wm` (unlanded; contract above), `adesk-render` (unlanded; declared for Phase 2, unused in Phase 1).
+- Internal: `adesk-core` (landed, implemented — domain types only), `adesk-wm` (landed; API consumed by `WmBridge`), `adesk-render` (landed; declared but unused in Phase 1).
 - External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `wayland-server 0.31`; `calloop 0.14`; `tokio 1` (sync/rt/time/net); `thiserror 2`; `tracing 0.1`; `libc 0.2`.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.
