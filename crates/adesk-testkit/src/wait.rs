@@ -19,21 +19,48 @@ pub async fn wait_until<F>(timeout: Duration, what: &'static str, mut cond: F) -
 where
     F: FnMut() -> bool,
 {
-    let _ = (&mut cond, timeout, what);
-    todo!("stub: implementation phase — immediate check, then poll, Timeout at deadline")
+    if cond() {
+        return Ok(());
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(timeout_error(what, timeout));
+        }
+        tokio::time::sleep((deadline - now).min(DEFAULT_POLL_INTERVAL)).await;
+        if cond() {
+            return Ok(());
+        }
+    }
 }
 
 /// Waits until the future produced by `cond` resolves to `true`.
 ///
 /// Unlike [`wait_until`], the condition is awaited directly (no polling interval); the
 /// overall deadline still applies.
-pub async fn wait_until_async<F, Fut>(timeout: Duration, what: &'static str, mut cond: F) -> Result<()>
+pub async fn wait_until_async<F, Fut>(
+    timeout: Duration,
+    what: &'static str,
+    mut cond: F,
+) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
 {
-    let _ = (&mut cond, timeout, what);
-    todo!("stub: implementation phase — wrap the whole loop in tokio::time::timeout")
+    let satisfied = tokio::time::timeout(timeout, async move {
+        loop {
+            if cond().await {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    match satisfied {
+        Ok(()) => Ok(()),
+        Err(_elapsed) => Err(timeout_error(what, timeout)),
+    }
 }
 
 /// Polls `f` every `interval` until it yields `Some(value)`.
@@ -48,8 +75,20 @@ pub async fn poll_until<T, F>(
 where
     F: FnMut() -> Option<T>,
 {
-    let _ = (&mut f, timeout, interval, what);
-    todo!("stub: implementation phase — immediate check, then sleep(interval) between polls")
+    if let Some(value) = f() {
+        return Ok(value);
+    }
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return Err(timeout_error(what, timeout));
+        }
+        tokio::time::sleep(interval.min(deadline - now)).await;
+        if let Some(value) = f() {
+            return Ok(value);
+        }
+    }
 }
 
 /// Synchronous variant of [`wait_until`] for `Drop` paths and non-async tests.
@@ -60,14 +99,23 @@ pub fn block_until<F>(timeout: Duration, what: &'static str, mut cond: F) -> Res
 where
     F: FnMut() -> bool,
 {
-    let _ = (&mut cond, timeout, what);
-    todo!("stub: implementation phase — std::thread::sleep in bounded increments")
+    if cond() {
+        return Ok(());
+    }
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let now = std::time::Instant::now();
+        if now >= deadline {
+            return Err(timeout_error(what, timeout));
+        }
+        std::thread::sleep((deadline - now).min(DEFAULT_POLL_INTERVAL));
+        if cond() {
+            return Ok(());
+        }
+    }
 }
 
 /// Builds the canonical timeout error for `what`.
-// Not yet called: the Phase 1 waiters are `todo!()` stubs; Phase 2 uses this in
-// `wait_until`, `poll_until` and `block_until`.
-#[allow(dead_code)]
 pub(crate) fn timeout_error(what: &'static str, timeout: Duration) -> TestkitError {
     TestkitError::Timeout { what, timeout }
 }

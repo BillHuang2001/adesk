@@ -9,14 +9,16 @@
 //! loudly when the runtime cannot do what the tests need.
 
 use std::collections::HashSet;
+use std::ops::RangeInclusive;
 
-use wayland_client::globals::GlobalList;
+use wayland_client::globals::{BindError, GlobalList};
 use wayland_client::protocol::{wl_compositor, wl_shm};
-use wayland_client::QueueHandle;
+use wayland_client::{Dispatch, Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 
+use super::shm::supported_formats;
 use super::state::ClientState;
 
 /// Minimum `wl_compositor` version the test client requires.
@@ -100,26 +102,82 @@ impl Globals {
 
 /// Binds the required globals on `qhandle` and negotiates versions.
 ///
-/// Phase 2 steps:
-///
 /// 1. `list.bind::<wl_compositor::WlCompositor, ClientState, ()>(qhandle,
 ///    REQUIRED_COMPOSITOR_VERSION..=MAX_COMPOSITOR_VERSION, ())`, likewise `wl_shm`
 ///    (`1..=3`) and `xdg_wm_base` (`1..=7`). `GlobalList::bind` returns the lower of the
 ///    advertised version and the requested maximum, which is the negotiation rule.
-/// 2. Map `BindError::NotPresent` to
+/// 2. `BindError::NotPresent` maps to
 ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported)("compositor does not advertise `<interface>`") and
 ///    `BindError::UnsupportedVersion` to `Unsupported`("`<interface>` vN is too old;
 ///    need vM"), so a misconfigured runtime fails with a named capability, never a panic.
-/// 3. Collect the SHM formats: `wl_shm.format` events arrive on the event queue, so the
-///    caller must dispatch at least one reader cycle before reading them; `bind_globals`
-///    records what it has seen and the caller re-checks `supports_argb8888()` after the
-///    first roundtrip. (`wl_shm` always advertises `ARGB8888` and `XRGB8888` in practice;
-///    the check exists so a broken runtime cannot silently corrupt every pixel
-///    assertion.)
+/// 3. The returned [`Globals`] seeds its formats from [`supported_formats`], because
+///    `wl_shm.format` events only arrive on the event queue: the caller must complete a
+///    reader cycle before `supports_argb8888()` means anything, then re-read the real
+///    formats. (`wl_shm` always advertises `ARGB8888` and `XRGB8888` in practice; the
+///    check exists so a broken runtime cannot silently corrupt every pixel assertion.)
 pub(crate) fn bind_globals(
     list: &GlobalList,
     qhandle: &QueueHandle<ClientState>,
 ) -> Result<Globals> {
-    let _ = (list, qhandle);
-    todo!("Phase 2: bind wl_compositor/wl_shm/xdg_wm_base with min(server, max) negotiation, collect SHM formats")
+    let compositor = bind_required::<wl_compositor::WlCompositor>(
+        list,
+        qhandle,
+        REQUIRED_COMPOSITOR_VERSION..=MAX_COMPOSITOR_VERSION,
+    )?;
+    let shm =
+        bind_required::<wl_shm::WlShm>(list, qhandle, REQUIRED_SHM_VERSION..=MAX_SHM_VERSION)?;
+    let xdg_wm_base = bind_required::<xdg_wm_base::XdgWmBase>(
+        list,
+        qhandle,
+        REQUIRED_XDG_WM_BASE_VERSION..=MAX_XDG_WM_BASE_VERSION,
+    )?;
+
+    Ok(Globals {
+        compositor_version: compositor.version(),
+        shm_version: shm.version(),
+        xdg_wm_base_version: xdg_wm_base.version(),
+        // `wl_shm.format` events are dispatched after this snapshot is taken, so record
+        // the formats the harness can write; the caller refines `ClientState::shm_formats`
+        // from the real events and re-checks `supports_argb8888()` after the first
+        // roundtrip.
+        shm_formats: supported_formats(),
+        compositor,
+        shm,
+        xdg_wm_base,
+    })
+}
+
+/// Binds one required global at `min(server_version, requested_max)`.
+///
+/// `version` is the *required..=interface_max* range: a server below the lower bound is a
+/// named capability failure, never a silent downgrade or a panic.
+fn bind_required<I>(
+    list: &GlobalList,
+    qhandle: &QueueHandle<ClientState>,
+    version: RangeInclusive<u32>,
+) -> Result<I>
+where
+    I: Proxy + 'static,
+    ClientState: Dispatch<I, ()>,
+{
+    let interface = I::interface().name;
+    let required = *version.start();
+    // `BindError::UnsupportedVersion` carries no version, so read what the server
+    // advertised from the registry contents to name it in the error.
+    let advertised = list
+        .contents()
+        .clone_list()
+        .iter()
+        .find(|global| global.interface == interface)
+        .map(|global| global.version)
+        .unwrap_or(0);
+    list.bind::<I, ClientState, ()>(qhandle, version, ())
+        .map_err(|err| match err {
+            BindError::NotPresent => {
+                TestkitError::Unsupported(format!("compositor does not advertise `{interface}`"))
+            }
+            BindError::UnsupportedVersion => TestkitError::Unsupported(format!(
+                "`{interface}` v{advertised} is too old; need v{required}"
+            )),
+        })
 }
