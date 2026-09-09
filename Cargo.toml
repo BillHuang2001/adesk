@@ -1,0 +1,68 @@
+# ADesk — AI-native headless Wayland runtime (workspace manifest)
+#
+# This is a pure virtual workspace. Every crate under ./crates/ is a workspace
+# member. All third-party dependency versions MUST be declared here in
+# [workspace.dependencies]; member crates reference them with
+# `<dep>.workspace = true` so versions can never drift between crates.
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT OR Apache-2.0"
+repository = "https://example.invalid/adesk"
+
+[workspace.dependencies]
+# --- internal crates ---
+adesk-core = { path = "crates/adesk-core" }
+adesk-proto = { path = "crates/adesk-proto" }
+adesk-app-registry = { path = "crates/adesk-app-registry" }
+adesk-wm = { path = "crates/adesk-wm" }
+adesk-observer = { path = "crates/adesk-observer" }
+adesk-render = { path = "crates/adesk-render" }
+adesk-compositor = { path = "crates/adesk-compositor" }
+adesk-inspector = { path = "crates/adesk-inspector" }
+adesk-client = { path = "crates/adesk-client" }
+adesk-server = { path = "crates/adesk-server" }
+adesk-agent = { path = "crates/adesk-agent" }
+adesk-testkit = { path = "crates/adesk-testkit" }
+
+# --- wayland / smithay stack ---
+smithay = { version = "0.7.0", default-features = false }
+wayland-server = "0.31"
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["server", "client", "staging", "unstable"] }
+calloop = "0.14"
+calloop-wayland-source = "0.3"
+
+# --- async / runtime ---
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros", "signal", "process"] }
+futures = "0.3"
+async-trait = "0.1"
+
+# --- serialization / protocol ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+# --- errors / logging / cli ---
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+# --- imaging / misc ---
+image = { version = "0.25", default-features = false, features = ["png"] }
+tempfile = "3"
+libc = "0.2"
+bitflags = "2"
+
+# --- agent LLM providers ---
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+[profile.release]
+debug = 1
