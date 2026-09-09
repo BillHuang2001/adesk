@@ -622,23 +622,27 @@ fn concurrent_requests_on_one_connection_all_resolve() {
 
     // Nine mixed requests in flight at once; each must resolve with its own
     // response (§1: requests multiplex on one connection, ids disambiguate).
-    let (ping, windows, focus, apps, app, observed, changed, inspect, quiet) = t.block_on(async {
-        tokio::join!(
-            client.ping(),
-            client.list_windows(),
-            client.get_focus(),
-            client.list_apps(None, false),
-            client.get_app(&missing_app),
-            client.observe(
-                ObserveRequest::timeout()
-                    .timeout_ms(150)
-                    .include_image(false)
-            ),
-            client.wait_for_change(WaitForChangeRequest::default().timeout_ms(150)),
-            client.inspect_capture(InspectCaptureRequest::default()),
-            client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(150)),
-        )
-    });
+    // The typed SDK has no per-request deadline, so the whole join is bounded
+    // by the harness: a runtime that accepted but never answered would hang the
+    // test binary forever instead of failing.
+    let (ping, windows, focus, apps, app, observed, changed, inspect, quiet) =
+        t.block_on_timeout(async {
+            tokio::join!(
+                client.ping(),
+                client.list_windows(),
+                client.get_focus(),
+                client.list_apps(None, false),
+                client.get_app(&missing_app),
+                client.observe(
+                    ObserveRequest::timeout()
+                        .timeout_ms(150)
+                        .include_image(false)
+                ),
+                client.wait_for_change(WaitForChangeRequest::default().timeout_ms(150)),
+                client.inspect_capture(InspectCaptureRequest::default()),
+                client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(150)),
+            )
+        });
 
     let ping = expect_ok(ping, "concurrent ping");
     assert_eq!(ping.protocol_version, adesk_server::PROTOCOL_VERSION);
@@ -733,9 +737,17 @@ fn pipelined_requests_get_exactly_one_response_each() {
         let mut ids = Vec::new();
         for index in 0..3 {
             let response = raw.expect_json(REQUEST_TIMEOUT).await;
+            // All three pipelined methods — `ping`, `list_windows`, `get_focus` —
+            // succeed on a fresh runtime, so every response must carry a `result`
+            // and no `error`; accepting either would let a server that fails all
+            // three still pass.
             assert!(
-                response.get("result").is_some() || response.get("error").is_some(),
-                "pipelined response {index} has neither `result` nor `error`: {response}"
+                response.get("result").is_some(),
+                "pipelined response {index} must carry a `result`: {response}"
+            );
+            assert!(
+                response.get("error").is_none(),
+                "pipelined response {index} must not carry an `error`: {response}"
             );
             let id = response["id"]
                 .as_u64()

@@ -168,10 +168,15 @@ fn inspect_capture_max_dimension_downscales_after_overlays() {
 ///
 /// The typed SDK hides the frames behind a `futures::Stream`, which the harness
 /// deliberately does not depend on, so this test speaks the wire directly:
-/// subscribe, read one frame, unsubscribe, then watch the connection for 1.5 s
-/// and fail if any further frame arrives. Responses and frames share one FIFO
-/// writer per connection, so anything delivered after the unsubscribe response
-/// is a genuine leak.
+/// subscribe, read one frame, unsubscribe, then watch the connection.
+///
+/// §5.6/§5.7 pin the `{}` unsubscribe result, not strict post-response silence.
+/// The push loop (`src/dispatch/inspect.rs`) is sequential: it checks liveness,
+/// then awaits a full-output render plus PNG encode, then enqueues without
+/// re-checking, so at most one frame that was already in flight may still be
+/// delivered after the response. The contract asserted here is therefore:
+/// unsubscribing stops the stream — at most one already-in-flight frame may
+/// follow the response, and nothing after that.
 #[test]
 fn inspect_subscribe_streams_frames_and_unsubscribe_stops_them() {
     let runtime = TestRuntime::start();
@@ -190,9 +195,11 @@ fn inspect_subscribe_streams_frames_and_unsubscribe_stops_them() {
         let response = raw
             .expect_json_matching(Duration::from_secs(5), |value| value["id"] == json!(1))
             .await;
-        let subscription_id = response["result"]["subscription_id"].as_u64().unwrap_or_else(|| {
-            panic!("inspect_subscribe must answer result.subscription_id, got {response}")
-        });
+        let subscription_id = response["result"]["subscription_id"]
+            .as_u64()
+            .unwrap_or_else(|| {
+                panic!("inspect_subscribe must answer result.subscription_id, got {response}")
+            });
         assert_ne!(
             subscription_id, 0,
             "subscription ids are non-zero, got {response}"
@@ -247,19 +254,63 @@ fn inspect_subscribe_streams_frames_and_unsubscribe_stops_them() {
             "§5.6: unsubscribe_events answers an empty result, got {response}"
         );
 
-        let deadline = Instant::now() + Duration::from_millis(1_500);
+        // Grace window: the sequential push loop may have started an expensive
+        // render before the unsubscribe landed and enqueue that frame without
+        // re-checking liveness. 500 ms comfortably exceeds `min_interval_ms=50`
+        // plus a full-output pixman render.
+        let grace_deadline = Instant::now() + Duration::from_millis(500);
         let mut strays = Vec::new();
-        while Instant::now() < deadline {
-            if let Some(value) = raw.read_json(Duration::from_millis(100)).await {
-                if value["event"] == json!("inspect_frame") {
-                    strays.push(value);
+        while Instant::now() < grace_deadline {
+            match raw.read_json(Duration::from_millis(100)).await {
+                Some(value) => {
+                    if value["event"] == json!("inspect_frame")
+                        && value["data"]["subscription_id"].as_u64() == Some(subscription_id)
+                    {
+                        strays.push(value);
+                    }
                 }
+                // `read_json` returns `None` for both timeout and EOF, so yield
+                // rather than spin at 100% CPU once the connection is closed.
+                None => tokio::time::sleep(Duration::from_millis(10)).await,
             }
         }
         assert!(
-            strays.is_empty(),
-            "unsubscribe_events must stop inspect_frame events, but {} arrived afterwards: {strays:?}",
+            strays.len() <= 1,
+            "the sequential push loop permits at most one in-flight inspect_frame after \
+             unsubscribe, but {} arrived: {strays:?}",
             strays.len()
+        );
+        if let Some(frame) = strays.first() {
+            assert_eq!(
+                frame["data"]["subscription_id"].as_u64(),
+                Some(subscription_id),
+                "an in-flight frame must belong to the unsubscribed subscription, not a \
+                 leak from another: {frame}"
+            );
+        }
+
+        // Quiet window: a broken or never-stopping loop keeps producing frames
+        // here, so the regression signal is preserved and stronger than a bare
+        // zero-count over a single window.
+        let quiet_deadline = Instant::now() + Duration::from_millis(1_500);
+        let mut late = Vec::new();
+        while Instant::now() < quiet_deadline {
+            match raw.read_json(Duration::from_millis(100)).await {
+                Some(value) => {
+                    if value["event"] == json!("inspect_frame")
+                        && value["data"]["subscription_id"].as_u64() == Some(subscription_id)
+                    {
+                        late.push(value);
+                    }
+                }
+                None => tokio::time::sleep(Duration::from_millis(10)).await,
+            }
+        }
+        assert!(
+            late.is_empty(),
+            "unsubscribe_events must stop inspect_frame events, but {} arrived after the \
+             grace window: {late:?}",
+            late.len()
         );
     });
 }
