@@ -92,8 +92,19 @@ impl FillPattern {
     /// Coordinates outside the image are still evaluated (callers clamp); the function is
     /// total so tests can ask for any pixel.
     pub fn at(&self, x: u32, y: u32, size: Size) -> [u8; 4] {
-        let _ = (x, y, size);
-        todo!("stub: implementation phase — exact semantics documented above")
+        match *self {
+            FillPattern::Solid(colour) => colour,
+            FillPattern::Checker { size: cell, a, b } => {
+                let cell = cell.max(1) as u64;
+                if (x as u64 / cell + y as u64 / cell) % 2 == 0 {
+                    a
+                } else {
+                    b
+                }
+            }
+            FillPattern::GradientH { from, to } => gradient_at(from, to, x, size.w),
+            FillPattern::GradientV { from, to } => gradient_at(from, to, y, size.h),
+        }
     }
 
     /// Encodes the pattern as one CLI argument, used to pass it to the helper binary.
@@ -107,13 +118,75 @@ impl FillPattern {
     /// gradient-v:RRGGBB[AA]:RRGGBB[AA]
     /// ```
     pub fn to_cli_arg(&self) -> String {
-        todo!("stub: implementation phase — grammar documented above")
+        match *self {
+            FillPattern::Solid(colour) => format!("solid:{}", hex_colour(colour)),
+            FillPattern::Checker { size, a, b } => {
+                format!("checker:{size}:{}:{}", hex_colour(a), hex_colour(b))
+            }
+            FillPattern::GradientH { from, to } => {
+                format!("gradient-h:{}:{}", hex_colour(from), hex_colour(to))
+            }
+            FillPattern::GradientV { from, to } => {
+                format!("gradient-v:{}:{}", hex_colour(from), hex_colour(to))
+            }
+        }
     }
 
     /// Decodes a pattern produced by [`FillPattern::to_cli_arg`].
+    ///
+    /// Malformed input returns [`TestkitError::Unsupported`] with the offending argument in
+    /// the message, so a CLI that prints the error names the bad value.
     pub fn from_cli_arg(arg: &str) -> Result<FillPattern> {
-        let _ = arg;
-        todo!("stub: implementation phase — grammar documented on to_cli_arg")
+        let mut parts = arg.split(':');
+        let kind = parts.next().unwrap_or_default();
+        let fields: Vec<&str> = parts.collect();
+        let colour = |field: &str| parse_colour(field).map_err(|detail| cli_error(arg, detail));
+        match kind {
+            "solid" => match fields.as_slice() {
+                [colour_arg] => Ok(FillPattern::Solid(colour(colour_arg)?)),
+                _ => Err(cli_error(
+                    arg,
+                    format!("solid needs exactly one colour, got {}", fields.len()),
+                )),
+            },
+            "checker" => match fields.as_slice() {
+                [size, a, b] => {
+                    let size = size.parse::<u32>().map_err(|error| {
+                        cli_error(arg, format!("invalid checker size `{size}`: {error}"))
+                    })?;
+                    Ok(FillPattern::Checker {
+                        size,
+                        a: colour(a)?,
+                        b: colour(b)?,
+                    })
+                }
+                _ => Err(cli_error(
+                    arg,
+                    format!("checker needs SIZE and two colours, got {}", fields.len()),
+                )),
+            },
+            "gradient-h" => match fields.as_slice() {
+                [from, to] => Ok(FillPattern::GradientH {
+                    from: colour(from)?,
+                    to: colour(to)?,
+                }),
+                _ => Err(cli_error(
+                    arg,
+                    format!("gradient-h needs two colours, got {}", fields.len()),
+                )),
+            },
+            "gradient-v" => match fields.as_slice() {
+                [from, to] => Ok(FillPattern::GradientV {
+                    from: colour(from)?,
+                    to: colour(to)?,
+                }),
+                _ => Err(cli_error(
+                    arg,
+                    format!("gradient-v needs two colours, got {}", fields.len()),
+                )),
+            },
+            other => Err(cli_error(arg, format!("unknown pattern kind `{other}`"))),
+        }
     }
 
     /// Validates that every colour in the pattern is opaque, returning
@@ -138,4 +211,62 @@ impl FillPattern {
             )))
         }
     }
+}
+
+/// Interpolates `from → to` at `pos` along an axis of `len` pixels.
+///
+/// Per channel: `from[c] + round_half_up((to[c] - from[c]) * pos / (len - 1))` for `len > 1`
+/// and `from` otherwise, with `pos` clamped to `len - 1` and half-up rounding (ties toward
+/// `+∞`) on the integer quotient. `i64` intermediates keep the function total for any `u32`
+/// coordinate; the result is exactly the documented `i32` arithmetic for realistic sizes.
+fn gradient_at(from: [u8; 4], to: [u8; 4], pos: u32, len: u32) -> [u8; 4] {
+    if len <= 1 {
+        return from;
+    }
+    let denominator = (len - 1) as i64;
+    let pos = (pos as i64).min(denominator);
+    let mut out = from;
+    for (channel, value) in out.iter_mut().enumerate() {
+        let delta = to[channel] as i64 - from[channel] as i64;
+        // `round_half_up(num / denominator)` for `denominator > 0`, ties toward +∞.
+        let rounded = (2 * delta * pos + denominator).div_euclid(2 * denominator);
+        *value = (from[channel] as i64 + rounded).clamp(0, 255) as u8;
+    }
+    out
+}
+
+/// `RRGGBB` when the colour is opaque, `RRGGBBAA` otherwise (lowercase hex).
+fn hex_colour(colour: [u8; 4]) -> String {
+    if colour[3] == 255 {
+        format!("{:02x}{:02x}{:02x}", colour[0], colour[1], colour[2])
+    } else {
+        format!(
+            "{:02x}{:02x}{:02x}{:02x}",
+            colour[0], colour[1], colour[2], colour[3]
+        )
+    }
+}
+
+/// Parses `RRGGBB` or `RRGGBBAA` (case-insensitive) into opaque-by-default RGBA.
+fn parse_colour(field: &str) -> std::result::Result<[u8; 4], String> {
+    if field.len() != 6 && field.len() != 8 {
+        return Err(format!(
+            "colour `{field}` must have 6 or 8 hex digits, got {}",
+            field.len()
+        ));
+    }
+    if !field.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("colour `{field}` is not hexadecimal"));
+    }
+    let byte = |index: usize| {
+        u8::from_str_radix(&field[index * 2..index * 2 + 2], 16)
+            .expect("hex digits were validated above")
+    };
+    let alpha = if field.len() == 8 { byte(3) } else { 255 };
+    Ok([byte(0), byte(1), byte(2), alpha])
+}
+
+/// Builds the [`TestkitError::Unsupported`] for a malformed CLI pattern.
+fn cli_error(arg: &str, detail: impl std::fmt::Display) -> TestkitError {
+    TestkitError::Unsupported(format!("invalid fill pattern `{arg}`: {detail}"))
 }

@@ -29,8 +29,14 @@ use std::path::{Path, PathBuf};
 
 use adesk_core::{ImageBuffer, Rect};
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
+
+/// Environment variable overriding [`ImageAssert::dump_on_failure`]'s target directory.
+const ASSERT_DIR_ENV: &str = "ADESK_TEST_ASSERT_DIR";
+
+/// Subdirectory of `std::env::temp_dir()` used when [`ASSERT_DIR_ENV`] is unset.
+const DUMP_DIR_NAME: &str = "adesk-testkit-dumps";
 
 /// An assertion view over one [`ImageBuffer`].
 ///
@@ -72,14 +78,17 @@ impl<'a> ImageAssert<'a> {
     ///
     /// # Panics
     ///
-    /// Panics when `(x, y)` is outside the image. Phase 2 message format:
+    /// Panics when `(x, y)` is outside the image. The message format is
     /// `"pixel (x, y) out of bounds for image WxH"` — the coordinates come first and the
     /// image size second, so a failure immediately shows which axis is wrong.
-    ///
-    /// Phase 2 implementation: delegate to [`ImageBuffer::pixel`] and panic on `None`.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
-        let _ = (x, y);
-        todo!("stub: implementation phase — ImageBuffer::pixel, panic with coordinates and image size")
+        self.image.pixel(x, y).unwrap_or_else(|| {
+            panic!(
+                "pixel ({x}, {y}) out of bounds for image {}x{}",
+                self.width(),
+                self.height()
+            )
+        })
     }
 
     /// Per-channel mean of the pixels inside `rect`.
@@ -93,11 +102,35 @@ impl<'a> ImageAssert<'a> {
     ///
     /// Panics when `rect.w == 0 || rect.h == 0`, when `rect.x < 0 || rect.y < 0`, or when
     /// the rect extends past the image (`rect.x + rect.w > width || rect.y + rect.h >
-    /// height`). Phase 2 message format:
+    /// height`). The message format is
     /// `"region {rect:?} out of bounds for image WxH"`.
     pub fn region_avg(&self, rect: Rect) -> [f32; 4] {
-        let _ = rect;
-        todo!("stub: implementation phase — bounds-check, then per-channel f32 mean over the rect")
+        let (width, height) = (self.width(), self.height());
+        let right = rect.x as i64 + rect.w as i64;
+        let bottom = rect.y as i64 + rect.h as i64;
+        if rect.w == 0
+            || rect.h == 0
+            || rect.x < 0
+            || rect.y < 0
+            || right > width as i64
+            || bottom > height as i64
+        {
+            panic!("region {rect:?} out of bounds for image {width}x{height}");
+        }
+        let mut sums = [0f32; 4];
+        for y in rect.y as i64..bottom {
+            for x in rect.x as i64..right {
+                let rgba = self
+                    .image
+                    .pixel(x as u32, y as u32)
+                    .expect("the rect was bounds-checked above");
+                for (sum, channel) in sums.iter_mut().zip(rgba) {
+                    *sum += channel as f32;
+                }
+            }
+        }
+        let count = rect.w as f32 * rect.h as f32;
+        sums.map(|sum| sum / count)
     }
 
     /// Asserts that every pixel equals `pattern`.
@@ -110,13 +143,20 @@ impl<'a> ImageAssert<'a> {
     /// # Panics
     ///
     /// Panics on the **first** mismatching pixel in row-major order, so the reported
-    /// coordinate is deterministic. Phase 2 message format:
+    /// coordinate is deterministic. The message format is
     /// `"pixel (x, y) = [r, g, b, a], expected [r, g, b, a] for pattern {pattern:?}"`.
     pub fn matches_pattern(&self, pattern: FillPattern) {
-        let _ = pattern;
-        todo!(
-            "stub: implementation phase — compare every pixel against FillPattern::at(x, y, size)"
-        )
+        let size = self.image.size();
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let actual = self.pixel(x, y);
+                let expected = pattern.at(x, y, size);
+                assert!(
+                    actual == expected,
+                    "pixel ({x}, {y}) = {actual:?}, expected {expected:?} for pattern {pattern:?}"
+                );
+            }
+        }
     }
 
     /// Asserts that every pixel matches `pattern` within `tolerance` per channel.
@@ -129,14 +169,34 @@ impl<'a> ImageAssert<'a> {
     ///
     /// # Panics
     ///
-    /// Panics on the first pixel whose worst channel exceeds `tolerance`. Phase 2 message
-    /// format: `"pixel (x, y) = [...], expected [...] ± tol for pattern {pattern:?} (worst
+    /// Panics on the first pixel whose worst channel exceeds `tolerance`. The message
+    /// format is `"pixel (x, y) = [...], expected [...] ± tol for pattern {pattern:?} (worst
     /// channel {index}, delta {delta})"`.
     pub fn matches_pattern_tol(&self, pattern: FillPattern, tolerance: u8) {
-        let _ = (pattern, tolerance);
-        todo!(
-            "stub: implementation phase — per-channel |a - b| <= tolerance against FillPattern::at"
-        )
+        let size = self.image.size();
+        for y in 0..self.height() {
+            for x in 0..self.width() {
+                let actual = self.pixel(x, y);
+                let expected = pattern.at(x, y, size);
+                let mut worst = (0usize, 0u8);
+                let mut within = true;
+                for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                    let delta = actual.abs_diff(expected);
+                    if delta > tolerance {
+                        within = false;
+                    }
+                    if delta > worst.1 {
+                        worst = (index, delta);
+                    }
+                }
+                assert!(
+                    within,
+                    "pixel ({x}, {y}) = {actual:?}, expected {expected:?} ± {tolerance} \
+                     for pattern {pattern:?} (worst channel {}, delta {})",
+                    worst.0, worst.1
+                );
+            }
+        }
     }
 
     /// Asserts that every pixel is within `tolerance` of the solid colour `rgba`.
@@ -150,8 +210,7 @@ impl<'a> ImageAssert<'a> {
     ///
     /// Same as [`ImageAssert::matches_pattern_tol`].
     pub fn matches_solid(&self, rgba: [u8; 4], tolerance: u8) {
-        let _ = (rgba, tolerance);
-        todo!("stub: implementation phase — delegate to matches_pattern_tol(FillPattern::Solid(rgba), tolerance)")
+        self.matches_pattern_tol(FillPattern::Solid(rgba), tolerance);
     }
 
     /// Asserts that `other` is **not** identical to this image.
@@ -164,13 +223,15 @@ impl<'a> ImageAssert<'a> {
     ///
     /// # Panics
     ///
-    /// Panics when the images are identical. Phase 2 message format:
+    /// Panics when the images are identical. The message format is
     /// `"images are identical (WxH)"`.
     pub fn differs_from(&self, other: &ImageBuffer) {
-        let _ = other;
-        todo!(
-            "stub: implementation phase — panic when sizes match and every logical pixel is equal"
-        )
+        assert!(
+            !equal_within(self.image, other, 0),
+            "images are identical ({}x{})",
+            self.width(),
+            self.height()
+        );
     }
 
     /// Asserts that `other` differs from this image by more than `tolerance` on at least one
@@ -182,27 +243,47 @@ impl<'a> ImageAssert<'a> {
     ///
     /// # Panics
     ///
-    /// Panics when the images are equal within `tolerance`. Phase 2 message format:
+    /// Panics when the images are equal within `tolerance`. The message format is
     /// `"images are equal within tolerance {tolerance} (WxH)"`.
     pub fn differs_from_tol(&self, other: &ImageBuffer, tolerance: u8) {
-        let _ = (other, tolerance);
-        todo!("stub: implementation phase — panic when every pixel channel differs by at most tolerance")
+        assert!(
+            !equal_within(self.image, other, tolerance),
+            "images are equal within tolerance {tolerance} ({}x{})",
+            self.width(),
+            self.height()
+        );
     }
 
     /// Encodes the image as PNG at `path`.
     ///
-    /// Phase 2 implementation: repack the logical pixels into a tightly packed RGBA8
-    /// buffer (dropping stride padding) and call `image::RgbaImage::from_raw` +
+    /// The logical pixels are repacked into a tightly packed RGBA8 buffer (dropping stride
+    /// padding) and written with `image::RgbaImage::from_raw` +
     /// `image::ImageBuffer::save`. An `image::ImageError` maps to
-    /// [`TestkitError::Io`](crate::TestkitError::Io) via `std::io::Error::other(e)`, so
-    /// there is exactly one IO error shape in the crate.
+    /// [`TestkitError::Io`] via `std::io::Error::other(e)`, so there is exactly one IO
+    /// error shape in the crate.
     ///
     /// Parent directories are **not** created; use [`ImageAssert::dump_on_failure`] for the
-    /// always-writable debug path. Returns [`TestkitError::Io`](crate::TestkitError::Io)
-    /// when the path is not writable or PNG encoding fails.
+    /// always-writable debug path. Returns [`TestkitError::Io`] when the path is not
+    /// writable or PNG encoding fails.
     pub fn save_png(&self, path: impl AsRef<Path>) -> Result<()> {
-        let _ = path.as_ref();
-        todo!("stub: implementation phase — repack to RGBA8, image::RgbaImage::from_raw + save, map ImageError to Io")
+        let size = self.image.size();
+        let mut packed = Vec::with_capacity(
+            (size.w as usize)
+                .saturating_mul(size.h as usize)
+                .saturating_mul(4),
+        );
+        for y in 0..size.h {
+            for x in 0..size.w {
+                packed.extend_from_slice(&self.pixel(x, y));
+            }
+        }
+        let rgba = image::RgbaImage::from_raw(size.w, size.h, packed).ok_or_else(|| {
+            TestkitError::Io(std::io::Error::other(
+                "repacked RGBA data does not match the image dimensions",
+            ))
+        })?;
+        rgba.save(path.as_ref())
+            .map_err(|error| TestkitError::Io(std::io::Error::other(error)))
     }
 
     /// Saves the image as `<dir>/<name>.png` for post-mortem inspection and returns the
@@ -214,14 +295,44 @@ impl<'a> ImageAssert<'a> {
     /// real filesystem problems. `name` is used verbatim as the file stem; callers pass a
     /// test-unique name such as `"click-target"`.
     ///
-    /// Phase 2 semantics: never panics — a write failure is returned as
-    /// [`TestkitError::Io`](crate::TestkitError::Io) so a test can report "assertion failed
-    /// and the dump could not be written" instead of masking the original failure. The
-    /// returned path is exactly the path written, so a test can print it or assert on it.
+    /// Never panics — a write failure is returned as [`TestkitError::Io`] so a test can
+    /// report "assertion failed and the dump could not be written" instead of masking the
+    /// original failure. The returned path is exactly the path written, so a test can print
+    /// it or assert on it.
     pub fn dump_on_failure(&self, name: &str) -> Result<PathBuf> {
-        let _ = name;
-        todo!("stub: implementation phase — resolve $ADESK_TEST_ASSERT_DIR else temp_dir()/adesk-testkit-dumps, create_dir_all, save_png")
+        let dir = match std::env::var(ASSERT_DIR_ENV) {
+            Ok(value) if !value.is_empty() => PathBuf::from(value),
+            _ => std::env::temp_dir().join(DUMP_DIR_NAME),
+        };
+        std::fs::create_dir_all(&dir)?;
+        let path = dir.join(format!("{name}.png"));
+        self.save_png(&path)?;
+        Ok(path)
     }
+}
+
+/// `true` when `left` and `right` have the same dimensions and every logical pixel channel
+/// differs by at most `tolerance`. Stride padding is never compared.
+fn equal_within(left: &ImageBuffer, right: &ImageBuffer, tolerance: u8) -> bool {
+    if left.width != right.width || left.height != right.height {
+        return false;
+    }
+    for y in 0..left.height {
+        for x in 0..left.width {
+            let (Some(left_pixel), Some(right_pixel)) = (left.pixel(x, y), right.pixel(x, y))
+            else {
+                return false;
+            };
+            if left_pixel
+                .iter()
+                .zip(right_pixel)
+                .any(|(left, right)| left.abs_diff(right) > tolerance)
+            {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 #[cfg(test)]

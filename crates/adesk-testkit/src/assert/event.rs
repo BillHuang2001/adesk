@@ -22,8 +22,9 @@ use std::time::Duration;
 
 use adesk_core::{AppId, EventKind, RuntimeEvent, WindowId};
 use tokio::sync::broadcast;
+use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 use crate::runtime::TestRuntime;
 
 /// An expectation over a [`RuntimeEvent`] stream.
@@ -117,13 +118,44 @@ impl Expected {
     /// | `AppLaunched` | any [`RuntimeEvent::AppLaunched`] |
     /// | `Custom { predicate, .. }` | `predicate(event)` |
     pub fn matches(&self, event: &RuntimeEvent) -> bool {
-        let _ = event;
-        todo!("stub: implementation phase — exact variant mapping documented above")
+        match self {
+            Expected::Any => true,
+            Expected::Kind(kind) => event.kind() == *kind,
+            Expected::WindowCreated => matches!(event, RuntimeEvent::WindowCreated { .. }),
+            Expected::WindowCreatedFor(app) => matches!(
+                event,
+                RuntimeEvent::WindowCreated {
+                    app_id: Some(actual),
+                    ..
+                } if actual == app
+            ),
+            Expected::WindowDestroyed(window) => matches!(
+                event,
+                RuntimeEvent::WindowDestroyed { window_id, .. } if window_id == window
+            ),
+            Expected::WindowActivated(window) => matches!(
+                event,
+                RuntimeEvent::WindowActivated { window_id, .. } if window_id == window
+            ),
+            Expected::TitleChanged(window) => matches!(
+                event,
+                RuntimeEvent::TitleChanged { window_id, .. } if window_id == window
+            ),
+            Expected::SurfaceCommit(window) => matches!(
+                event,
+                RuntimeEvent::SurfaceCommit { window_id, .. } if window_id == window
+            ),
+            Expected::FocusChanged => matches!(event, RuntimeEvent::FocusChanged { .. }),
+            Expected::PopupAppeared => matches!(event, RuntimeEvent::PopupAppeared { .. }),
+            Expected::PopupDisappeared => matches!(event, RuntimeEvent::PopupDisappeared { .. }),
+            Expected::AppLaunched => matches!(event, RuntimeEvent::AppLaunched { .. }),
+            Expected::Custom { predicate, .. } => predicate(event),
+        }
     }
 
     /// Human-readable description used in assertion and timeout messages.
     ///
-    /// Phase 2 formats (stable, tests may assert on them):
+    /// The formats are stable and tests may assert on them:
     ///
     /// - `Any` → `"any event"`
     /// - `Kind(k)` → `"kind {k:?}"`
@@ -137,7 +169,21 @@ impl Expected {
     ///   snake_case protocol event name
     /// - `Custom { name, .. }` → `name`
     pub fn describe(&self) -> String {
-        todo!("stub: implementation phase — formats documented above")
+        match self {
+            Expected::Any => "any event".to_string(),
+            Expected::Kind(kind) => format!("kind {kind:?}"),
+            Expected::WindowCreated => "window_created".to_string(),
+            Expected::WindowCreatedFor(app) => format!("window_created for {app}"),
+            Expected::WindowDestroyed(window) => format!("window_destroyed of window {window}"),
+            Expected::WindowActivated(window) => format!("window_activated of window {window}"),
+            Expected::TitleChanged(window) => format!("title_changed of window {window}"),
+            Expected::SurfaceCommit(window) => format!("surface_commit of window {window}"),
+            Expected::FocusChanged => "focus_changed".to_string(),
+            Expected::PopupAppeared => "popup_appeared".to_string(),
+            Expected::PopupDisappeared => "popup_disappeared".to_string(),
+            Expected::AppLaunched => "app_launched".to_string(),
+            Expected::Custom { name, .. } => (*name).to_string(),
+        }
     }
 }
 
@@ -168,10 +214,6 @@ impl std::fmt::Debug for Expected {
 /// [`EventAssert::seen`]; skipped events are evidence, not noise.
 pub struct EventAssert {
     /// The tapped broadcast; never replayed, so the tap must exist before the action.
-    ///
-    /// Only the Phase 2 receive/wait bodies read it, and those are `todo!()` in this
-    /// skeleton.
-    #[allow(dead_code)]
     rx: broadcast::Receiver<RuntimeEvent>,
     /// Every event received so far, in receive order (lagged events are never present).
     seen: Vec<RuntimeEvent>,
@@ -208,24 +250,31 @@ impl EventAssert {
     ///   of reasoning about an incomplete history.
     /// - [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) when the
     ///   runtime shut down and the sender was dropped; this is the normal end of the stream.
-    ///
-    /// Phase 2 implementation: `match self.rx.try_recv() { Ok(event) => { self.seen.push(
-    /// event.clone()); Ok(Some(event)) }, Err(Empty) => Ok(None), Err(Lagged { .. }) =>
-    /// Err(..), Err(Closed) => Err(..) }`.
     pub fn try_recv(&mut self) -> Result<Option<RuntimeEvent>> {
-        todo!("stub: implementation phase — Empty => Ok(None), Lagged/Closed => Err, received events recorded in seen")
+        match self.rx.try_recv() {
+            Ok(event) => {
+                self.seen.push(event.clone());
+                Ok(Some(event))
+            }
+            Err(TryRecvError::Empty) => Ok(None),
+            Err(TryRecvError::Lagged(skipped)) => Err(TestkitError::Lagged { skipped }),
+            Err(TryRecvError::Closed) => Err(TestkitError::ConnectionClosed),
+        }
     }
 
     /// Drains every event queued right now.
     ///
-    /// Phase 2 semantics: repeatedly call [`EventAssert::try_recv`] until it returns
-    /// `Ok(None)` and return the events received by *this* call in order (events already in
-    /// [`EventAssert::seen`] are not repeated). A
-    /// [`TestkitError::Lagged`](crate::TestkitError::Lagged) or
+    /// Repeatedly calls [`EventAssert::try_recv`] until it returns `Ok(None)` and returns
+    /// the events received by *this* call in order (events already in [`EventAssert::seen`]
+    /// are not repeated). A [`TestkitError::Lagged`](crate::TestkitError::Lagged) or
     /// [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) aborts the
     /// drain and is returned, so a test never silently loses history.
     pub fn drain(&mut self) -> Result<Vec<RuntimeEvent>> {
-        todo!("stub: implementation phase — try_recv loop until Ok(None), propagate Lagged/Closed")
+        let mut drained = Vec::new();
+        while let Some(event) = self.try_recv()? {
+            drained.push(event);
+        }
+        Ok(drained)
     }
 
     /// Every event this tap has received, in receive order.
@@ -238,45 +287,43 @@ impl EventAssert {
 
     /// Waits until `pred` accepts an event, recording every received event.
     ///
-    /// Phase 2 semantics: loop [`EventAssert::try_recv`] → append to
-    /// [`EventAssert::seen`] → evaluate `pred`; the first event for which `pred` returns
-    /// `true` is returned. Events that do not match are kept in `seen`. Errors from
-    /// `try_recv` abort the wait and are returned unchanged. When the queue is empty the
-    /// wait suspends on `broadcast::Receiver::recv()` rather than polling. At the deadline
-    /// it returns [`crate::wait::timeout_error`]`(what, timeout)`, i.e.
-    /// [`TestkitError::Timeout`](crate::TestkitError::Timeout); `what` must name the awaited
-    /// condition (for example `"window_created for org.example.demo"`). The whole wait is
-    /// bounded by the single deadline; it never restarts.
+    /// Loops [`EventAssert::try_recv`] → append to [`EventAssert::seen`] → evaluate `pred`;
+    /// the first event for which `pred` returns `true` is returned. Events that do not match
+    /// are kept in `seen`. Errors from `try_recv` abort the wait and are returned unchanged.
+    /// When the queue is empty the wait suspends on `broadcast::Receiver::recv()` rather than
+    /// polling. At the deadline it returns [`crate::wait::timeout_error`]`(what, timeout)`,
+    /// i.e. [`TestkitError::Timeout`](crate::TestkitError::Timeout); `what` must name the
+    /// awaited condition (for example `"window_created for org.example.demo"`). The whole
+    /// wait is bounded by the single deadline; it never restarts.
     pub async fn wait_for(
         &mut self,
         timeout: Duration,
         what: &'static str,
-        pred: impl FnMut(&RuntimeEvent) -> bool,
+        mut pred: impl FnMut(&RuntimeEvent) -> bool,
     ) -> Result<RuntimeEvent> {
-        let _ = (timeout, what, pred);
-        todo!("stub: implementation phase — record every event, first match wins, timeout_error at the deadline")
+        self.pump(timeout, |event| pred(event).then(|| event.clone()))
+            .await?
+            .ok_or_else(|| crate::wait::timeout_error(what, timeout))
     }
 
     /// Waits for the next event of `kind`, bounded by `timeout`.
     ///
-    /// Phase 2 semantics: exactly [`EventAssert::wait_for`] with
-    /// [`Expected::Kind`]`(kind).matches`, so skipped events are still recorded and the
-    /// timeout shape is identical.
+    /// Exactly [`EventAssert::wait_for`] with [`Expected::Kind`]`(kind).matches`, so
+    /// skipped events are still recorded and the timeout shape is identical.
     pub async fn wait_for_kind(
         &mut self,
         kind: EventKind,
         timeout: Duration,
     ) -> Result<RuntimeEvent> {
-        let _ = (kind, timeout);
-        todo!("stub: implementation phase — wait_for_expected(&Expected::Kind(kind), timeout)")
+        self.wait_for_expected(&Expected::Kind(kind), timeout).await
     }
 
     /// Waits for the next event matching `expected`, bounded by `timeout`.
     ///
-    /// Phase 2 semantics: exactly [`EventAssert::wait_for`] with `expected.matches` as the
-    /// predicate; events that do not match stay in [`EventAssert::seen`].
+    /// Exactly [`EventAssert::wait_for`] with `expected.matches` as the predicate; events
+    /// that do not match stay in [`EventAssert::seen`].
     ///
-    /// The timeout error's `what` is `&'static str`, so Phase 2 leaks
+    /// The timeout error's `what` is `&'static str`, so the deadline path leaks
     /// `expected.describe()` (`Box::leak` on a small string) to produce a precise
     /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) message. The leak is bounded
     /// by the number of waits that actually time out — a test that reaches it has already
@@ -287,18 +334,21 @@ impl EventAssert {
         expected: &Expected,
         timeout: Duration,
     ) -> Result<RuntimeEvent> {
-        let _ = (expected, timeout);
-        todo!("stub: implementation phase — wait_for with expected.matches and describe()-derived what")
+        self.pump(timeout, |event| {
+            expected.matches(event).then(|| event.clone())
+        })
+        .await?
+        .ok_or_else(|| crate::wait::timeout_error(leak_describe(expected), timeout))
     }
 
     /// Waits for `expected` events to be received **in order**, skipping others.
     ///
-    /// Phase 2 semantics: keep a cursor into `expected`; for every received event append it
-    /// to [`EventAssert::seen`] and, when it matches `expected[cursor]`, advance the cursor.
+    /// Keeps a cursor into `expected`; for every received event appends it to
+    /// [`EventAssert::seen`] and, when it matches `expected[cursor]`, advances the cursor.
     /// Events that match no pending expectation are skipped but still recorded. Once the
-    /// whole sequence is satisfied, return the matched events in order. The *whole* sequence
+    /// whole sequence is satisfied, returns the matched events in order. The *whole* sequence
     /// shares one deadline — it does not restart per element, so
-    /// `wait_ordered(&[a, b], 5s)` can never take 10 s. On expiry, return
+    /// `wait_ordered(&[a, b], 5s)` can never take 10 s. On expiry, returns
     /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) for the element that never
     /// arrived, with `what` built from its [`Expected::describe`] exactly as in
     /// [`EventAssert::wait_for_expected`]. An empty `expected` returns `Ok(vec![])`
@@ -308,15 +358,37 @@ impl EventAssert {
         expected: &[Expected],
         timeout: Duration,
     ) -> Result<Vec<RuntimeEvent>> {
-        let _ = (expected, timeout);
-        todo!("stub: implementation phase — cursor over expected, one deadline, record skipped events")
+        if expected.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut matched = Vec::with_capacity(expected.len());
+        let mut cursor = 0usize;
+        let complete = self
+            .pump(timeout, |event| {
+                if expected[cursor].matches(event) {
+                    matched.push(event.clone());
+                    cursor += 1;
+                    if cursor == expected.len() {
+                        return Some(());
+                    }
+                }
+                None
+            })
+            .await?;
+        match complete {
+            Some(()) => Ok(matched),
+            None => Err(crate::wait::timeout_error(
+                leak_describe(&expected[cursor]),
+                timeout,
+            )),
+        }
     }
 
     /// Asserts that no event matching `expected` arrives within `timeout`.
     ///
-    /// Phase 2 semantics: wait for the **full** `timeout` (unrelated events do not end the
-    /// wait early) and record every received event in [`EventAssert::seen`]. Returns
-    /// `Ok(())` when the deadline passes with no match. Returns
+    /// Waits for the **full** `timeout` (unrelated events do not end the wait early) and
+    /// records every received event in [`EventAssert::seen`]. Returns `Ok(())` when the
+    /// deadline passes with no match. Returns
     /// [`TestkitError::Unexpected`](crate::TestkitError::Unexpected)` { message }` as soon
     /// as a match arrives, with the offending event's `seq`, `ts_ms` and kind in `message`.
     /// Errors from `try_recv` abort the wait and are returned unchanged.
@@ -324,16 +396,31 @@ impl EventAssert {
     /// This is the only wait that intentionally consumes its whole timeout: negative
     /// assertions cost wall-clock time by construction.
     pub async fn expect_none(&mut self, expected: &Expected, timeout: Duration) -> Result<()> {
-        let _ = (expected, timeout);
-        todo!("stub: implementation phase — full-timeout wait, Err(Unexpected) on match")
+        match self
+            .pump(timeout, |event| {
+                expected.matches(event).then(|| event.clone())
+            })
+            .await?
+        {
+            Some(event) => Err(TestkitError::Unexpected {
+                message: format!(
+                    "event seq {} (ts_ms {}, kind {:?}) matched {} within {timeout:?}",
+                    event.seq(),
+                    event.ts_ms(),
+                    event.kind(),
+                    expected.describe()
+                ),
+            }),
+            None => Ok(()),
+        }
     }
 
     /// Asserts that the events recorded so far match `expected` in order.
     ///
-    /// Phase 2 semantics: each expectation must match a distinct event that comes *after*
-    /// the event matched by the previous expectation; unrelated events in between are
-    /// ignored, so this pairs with the "skipped but recorded" behaviour of the waits.
-    /// `expected` empty passes trivially and [`EventAssert::seen`] is never consumed.
+    /// Each expectation must match a distinct event that comes *after* the event matched by
+    /// the previous expectation; unrelated events in between are ignored, so this pairs with
+    /// the "skipped but recorded" behaviour of the waits. `expected` empty passes trivially
+    /// and [`EventAssert::seen`] is never consumed.
     ///
     /// # Panics
     ///
@@ -342,9 +429,75 @@ impl EventAssert {
     /// available after the previous match, so a wrong order is readable without re-running
     /// the test.
     pub fn assert_seen_order(&self, expected: &[Expected]) {
-        let _ = expected;
-        todo!("stub: implementation phase — ordered subsequence match over seen, panic with describe() and available seqs")
+        let mut next = 0usize;
+        for (index, expectation) in expected.iter().enumerate() {
+            let found = self.seen[next..]
+                .iter()
+                .position(|event| expectation.matches(event));
+            match found {
+                Some(offset) => next += offset + 1,
+                None => {
+                    let available = self.seen[next..]
+                        .iter()
+                        .map(|event| format!("seq {} kind {:?}", event.seq(), event.kind()))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    panic!(
+                        "expected[{index}] = {} has no matching event after position {next}; \
+                         available: [{available}]",
+                        expectation.describe()
+                    );
+                }
+            }
+        }
     }
+
+    /// Receives events until `handle` returns `Some`, recording every event in `seen`.
+    ///
+    /// `Ok(None)` means the single deadline expired; `Lagged`/`Closed` from the broadcast
+    /// abort the wait. When the queue is empty the wait suspends on
+    /// `broadcast::Receiver::recv()` wrapped in `tokio::time::timeout` — it never polls and
+    /// never blocks past the deadline.
+    async fn pump<T>(
+        &mut self,
+        timeout: Duration,
+        mut handle: impl FnMut(&RuntimeEvent) -> Option<T>,
+    ) -> Result<Option<T>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(event) = self.try_recv()? {
+                if let Some(value) = handle(&event) {
+                    return Ok(Some(value));
+                }
+                continue;
+            }
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            match tokio::time::timeout(deadline - now, self.rx.recv()).await {
+                Ok(Ok(event)) => {
+                    self.seen.push(event.clone());
+                    if let Some(value) = handle(&event) {
+                        return Ok(Some(value));
+                    }
+                }
+                Ok(Err(RecvError::Lagged(skipped))) => {
+                    return Err(TestkitError::Lagged { skipped })
+                }
+                Ok(Err(RecvError::Closed)) => return Err(TestkitError::ConnectionClosed),
+                Err(_elapsed) => return Ok(None),
+            }
+        }
+    }
+}
+
+/// Leaks `expected.describe()` to build the `&'static str` a timeout error needs.
+///
+/// Only called when a wait actually expires, so the leak is bounded by the number of
+/// failing waits (see [`EventAssert::wait_for_expected`]).
+fn leak_describe(expected: &Expected) -> &'static str {
+    Box::leak(expected.describe().into_boxed_str())
 }
 
 #[cfg(test)]
