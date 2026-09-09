@@ -135,7 +135,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `docs/protocol.md` §5.7 does not specify the data shape of an `inspect_frame` event; the client assumes `{"image": ImagePayload}` and falls back to `AgpEvent::Other` if the payload does not fit.
 - `docs/protocol.md` §5.6 lists 11 `EventKind` values while `adesk_core::EventKind` has 9; the client's filter enum carries all 11 and `AgpEvent::Other` preserves any frame it cannot type.
 - `docs/protocol.md` §4 shows `image` inside `Observation` while `adesk-core::Observation` has no such field; see Design Decisions for how `ObserveResult` tolerates both layouts. Root may want to pin one layout.
-- The client never sends `include_image` for `wait_for_*` (protocol default `false`); if a consumer needs a post-wait image it must call `observe` or `capture_window`.
+- The client's `wait_for_*` requests omit `include_image` (proto canonicalises it to `false` on the wire); if a consumer needs a post-wait image it must call `observe` or `capture_window`.
 
 ## Notes for Agents
 
