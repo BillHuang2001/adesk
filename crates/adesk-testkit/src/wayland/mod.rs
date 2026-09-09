@@ -55,6 +55,7 @@
 //! into `Arc<Mutex<ClientState>>`, every pump/wait is deadline-bounded, and teardown
 //! interrupts the reader by shutting the socket down rather than blocking on a join.
 
+use std::collections::HashSet;
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -81,7 +82,7 @@ mod window;
 pub use protocol::Globals;
 pub use window::{ConfiguredSize, PopupSpec, TestPopup, TestWindow, ToplevelSpec};
 
-use shm::{supported_formats, ShmPool};
+use shm::ShmPool;
 use state::{lock_client, ClientState, WindowSlot};
 
 /// Internal deadline for [`WaylandTestClient::roundtrip`].
@@ -252,9 +253,12 @@ impl WaylandTestClient {
             SHM_POOL_CAPACITY,
         )?));
 
+        // The advertised formats start empty: `wait_for_shm_formats` must observe the
+        // real `wl_shm.format` events before `supports_argb8888` means anything (a
+        // pre-seeded set would make that check vacuous).
         let state = Arc::new(Mutex::new(ClientState::new(
             globals_snapshot,
-            supported_formats(),
+            HashSet::new(),
         )));
         let (pump_tx, mut pump_rx) = unbounded_channel();
         let reader_state = Arc::clone(&state);
