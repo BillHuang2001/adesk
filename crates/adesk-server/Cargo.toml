@@ -40,6 +40,9 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-# No dev-dependencies yet: Phase 1 has no test targets. Phase 2 adds
-# `adesk-testkit` (harness), `adesk-client` (protocol driver) and `tempfile`
-# (temp sockets) when `./tests/` suites land — see ./tests/CONTEXT.md.
+[dev-dependencies]
+# E2E suites in ./tests/ drive a live runtime through the typed client SDK on
+# temp sockets. `adesk-testkit` (window-creating fixtures) is added by the
+# follow-up wave — see ./tests/CONTEXT.md.
+adesk-client.workspace = true
+tempfile.workspace = true
