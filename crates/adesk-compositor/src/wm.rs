@@ -98,6 +98,8 @@ const LAUNCH_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_PENDING_LAUNCHES: usize = 32;
 /// Safety bound for popup-chain walks.
 const MAX_POPUP_CHAIN: usize = 32;
+/// Safety bound for surface-tree (parent) walks.
+const MAX_SURFACE_TREE_DEPTH: usize = 32;
 /// Shortest title substring considered evidence (avoids `"a"` matching everything).
 const MIN_TITLE_MATCH_LEN: usize = 3;
 
@@ -582,8 +584,23 @@ impl WmBridge {
     }
 
     /// The window owning a Wayland surface (toplevel, subsurface or popup).
+    ///
+    /// The registry stores toplevel roots and popups; a subsurface is resolved by
+    /// walking up the surface tree to the first tracked ancestor.
     pub(crate) fn window_for_surface(&self, surface: &WlSurface) -> Option<WindowId> {
-        self.surfaces.window_for_surface(&surface.id())
+        let id = surface.id();
+        if let Some(window) = self.surfaces.window_for_surface(&id) {
+            return Some(window);
+        }
+        let mut current = surface.clone();
+        for _ in 0..MAX_SURFACE_TREE_DEPTH {
+            let parent = smithay::wayland::compositor::get_parent(&current)?;
+            if let Some(window) = self.surfaces.window_for_surface(&parent.id()) {
+                return Some(window);
+            }
+            current = parent;
+        }
+        None
     }
 
     /// All known windows in creation order, for `QueryState`.
