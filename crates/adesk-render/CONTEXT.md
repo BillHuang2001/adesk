@@ -133,6 +133,8 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 ## Notes for Agents
 
 - `render_scene` requires `target.core_size() == config.target_size()`; callers should create the target from `config.target_size()`.
+- `render_scene` returns `RenderedFrame::damage` as raw clipped rects (no coalescing); `adesk-compositor` applies `Region::simplified()` before replying.
+  The rects stay in scene/window coordinates even when `crop`/`max_dimension` shrink the image, so a cropped capture's `changed_regions` can reference coordinates outside the returned image.
 - GL readback rows are already top-down in scene space; do NOT feed `TextureMapping::flipped()` into `image_from_readback` in this pipeline — it would mirror every GL capture (see Design Decisions).
 - `copy_framebuffer`'s `Fourcc` argument is new in 0.7; `RenderElement::draw` lost its `cache` argument in 0.7. Do not copy 0.6-era examples.
 - `GlesRenderer` is not `Send` and every renderer call is compositor-thread-only (`docs/architecture.md` §1); this crate holds no global state and never spawns threads.
