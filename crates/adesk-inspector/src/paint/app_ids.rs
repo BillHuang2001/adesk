@@ -10,6 +10,17 @@ use crate::style::OverlayStyle;
 ///
 /// The label is elided to the window's inner width and clipped to the window.
 pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlayStyle) {
-    let _ = (canvas, input, style);
-    todo!("Phase 2: labels::draw(canvas, window.geometry, SLOT_APP_IDS, text, style)")
+    for window in &input.windows {
+        let text = match window.app_id.as_ref() {
+            Some(app_id) => format!("app {}", app_id.as_str()),
+            None => String::from("app ?"),
+        };
+        super::labels::draw(
+            canvas,
+            window.geometry,
+            super::labels::SLOT_APP_IDS,
+            &text,
+            style,
+        );
+    }
 }
