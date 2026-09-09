@@ -95,7 +95,9 @@ impl ServerError {
     ///
     /// `code`/`message` are always present; `data` carries the id that was not
     /// found for the three lookups where the client can act on it (§6 leaves
-    /// `data` free-form, so no other variant invents a field).
+    /// `data` free-form, so no other variant invents a field). The ids are
+    /// transparent newtypes over `u64`/`String`, so building the JSON cannot
+    /// fail.
     pub fn payload(&self) -> adesk_proto::ErrorPayload {
         let payload = adesk_proto::ErrorPayload::new(self.code(), self.to_string());
         match self {
