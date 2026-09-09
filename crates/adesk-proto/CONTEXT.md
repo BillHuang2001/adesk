@@ -6,7 +6,6 @@
 It defines the frames, the typed method vocabulary (§5.1–§5.7), the event subscription kinds (§5.6), the image payload (§4) and the NDJSON codec (§1).
 It is pure serialization: no I/O, no async, no tokio, no Smithay.
 `adesk-server` serves these frames, `adesk-client`/`adesk-agent` consume them and `adesk-testkit` drives the server through them, so every wire detail lives here and nowhere else.
-Phase 1 (this scaffold) defines the complete public API with `todo!()` bodies; Phase 2 implements the 29 stubs (see Status).
 
 ## API Surface
 
@@ -20,6 +19,7 @@ Frames (`src/frame.rs`):
 - `ResultPayload(serde_json::Value)` with `new::<R>(&R)`, `decode::<R>()`, `as_value()`.
 - `ErrorPayload { code: ErrorCode, message: String, data: Option<Value> }` with `new`, `with_data`.
 - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }` with `new`, `from_runtime(&RuntimeEvent)`, `to_runtime() -> Option<RuntimeEvent>`.
+- Crate-internal `Frame::from_value(serde_json::Value) -> Result<Frame>` — the decoder every entry point routes through (see Design Decisions).
 
 Methods (`src/methods.rs` + `src/methods/*.rs`):
 - `Method` — 29 variants, one per spec method — plus `method_name()`, `from_parts(name, params)`, `params_value()`, manual map serde.
@@ -55,7 +55,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | Area | File |
 |---|---|
 | Crate root, version helpers, re-exports | `src/lib.rs` |
-| Frame kinds, request/response/event frames, `ResultPayload`, `ErrorPayload` | `src/frame.rs` |
+| Frame kinds, request/response/event frames, `ResultPayload`, `ErrorPayload`, `Frame::from_value` decoder | `src/frame.rs` |
 | `Method` enum, `ActionResult`, per-group params/results | `src/methods.rs`, `src/methods/*.rs` |
 | `EventKind` filter, `EventPayload`, event data structs | `src/event.rs` |
 | `ImagePayload` and base64/RGBA conversions | `src/image.rs` |
@@ -63,37 +63,47 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | `ProtoError`, `Result`, AGP error-code mapping | `src/error.rs` |
 | Spec defaults used by `#[serde(default = ...)]` | `src/defaults.rs` (crate-private) |
 | Protocol vocabulary types | `src/types.rs` |
-| Type-level + golden-JSON tests (run now) | `tests/wire.rs` |
-| Phase-2 codec acceptance spec (`#[ignore]`d) | `tests/codec.rs` |
+| Type-level + golden-JSON tests | `tests/wire.rs` |
+| Frozen frame-level acceptance spec (active) | `tests/codec.rs` |
+| Method round-trip + golden JSON tests | `tests/methods_roundtrip.rs` |
+| Frame/event/codec round-trip tests | `tests/frames_events_roundtrip.rs` |
+| Image payload tests | `tests/image_roundtrip.rs` |
 
 ## Design Decisions
 
 - `ObserveResult` resolves the §4-vs-§5.4 ambiguity: `image` lives INSIDE the `observation` object (per §4), so the wire shape is `{"observation": {<core Observation fields>, "image": <ImagePayload|null>}}`; `image` is always present (`null` when absent) and is split out of the core `Observation` on deserialize.
 - `EventFrame` hoists `seq`/`ts_ms` out of the core `RuntimeEvent` into frame-level fields; `data` carries the variant fields minus those two.
-- `EventKind::SurfaceDamage` is a filter alias, never an emitted kind: durable commits are `surface_commit` (which carries `damage`), and `matches` returns true only for commits with non-empty damage.
+- `EventKind::SurfaceDamage` is a filter alias, never an emitted kind: durable commits are `surface_commit` (which carries `damage`), and `matches` returns true only for commits with non-empty damage; `EventPayload::from_data` rejects it with `Malformed`.
 - `EventKind::InspectFrame` is a 12th, non-subscribable kind so `inspect_subscribe` pushes are typed; the §5.6 eleven filterable kinds are exactly `SUBSCRIBABLE`.
 - `QuietEvent` and `InspectFrameEvent` are additive data structs for the two spec-unnamed kinds (§7 allows additions).
 - Response results are untyped at frame level (`ResultPayload(serde_json::Value)`): a codec cannot correlate an `id` to a method, so server/client decode with the method's typed result via `ResultPayload::decode::<R>()`.
+- All decode entry points (`decode_frame`, `NdjsonCodec::{decode, decode_str}`) route through crate-internal `Frame::from_value`, because serde's `Deserialize` cannot carry `ProtoError` payloads while the frozen acceptance spec requires exact `UnknownMethod(name)`/`Malformed(_)`/`UnknownEventKind(name)`; the serde `Deserialize` impls map errors to generic serde errors.
+- `Frame::from_value` discrimination order is `event` → `method` → `id` + exactly one outcome; missing/null `params`/`data` are treated as `{}`; non-objects and unrecognized shapes are `Malformed`; JSON syntax errors are `Json`/`Malformed`.
+- `Method::from_parts` is the canonical `(name, params)` decoder — the frame layer calls it directly so `ProtoError::UnknownMethod`/`InvalidParams` survive; `Method`'s serde impls exist for `#[serde(flatten)]` in `RequestFrame` and accept the same `{"method", "params"}` mapping.
+- `EventPayload::to_data`/`from_data` carry only the variant fields (no tag); shape mismatches are `InvalidEventData{kind, message}`.
 - `Method` implements `Serialize`/`Deserialize` manually, emitting/reading a JSON map (`method` + `params`), so `#[serde(flatten)]` in `RequestFrame` works and unknown request fields are ignored.
 - `Codec` is payload-oriented (bytes, no terminator) so a future binary framing (§7) needs no method-definition changes; NDJSON adds the string helpers.
 - `ProtoError::error_code()` maps `UnknownMethod` → `ErrorCode::UnknownMethod`, `VersionMismatch` → `ProtocolVersionMismatch` and everything else → `InvalidRequest`.
 - `CaptureResult` and `InspectCaptureResult` derive `PartialEq` but not `Eq` because `ImagePayload::scale` is `f64`.
 - Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+- `ImagePayload::from_rgba8` rejects dimension/byte-count overflow and length mismatch with `Malformed`; `to_rgba8_buffer` is strict — non-`Rgba8` format, `stride != width*4` (including `stride: null`), or length mismatch is an error.
+- Base64 encoding is infallible in `base64` 0.22; `ProtoError::Base64` is reachable only on decode paths.
 
 ## Test Strategy
 
-- `tests/wire.rs` (24 tests) runs today and pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
-- `tests/codec.rs` (19 tests) is the frozen Phase-2 acceptance spec: every test is `#[ignore]`d with reason `"phase 2: codec bodies are todo!() stubs"`; implement the bodies, then remove each `#[ignore]` — the assertions must not be edited.
-- Coverage targets: round-trip every frame kind and every method's params/result, golden frames from `docs/protocol.md`, error frames, unknown-field tolerance, version mismatch, unknown method and unknown event kind.
-- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (see Known Issues for the workspace-load workaround).
+- `tests/wire.rs` (24) pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
+- `tests/codec.rs` (19) is the frozen frame-level acceptance spec, all active; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
+- `tests/methods_roundtrip.rs` (19): all 29 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape.
+- `tests/frames_events_roundtrip.rs` (14): response/error/event golden JSON, all 11 payload kinds and all 9 `RuntimeEvent`s round-tripped, `EventKind::matches` table, malformed lines, codec trait.
+- `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases.
+- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (91 tests) — the dev shell is required for linking.
 
-## Known Issues
+## Notes for Agents
 
-- Root `Cargo.toml` declares `members = ["crates/*"]` while most sibling crates still have no manifest, so `cargo check -p adesk-proto` fails at workspace load with `failed to load manifest for workspace member .../crates/adesk-agent`; that is a root-owned staging issue, not a defect in this crate.
-- Until the siblings exist, validate standalone: copy `crates/adesk-core` and `crates/adesk-proto` into a temp dir with a mirror workspace manifest (`[workspace.dependencies]` copied from the root) and run `./scripts/dev.sh cargo check --manifest-path <tmp>/Cargo.toml -p adesk-proto --all-targets`.
-- The 29 `todo!()` stubs emit ~33 `unused_variable` warnings; they disappear as Phase 2 implements the bodies — do not silence them crate-wide.
+- `EventKind::InspectFrame` is a real enum variant, so `subscribe_events.kinds` deserializes it even though §5.6 lists 11 filterable kinds; enforcing filterability is `adesk-server`'s job, not this crate's.
+- `ObserveResult`'s custom serde assumes core `Observation` has no `image` field; adding one in `adesk-core` would break the split (see Design Decisions).
+- Requests are always fully explicit on the wire: `#[serde(default)]` values are still emitted when serializing params (e.g. `format:"png"`, `count:1`), which is additive-safe.
 
 ## Status
 
-- Phase 1 complete: manifest, full public API with `todo!()` bodies, both test files; `cargo check --all-targets` green, `tests/wire.rs` 24/24 green, `tests/codec.rs` 19 ignored.
-- Phase 2 must fill in bodies only (no API changes) in `codec.rs` (4), `event.rs` (5: `matches`, `from_runtime`, `to_runtime`, `from_data`, `to_data`), `frame.rs` (10), `image.rs` (4), `methods/capture.rs` (2: `ObserveResult` serde) and `methods.rs` (4: `from_parts`, `params_value`, `Serialize`, `Deserialize`).
+- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes, `cargo check`/`clippy -p adesk-proto --all-targets` clean, 91/91 tests pass under the dev shell.
