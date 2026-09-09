@@ -1,0 +1,148 @@
+# adesk-server — runtime binary + AGP server
+
+## Intent
+
+`adesk-server` is the composition root of the ADesk runtime and the only process an agent ever talks to.
+It starts the compositor thread, binds the AGP Unix socket, pumps `RuntimeEvent`s into the observer and the subscription fan-out, and serves every method of `docs/protocol.md` §5.
+It owns the process-lifetime concerns no sibling can own: the socket file, the action→observation wiring, subscription fan-out, signal handling and the ordered shutdown sequence.
+It also owns every conversion between sibling crates' overlapping types (`src/translate.rs`), because no sibling depends on another.
+
+Phase 1 (this state): public API, module map and dispatch surface are pinned and compile; every behaviour is `todo!()`.
+Phase 2 implements the bodies without changing the public API.
+
+## API Surface
+
+Everything below is re-exported at the crate root; `adesk-testkit` is designed against exactly this surface.
+
+- `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>> }` (`src/config.rs`)
+  - `Default`/`new()`; `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
+  - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; identical to `adesk_client::default_socket_path`.
+  - `parse_size("WxH")` / `parse_renderer("auto|gl|pixman")` are the CLI value parsers.
+- `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
+- `RunningServer` (Clone handle; dropping it does not stop the runtime):
+  - `socket_path() -> &Path`, `compositor() -> &CompositorHandle`, `observer() -> &ObserverService`, `registry() -> &Arc<AppRegistry>`, `context() -> &ServerContext`, `shutdown_handle() -> &ShutdownHandle`;
+  - `async wait() -> Result<()>` (resolves when the runtime stops serving), `async shutdown() -> Result<()>` (idempotent).
+- `ServerContext` (`src/context.rs`): cheap-clone bundle with public fields `config`, `compositor`, `observer`, `registry`, `correlator`, `subscriptions`, `inspect_subscriptions`, `inspection`, `cursor`, `shutdown`, `started_at`; `now_ms()`, `uptime_ms()`, `next_connection_id()`.
+- `CursorTracker { set(Point), get() -> Option<Point> }` — last commanded pointer position (the compositor snapshot has no cursor).
+- `ShutdownHandle` (`src/shutdown.rs`): `new()`, `initiate() -> bool`, `is_shutting_down()`, `async cancelled()`; `install_signal_handlers`, `run`, `remove_socket_file`.
+- `SubscriptionRegistry` / `InspectRegistry` (`src/subscriptions.rs`): `subscribe`, `unsubscribe`, `remove_connection`, `fan_out`/`list`, `len`, `is_empty`; `SubscriptionId = u64`, `EventSink = mpsc::Sender<Frame>`.
+- `InspectionCache` (`src/inspection.rs`): implements `adesk_inspector::InspectionSource` over a cached `InspectionSnapshot`; `store`, `snapshot`, async `refresh(&ServerContext)`.
+- `SocketListener::bind(&Path)`, `prepare_socket_path`, `Connection::new/run`, `ConnectionWriter::send/try_send`, `Dispatcher::new/dispatch`, `Session`/`InputQueue`, `event_pump::spawn/handle_event/resync`, `images::encode/encode_png`.
+- `PROTOCOL_VERSION: u32 = adesk_proto::PROTOCOL_VERSION`, `RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION")`.
+
+## Dispatch coverage (normative: `docs/protocol.md` §5)
+
+One arm per method; unknown method → `unknown_method`; every request gets exactly one response.
+
+| AGP method | Handler |
+|---|---|
+| `ping` | `dispatch/runtime.rs::ping` |
+| `list_apps`, `get_app`, `launch_app` | `dispatch/apps.rs` |
+| `list_windows`, `get_window`, `activate_window`, `close_window`, `get_focus` | `dispatch/windows.rs` |
+| `capture_window`, `capture_region`, `observe`, `wait_for_change`, `wait_for_quiet` | `dispatch/capture.rs` |
+| `pointer_move`, `click`, `double_click`, `mouse_down`, `mouse_up`, `scroll`, `drag`, `keypress`, `key_down`, `key_up`, `type_text` | `dispatch/input.rs` |
+| `subscribe_events`, `unsubscribe_events` | `dispatch/events.rs` |
+| `inspect_capture`, `inspect_subscribe` | `dispatch/inspect.rs` |
+
+Total: 29 methods, 29 handlers.
+
+## Lifecycle
+
+Startup (`Server::start`, `docs/architecture.md` §9):
+1. `adesk_compositor::spawn(CompositorConfig)` (sync, spawns the calloop thread) → `wait_ready()`.
+2. Build `AppRegistry` (`RegistryOptions` from `app_dirs`, one `Arc<dyn Clock>` shared with `Correlator`) and `scan()` (blocking → `spawn_blocking`).
+3. Bind the Unix socket (`prepare_socket_path` + `SocketListener::bind`).
+4. Spawn the event pump (observer + fan-out + `QueryState` resync) and install SIGINT/SIGTERM handlers.
+5. Spawn the accept loop; return `RunningServer` once the listener is bound.
+
+Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
+1. `ShutdownHandle::initiate()` — stop accepting.
+2. Fail in-flight requests with `shutting_down`; drain connection tasks.
+3. `CompositorHandle::shutdown()` — drops the Wayland display (clients lose their connection).
+4. Remove the socket file; complete `wait()` with `Ok(())`; exit code 0.
+
+## Constraints
+
+- `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`; files stay far below the ~1000-line threshold.
+- No panics on request/event paths: handlers return `ServerError`; the dispatcher converts it to `ErrorPayload` and keeps the connection open.
+- A malformed frame closes **only** that connection; unknown methods answer `unknown_method`; every request gets exactly one response.
+- Input methods (§5.5) allocate an `ActionId` via `ObserverService::record_action` **before** sending compositor commands and run through `Session::input()` so they execute in submission order per connection.
+- `activate_window` / `close_window` are runtime-native: they change compositor state directly, never synthesize input.
+- Observation methods await the observer first, then render; a wait timeout is an `Observation` with `timed_out: true`, never an error.
+- Rendering is on demand: `RenderWindow`/`RenderOutput` only when pixels are needed; no screenshot loop, no per-event rendering.
+- Error mapping: `adesk_observer::Error::UnknownWindow` → `unknown_window`, `UnknownAction` → `invalid_request`; `adesk_app_registry::Error::UnknownApp` → `unknown_app`, `NoExec` → `not_supported`, `InvalidExec`/`TryExecNotFound`/`Spawn` → `launch_failed`, `InvalidEntry`/`Io` → `internal`; inspector `InvalidFrame`/`InvalidRequest` → `invalid_request`, `Render` → `render_failed`; everything else → `internal`.
+- `tracing` only: one span per request (`request{id method}`), one per connection, one per window lifecycle; never log pixel payloads.
+- Timestamps are monotonic ms since `ServerContext::started_at`; no wall clock in observations.
+- Dependencies: every version comes from the root `[workspace.dependencies]`; no inline versions.
+- Only `adesk-server` may write the AGP socket path and the process-level signal handlers.
+
+## Routing Table
+
+| Area | Owner |
+|---|---|
+| `ServerConfig`, socket-path defaults, CLI value parsing | `./src/config.rs` |
+| `Server::start`, `RunningServer` | `./src/server.rs` |
+| `ServerContext`, `CursorTracker` | `./src/context.rs` |
+| `ServerError`, AGP error mapping | `./src/error.rs` |
+| Socket bind/accept/stale-file handling | `./src/socket.rs` |
+| Connection read loop, writer task, NDJSON framing | `./src/connection.rs` |
+| Per-connection `Session`, ordered `InputQueue` | `./src/session.rs` |
+| Event pump, `QueryState` resync, inspection-cache updates | `./src/event_pump.rs` |
+| Event + inspector subscription registries, fan-out | `./src/subscriptions.rs` |
+| Inspection snapshot cache + async refresh (`InspectionSource`) | `./src/inspection.rs` |
+| Image encoding (`ImageBuffer` → `ImagePayload`) | `./src/images.rs` |
+| Shutdown token, ordered teardown, SIGINT/SIGTERM | `./src/shutdown.rs` |
+| Sibling-type bridges (`StateSnapshot`, `Condition`, `ActionKind`, `RendererName`, markers) | `./src/translate.rs` |
+| AGP §5 dispatch table and `RequestContext` | `./src/dispatch/mod.rs` |
+| §5.1 runtime (`ping`) | `./src/dispatch/runtime.rs` |
+| §5.2 apps (`list_apps`, `get_app`, `launch_app`) | `./src/dispatch/apps.rs` |
+| §5.3 windows (`list_windows`, `get_window`, `activate_window`, `close_window`, `get_focus`) | `./src/dispatch/windows.rs` |
+| §5.4 capture/observation (`capture_window`, `capture_region`, `observe`, `wait_for_change`, `wait_for_quiet`) | `./src/dispatch/capture.rs` |
+| §5.5 input (11 methods) | `./src/dispatch/input.rs` |
+| §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`) | `./src/dispatch/events.rs` |
+| §5.7 inspector (`inspect_capture`, `inspect_subscribe`) | `./src/dispatch/inspect.rs` |
+| CLI binary (`adesk-server`) | `./src/main.rs` |
+| E2E test plan and Phase 2 suites | `./tests/` (see `./tests/CONTEXT.md`) |
+| Standalone-workspace validation script | `./check-standalone.sh` |
+
+## Design Decisions
+
+- **`Server::start` and `RunningServer::wait`/`shutdown` are async.** The objective's signature sketch omitted `async`, but compositor `wait_ready()`/`shutdown()` are async and the server is a tokio process; `adesk-testkit` must `.await` them. `registry() -> &Arc<AppRegistry>` (not `&AppRegistry`) is pinned so tests can clone the handle.
+- **One writer task per connection + bounded queue.** The read loop owns decoding/dispatch; a dedicated writer task owns the write half and is fed by an `mpsc::Sender<Frame>` (`ConnectionWriter`). Responses `send().await` (backpressure); subscription events `try_send` (drop, never block the pump). This keeps every request answered exactly once even while events stream.
+- **Ordered input queue is a fair `tokio::sync::Mutex` per session.** Input methods may expand into several compositor commands (`click` = move + down + up); the queue guarantees submission order per connection without serializing the whole connection.
+- **`InspectionSource` is synchronous, the runtime is not.** `adesk-inspector` requires a cheap, non-blocking `inspection_input()`; the server therefore keeps an `InspectionCache` and refreshes it asynchronously (`inspection::refresh` renders the full output and issues `QueryState`) immediately before each `inspect_*` frame. Overlays are composited at full resolution and cropped/downscaled afterwards.
+- **`translate.rs` owns every cross-crate conversion** (`StateSnapshot`, `Condition`, `ActionKind`, `RendererName`, `Position` → `Point`, `Observation` + image → `ObserveResult`). This is deliberate: it is the single file to change if a sibling changes shape, and it documents the mismatches rather than hiding them.
+- **Lag handling is `QueryState` + `resync`, not best-effort patching.** On `broadcast::error::RecvError::Lagged(n)` the pump issues `QueryState`, translates the snapshot and calls `ObserverService::resync`, which marks affected windows uncertain (`docs/architecture.md` §2).
+- **Shutdown token is a `tokio::sync::watch<bool>`**, so `cancelled()` cannot miss an already-flagged shutdown (no `Notify` registration race) and `initiate()` is idempotent.
+- **Socket lifecycle is RAII + explicit**: `SocketListener::drop` removes the socket file; `shutdown::run` also removes it so the file is gone before `wait()` resolves. A live socket is never clobbered (`prepare_socket_path` probes with a connect).
+- **`adesk-render` and `adesk-wm` are declared dependencies even though dispatch reaches them only through the compositor handle.** They are part of the composition contract (workspace map) and keep the server's dependency list aligned with the crates it composes.
+- **`serde_json` is a direct dependency** (beyond the objective's list) because `ErrorPayload::with_data` carries structured error data (e.g. `{"window_id": 99}`) and `ResultPayload` wraps `serde_json::Value`. `serde` itself is not a direct dependency: the server never derives its own wire types.
+
+## Sibling integration notes (contracts the server must satisfy)
+
+- **adesk-compositor**: `spawn` is sync; `wait_ready()` is async and cached; result-bearing `RuntimeCommand`s carry `oneshot::Sender<adesk_core::Result<..>>`; `QueryState` is infallible. `StateSnapshot` is `adesk_compositor::StateSnapshot`, which is **not** the observer's snapshot — bridge via `translate::observer_snapshot`.
+- **adesk-observer**: record the action before the command; `resync` after lag; waits return observations (timeouts are not errors); `Err(UnknownWindow)` → `unknown_window`, `Err(UnknownAction)` → `invalid_request`; render images *after* the wait; `quiet` event subscriptions are a server loop over `wait_for_quiet`; `ActionKind::as_str()` is the AGP method name.
+- **adesk-app-registry**: registry and correlator must share one `Arc<dyn Clock>`; after a successful `launch` emit `AppLaunched {launch_id, app_id, pid}` on the compositor's broadcast and `correlator.record_launch(record, &app_info)`; on `WindowCreated` build a `WindowCandidate` and correlate (`Correlated` → stamp `app_id`, `Uncorrelated` → leave `null`, never guess); `scan()` is blocking; child reaping is the server's job; set `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` on launches via `LaunchEnv`.
+- **adesk-inspector**: implement `InspectionSource` (done by `InspectionCache`); full-output render before overlays; `inspect_capture` = `Inspector::new(overlays).render_request(input, request)` then PNG; `inspect_subscribe` = same per frame, throttled, one `Inspector` per subscription; map inspector errors with `adesk_core::Error::from`.
+- **adesk-proto**: `ObserveResult` serializes as `{"observation": {..., "image": ...}}`; `ImagePayload::from_rgba8`/`from_png` are the only constructors; `Method::from_parts` is the decode entry point; defaults (`timeout_ms=5000`, `quiet_ms=250`, `observe.include_image=true`, waits `false`, `format=png`) are the proto crate's, the server must not redefine them.
+- **adesk-client**: default socket path must match; `ping` validates `protocol_version` (report `PROTOCOL_VERSION` exactly); error responses must not close the connection; waits never attach pixels unless `include_image` is set.
+
+## Known Issues
+
+- **The root workspace does not load while `crates/adesk-testkit/` has no `Cargo.toml`** (`members = ["crates/*"]`). `./scripts/dev.sh cargo check -p adesk-server` therefore fails at workspace load; use `./check-standalone.sh` until testkit lands. This is a root-owned condition, not a server bug.
+- **Phase 1 skeleton marker:** `src/lib.rs` carries `#![allow(dead_code, unused_variables)]` because `todo!()` bodies do not read their arguments or fields. Remove both when Phase 2 lands (they hide real lints).
+- **No E2E test files exist yet.** `./tests/` holds only the plan (`./tests/CONTEXT.md`); the suites are written in Phase 2 once `adesk-testkit` lands a manifest and a dev-dependency can be declared.
+- **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
+
+## Test Strategy
+
+- **Unit level (in-module, Phase 2):** `config::parse_size/parse_renderer/default_socket_path`, `translate` (every bridge, both directions), `images::encode` (png/rgba8/scale), `subscriptions` (id allocation, filtering, removal on disconnect), `session::InputQueue` (FIFO), `shutdown::ShutdownHandle` (idempotence, `cancelled`), `inspection::InspectionCache`.
+- **E2E level (`./tests/`, Phase 2):** `adesk-testkit::TestRuntime::start()` on a temp socket with the pixman renderer plus `WaylandTestClient` and `adesk-client`; full plan in `./tests/CONTEXT.md`. No test may require a display, GPU, network or installed application.
+- **Validation command:** `bash crates/adesk-server/check-standalone.sh` (defaults to `check -p adesk-server --all-targets` inside the Nix dev shell). Once testkit lands: `./scripts/dev.sh cargo check -p adesk-server --all-targets`.
+
+## Notes for Agents
+
+- Phase 2 checklist: implement bodies in this order — `error`/`translate`/`images` (pure) → `session`/`subscriptions`/`shutdown` → `socket`/`connection` → `event_pump`/`inspection` → `dispatch/*` → `server::Server::start` → `main`.
+- Remove `#![allow(dead_code, unused_variables)]` as soon as the bodies land, then run `clippy -D warnings`.
+- Do not add AGP methods or fields outside `docs/protocol.md`; the dispatcher must stay total over `adesk_proto::Method`.
+- Keep the public API stable: `adesk-testkit` and `adesk-agent` are written against it in parallel. If a change is unavoidable, report it to the parent instead of editing siblings.
