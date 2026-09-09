@@ -191,7 +191,7 @@ Integration tests: defined, not yet implemented — `tests/integration_plan.md` 
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (80 lib + 3 smoke + doctests)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (82 lib + 3 smoke + doctests)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
