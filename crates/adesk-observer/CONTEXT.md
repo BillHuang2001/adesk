@@ -105,7 +105,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 
 ## Status
 Phase 1 (architecture) complete: manifest, module skeleton with real signatures, 34 ignored behaviour-test stubs, public-API smoke test, and `./check-standalone.sh`.
-Validation: `bash crates/adesk-observer/check-standalone.sh` → `cargo check -p adesk-observer --all-targets` clean (no warnings); `... test -p adesk-observer` → 6 passed, 34 ignored.
+Validation: `./scripts/dev.sh cargo check -p adesk-observer --all-targets` clean; `./scripts/dev.sh cargo test -p adesk-observer` → 6 passed, 34 ignored.
 Pending (Phase 2): every `todo!()` body — `Clock`, `ActionRegistry`, `EventJournal`, `CountedEvent::from_runtime_event`, `Accumulator::absorb/resolve`, `condition_met`, `ObserverService::{with_config, handle_event, resync, record_action, run_wait, snapshot, window_state, watermark, now_ms, window_ids, is_quiet}`, `PendingGuard::{register, drop}`.
 Phase 2 must also remove the six module-level `#![allow(dead_code)]` blocks (Phase-1-only, see the comment in each file) and replace the `#[ignore]`d test bodies.
 
