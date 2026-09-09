@@ -17,13 +17,7 @@
 //! tracking, readback, crop/downscale and image encoding belong to
 //! `adesk-render`. The compositor keeps only renderer construction and element
 //! collection, so the renderer stays an implementation detail of the compositor
-//! thread (see the threading contract in the [crate root docs](crate)).//!
-//! Phase 1 declares the call graph; the bodies arrive in Phase 2.
-
-// Phase 1 declares the render call graph but nothing calls it yet; the attribute
-// covers this module and its children. Remove it when Phase 2 wires these into
-// `State::render_window` / `State::render_output`.
-#![allow(dead_code)]
+//! thread (see the threading contract in the [crate root docs](crate)).
 
 mod elements;
 mod headless;
