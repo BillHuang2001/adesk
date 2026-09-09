@@ -17,7 +17,7 @@ use tracing::Instrument;
 use adesk_proto::{Frame, NdjsonCodec};
 
 use crate::context::ServerContext;
-use crate::dispatch::{forget_session_sink, register_session_sink, Dispatcher};
+use crate::dispatch::{error_response, forget_session_sink, register_session_sink, Dispatcher};
 use crate::error::{Result, ServerError};
 use crate::session::Session;
 
@@ -111,7 +111,11 @@ async fn write_loop(mut half: OwnedWriteHalf, mut frames: mpsc::Receiver<Frame>,
 ///
 /// A malformed frame (bad UTF-8, undecodable JSON, or a non-request frame)
 /// closes only this connection; every accepted request is answered exactly once
-/// by its dispatch task.
+/// by its dispatch task. An unknown method is the one decode failure that is
+/// answered (`unknown_method`, §1) instead of closing the connection.
+///
+/// Each dispatch task races its handler against the shutdown token, so a request
+/// that is already in flight when the runtime stops answers `shutting_down`.
 async fn read_loop(
     read_half: OwnedReadHalf,
     context: &ServerContext,
@@ -144,6 +148,23 @@ async fn read_loop(
         }
         let frame = match NdjsonCodec.decode_str(text) {
             Ok(frame) => frame,
+            // Protocol §1: an unknown method answers `unknown_method` and the
+            // connection stays open. `ProtoError::UnknownMethod` carries only
+            // the method name, so the request id is lifted from the raw line;
+            // without a usable id the line is unusable framing after all.
+            Err(error @ adesk_proto::ProtoError::UnknownMethod(_)) => {
+                let Some(id) = request_id_from_line(text) else {
+                    tracing::warn!(%error, "unknown method without a usable id; closing connection");
+                    break;
+                };
+                tracing::debug!(%error, id, "unknown method");
+                let response = error_response(id, &ServerError::Proto(error));
+                if let Err(error) = writer.send(Frame::Response(response)).await {
+                    tracing::debug!(%error, "failed to deliver response");
+                    break;
+                }
+                continue;
+            }
             Err(error) => {
                 tracing::warn!(%error, "malformed frame; closing connection");
                 break;
@@ -161,12 +182,23 @@ async fn read_loop(
         let dispatcher = Arc::clone(&dispatcher);
         let session = session.clone();
         let writer = writer.clone();
+        let shutdown = context.shutdown.clone();
         let span =
             tracing::info_span!("request", id = request.id, method = request.method.method_name());
         tokio::spawn(
             async move {
                 let _permit = permit;
-                let response = dispatcher.dispatch(&session, request).await;
+                let id = request.id;
+                // Shutdown step 2 (`docs/architecture.md` §9): a request that is
+                // already inside a handler when the runtime stops fails with
+                // `shutting_down` instead of answering from a torn-down runtime.
+                // `biased` so an already-flagged token wins over a handler that
+                // would otherwise run to its own timeout.
+                let response = tokio::select! {
+                    biased;
+                    () = shutdown.cancelled() => error_response(id, &ServerError::ShuttingDown),
+                    response = dispatcher.dispatch(&session, request) => response,
+                };
                 if let Err(error) = writer.send(Frame::Response(response)).await {
                     tracing::debug!(%error, "failed to deliver response");
                 }
@@ -176,6 +208,17 @@ async fn read_loop(
     }
 
     Ok(())
+}
+
+/// Lifts the `id` of a raw request line that failed to decode as an unknown
+/// method.
+///
+/// `ProtoError::UnknownMethod` keeps only the method name, so the id has to come
+/// from the line itself. Returns `None` when the line is not a JSON object with
+/// a `u64` id — the caller then treats it as malformed framing.
+fn request_id_from_line(text: &str) -> Option<u64> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    value.get("id")?.as_u64()
 }
 
 /// Outbound half of a connection: frames for responses and subscription events.
@@ -261,5 +304,31 @@ mod tests {
         let writer = ConnectionWriter::new(tx);
         drop(rx);
         assert!(!writer.try_send(response(1)));
+    }
+
+    #[test]
+    fn request_id_is_lifted_from_a_raw_request_line() {
+        assert_eq!(
+            request_id_from_line(r#"{"id":77,"method":"definitely_not_a_method","params":{}}"#),
+            Some(77)
+        );
+        assert_eq!(
+            request_id_from_line(r#"{"id": 4294967297, "method": "nope"}"#),
+            Some(4_294_967_297)
+        );
+    }
+
+    #[test]
+    fn request_id_is_absent_for_unusable_lines() {
+        for line in [
+            "not json at all",
+            "{}",
+            r#"{"method":"nope","params":{}}"#,
+            r#"{"id":"77","method":"nope"}"#,
+            r#"{"id":-1,"method":"nope"}"#,
+            r#"{"id":null,"method":"nope"}"#,
+        ] {
+            assert_eq!(request_id_from_line(line), None, "line: {line}");
+        }
     }
 }

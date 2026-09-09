@@ -1,7 +1,7 @@
 //! Binding and accepting the AGP Unix socket.
 
 use std::io;
-use std::os::unix::fs::FileTypeExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt};
 use std::path::{Path, PathBuf};
 
 use tokio::net::{UnixListener, UnixStream};
@@ -13,11 +13,39 @@ use crate::error::{Result, ServerError};
 pub struct SocketListener {
     listener: UnixListener,
     path: PathBuf,
+    /// Identity of the socket file this listener created, so `Drop` never
+    /// unlinks a successor runtime's socket (see [`SocketFileId`]).
+    identity: Option<SocketFileId>,
+}
+
+/// Identity of a socket file: the `(device, inode)` pair.
+///
+/// A path can be unlinked and rebound (a successor runtime on the same path),
+/// so path equality is not enough to decide whether a socket file is still ours;
+/// the inode is, because an unlinked-but-open socket keeps its inode allocated
+/// while the listener lives.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SocketFileId {
+    device: u64,
+    inode: u64,
+}
+
+impl SocketFileId {
+    /// The identity of whatever currently occupies `path`, or `None` when it
+    /// cannot be stat'ed (absent path included).
+    fn of(path: &Path) -> Option<SocketFileId> {
+        let metadata = std::fs::symlink_metadata(path).ok()?;
+        Some(SocketFileId {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
 }
 
 impl SocketListener {
     /// Binds `path` after [`prepare_socket_path`], and removes the socket file
-    /// when dropped (best effort).
+    /// when dropped (best effort, and only while it is still the file this
+    /// listener bound).
     ///
     /// # Errors
     ///
@@ -29,6 +57,7 @@ impl SocketListener {
         Ok(SocketListener {
             listener,
             path: path.to_path_buf(),
+            identity: SocketFileId::of(path),
         })
     }
 
@@ -50,7 +79,12 @@ impl SocketListener {
 
 impl Drop for SocketListener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        // Only unlink the file this listener bound: between the runtime's
+        // explicit removal and this drop, a successor runtime may have rebound
+        // the same path, and its socket must survive.
+        if self.identity.is_some() && SocketFileId::of(&self.path) == self.identity {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -178,5 +212,45 @@ mod tests {
         let _first = SocketListener::bind(&path).await.unwrap();
         let error = SocketListener::bind(&path).await.expect_err("second bind");
         assert!(matches!(error, ServerError::Io(_)));
+    }
+
+    #[test]
+    fn socket_file_id_is_none_for_a_missing_path() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(SocketFileId::of(&dir.path().join("absent.sock")), None);
+    }
+
+    #[tokio::test]
+    async fn drop_keeps_a_socket_file_rebound_by_a_successor() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("adesk.sock");
+        let first = SocketListener::bind(&path).await.unwrap();
+        let first_id = SocketFileId::of(&path).expect("the bound socket file exists");
+
+        // A successor runtime takes over the path: the old socket file is
+        // unlinked and a new socket is bound there. The first listener is still
+        // alive, so its inode stays allocated and cannot be reused — the two
+        // identities differ deterministically.
+        std::fs::remove_file(&path).unwrap();
+        let second = SocketListener::bind(&path).await.unwrap();
+        let second_id = SocketFileId::of(&path).expect("the rebound socket file exists");
+        assert_ne!(first_id, second_id, "the successor bound a new socket file");
+
+        drop(first);
+        assert!(
+            path.exists(),
+            "dropping the stale listener must not unlink the successor's socket"
+        );
+        assert_eq!(
+            SocketFileId::of(&path),
+            Some(second_id),
+            "the successor's socket file must be untouched"
+        );
+
+        drop(second);
+        assert!(
+            !path.exists(),
+            "the owning listener still removes its own socket file"
+        );
     }
 }

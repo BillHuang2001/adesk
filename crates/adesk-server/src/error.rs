@@ -54,6 +54,13 @@ impl ServerError {
     /// mappings: an observer request mistake is a client error, a renderer
     /// failure is a rendering failure, and anything the runtime cannot classify
     /// is `internal` — never a code invented here.
+    ///
+    /// Errors that a sibling crate already classifies are **delegated** rather
+    /// than flattened: [`adesk_compositor::CompositorError::code`] and
+    /// [`adesk_proto::ProtoError::error_code`] own the codes for the
+    /// compositor- and transport-level failures, so a compositor-reported
+    /// `unknown_window` or an unknown method is answered with its own AGP code
+    /// instead of a blanket `internal`.
     pub fn code(&self) -> ErrorCode {
         match self {
             ServerError::Observer(error) => match error {
@@ -82,12 +89,20 @@ impl ServerError {
             // `adesk_render` owns the renderer-side mapping (`Encode` is a
             // `capture_failed`, caller mistakes are `invalid_request`).
             ServerError::Render(error) => error.code(),
+            // `adesk_compositor` owns its own mapping: an unknown window and a
+            // malformed request are client mistakes, `Render` is
+            // `render_failed`, and the lifecycle variants (`NotReady`,
+            // `StartupAborted`, `Stopped`) are `shutting_down` — exactly the
+            // answer a request racing shutdown must get.
+            ServerError::Compositor(error) => error.code(),
+            // `adesk_proto` owns the wire mapping: an unknown method and a
+            // version mismatch keep their codes, every other decode failure is
+            // an `invalid_request`.
+            ServerError::Proto(error) => error.error_code(),
             ServerError::ShuttingDown => ErrorCode::ShuttingDown,
-            ServerError::Compositor(_)
-            | ServerError::Io(_)
-            | ServerError::Proto(_)
-            | ServerError::Join(_)
-            | ServerError::Internal(_) => ErrorCode::Internal,
+            ServerError::Io(_) | ServerError::Join(_) | ServerError::Internal(_) => {
+                ErrorCode::Internal
+            }
         }
     }
 
@@ -249,6 +264,28 @@ mod tests {
                 ErrorCode::RenderFailed,
             ),
             (
+                ServerError::Compositor(adesk_compositor::CompositorError::UnknownWindow(
+                    WindowId(7),
+                )),
+                ErrorCode::UnknownWindow,
+            ),
+            (
+                ServerError::Compositor(adesk_compositor::CompositorError::InvalidRequest(
+                    "no focused window".into(),
+                )),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Compositor(adesk_compositor::CompositorError::Render(
+                    "readback failed".into(),
+                )),
+                ErrorCode::RenderFailed,
+            ),
+            (
+                ServerError::Compositor(adesk_compositor::CompositorError::Stopped),
+                ErrorCode::ShuttingDown,
+            ),
+            (
                 ServerError::Compositor(adesk_compositor::CompositorError::Internal("bug".into())),
                 ErrorCode::Internal,
             ),
@@ -257,8 +294,21 @@ mod tests {
                 ErrorCode::Internal,
             ),
             (
+                ServerError::Proto(adesk_proto::ProtoError::UnknownMethod(
+                    "definitely_not_a_method".into(),
+                )),
+                ErrorCode::UnknownMethod,
+            ),
+            (
+                ServerError::Proto(adesk_proto::ProtoError::VersionMismatch {
+                    expected: 1,
+                    got: 2,
+                }),
+                ErrorCode::ProtocolVersionMismatch,
+            ),
+            (
                 ServerError::Proto(adesk_proto::ProtoError::Malformed("garbage".into())),
-                ErrorCode::Internal,
+                ErrorCode::InvalidRequest,
             ),
             (ServerError::ShuttingDown, ErrorCode::ShuttingDown),
             (
@@ -272,6 +322,169 @@ mod tests {
     fn code_matches_protocol_table() {
         for (error, expected) in cases() {
             assert_eq!(error.code(), expected, "wrong code for {error:?}");
+        }
+    }
+
+    /// One instance of every [`adesk_compositor::CompositorError`] variant.
+    ///
+    /// The compositor owns this mapping ([`adesk_compositor::CompositorError::code`]);
+    /// the server must delegate to it instead of flattening the error into
+    /// `internal`, so the whole table is pinned here.
+    fn compositor_cases() -> Vec<(adesk_compositor::CompositorError, ErrorCode)> {
+        vec![
+            (
+                adesk_compositor::CompositorError::ThreadSpawn(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "spawn failed",
+                )),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::Display("no display".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::Socket("bind failed".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::EventLoop("loop failed".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::Renderer("no renderer".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::Keyboard("no keymap".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::NotReady,
+                ErrorCode::ShuttingDown,
+            ),
+            (
+                adesk_compositor::CompositorError::StartupAborted,
+                ErrorCode::ShuttingDown,
+            ),
+            (
+                adesk_compositor::CompositorError::Stopped,
+                ErrorCode::ShuttingDown,
+            ),
+            (
+                adesk_compositor::CompositorError::UnknownWindow(WindowId(7)),
+                ErrorCode::UnknownWindow,
+            ),
+            (
+                adesk_compositor::CompositorError::InvalidRequest("no focused window".into()),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_compositor::CompositorError::WindowManagement("tiling failed".into()),
+                ErrorCode::Internal,
+            ),
+            (
+                adesk_compositor::CompositorError::Render("readback failed".into()),
+                ErrorCode::RenderFailed,
+            ),
+            (
+                adesk_compositor::CompositorError::Internal("bug".into()),
+                ErrorCode::Internal,
+            ),
+        ]
+    }
+
+    #[test]
+    fn compositor_errors_keep_the_compositor_mapping() {
+        for (error, expected) in compositor_cases() {
+            let server = ServerError::Compositor(error);
+            assert_eq!(server.code(), expected, "wrong code for {server:?}");
+            assert_eq!(
+                server.payload().code,
+                expected,
+                "wrong payload code for {server:?}"
+            );
+        }
+    }
+
+    /// One instance of every [`adesk_proto::ProtoError`] variant.
+    ///
+    /// `adesk-proto` owns this mapping ([`adesk_proto::ProtoError::error_code`]);
+    /// the transport layer must not answer `internal` for a decode failure a
+    /// client can act on.
+    fn proto_cases() -> Vec<(adesk_proto::ProtoError, ErrorCode)> {
+        let json = serde_json::from_str::<serde_json::Value>("{not json")
+            .expect_err("truncated JSON must fail to parse");
+        let base64 = adesk_proto::ImagePayload {
+            width: 1,
+            height: 1,
+            format: adesk_proto::ImageFormat::Png,
+            stride: None,
+            data: "not base64!".to_owned(),
+            scale: 1.0,
+        }
+        .decode_data()
+        .expect_err("invalid base64 must fail to decode");
+        let base64 = match base64 {
+            adesk_proto::ProtoError::Base64(error) => error,
+            other => panic!("invalid base64 must fail with ProtoError::Base64, got {other:?}"),
+        };
+        vec![
+            (
+                adesk_proto::ProtoError::Malformed("garbage".into()),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_proto::ProtoError::UnknownMethod("definitely_not_a_method".into()),
+                ErrorCode::UnknownMethod,
+            ),
+            (
+                adesk_proto::ProtoError::InvalidParams {
+                    method: "click".into(),
+                    message: "missing window_id".into(),
+                },
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_proto::ProtoError::InvalidEventData {
+                    kind: "window_created".into(),
+                    message: "missing window".into(),
+                },
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_proto::ProtoError::UnknownEventKind("inspect_frame".into()),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_proto::ProtoError::InvalidResult("not an object".into()),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                adesk_proto::ProtoError::VersionMismatch {
+                    expected: 1,
+                    got: 2,
+                },
+                ErrorCode::ProtocolVersionMismatch,
+            ),
+            (adesk_proto::ProtoError::Json(json), ErrorCode::InvalidRequest),
+            (
+                adesk_proto::ProtoError::Base64(base64),
+                ErrorCode::InvalidRequest,
+            ),
+        ]
+    }
+
+    #[test]
+    fn proto_errors_keep_the_protocol_mapping() {
+        for (error, expected) in proto_cases() {
+            let server = ServerError::Proto(error);
+            assert_eq!(server.code(), expected, "wrong code for {server:?}");
+            assert_eq!(
+                server.payload().code,
+                expected,
+                "wrong payload code for {server:?}"
+            );
         }
     }
 
