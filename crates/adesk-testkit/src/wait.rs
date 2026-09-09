@@ -39,7 +39,11 @@ where
 ///
 /// Unlike [`wait_until`], the condition is awaited directly (no polling interval); the
 /// overall deadline still applies.
-pub async fn wait_until_async<F, Fut>(timeout: Duration, what: &'static str, mut cond: F) -> Result<()>
+pub async fn wait_until_async<F, Fut>(
+    timeout: Duration,
+    what: &'static str,
+    mut cond: F,
+) -> Result<()>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = bool>,
