@@ -8,8 +8,8 @@
 //!
 //! An empty `kinds` filter means "all kinds" (the §5.6 default `kinds = all`);
 //! per-kind semantics — notably `surface_damage` counting only commits with a
-//! non-empty damage region — live in [`EventKind::matches`] and are not
-//! reimplemented here.
+//! non-empty damage region — live in [`adesk_proto::EventKind::matches`] and are
+//! not reimplemented here.
 //!
 //! Event fan-out is non-blocking: a slow consumer loses event frames (never
 //! responses) and its subscription is removed once the queue closes.

@@ -1,9 +1,9 @@
 //! Shutdown coordination: stop accepting, fail in-flight requests with
 //! `shutting_down`, drop the Wayland display, remove the socket file.
 //!
-//! [`ShutdownHandle`] is a watch-based token so every task can await
-//! cancellation without polling; [`run`] performs the ordered teardown exactly
-//! once (`docs/architecture.md` §9).
+//! [`crate::shutdown::ShutdownHandle`] is a watch-based token so every task can
+//! await cancellation without polling; [`crate::shutdown::run`] performs the
+//! ordered teardown exactly once (`docs/architecture.md` §9).
 
 use std::path::Path;
 

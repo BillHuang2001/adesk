@@ -99,7 +99,9 @@ pub struct InputQueue {
 impl InputQueue {
     /// An empty queue.
     pub fn new() -> InputQueue {
-        InputQueue { gate: tokio::sync::Mutex::new(()) }
+        InputQueue {
+            gate: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// Runs `future` while holding the queue, preserving submission order.

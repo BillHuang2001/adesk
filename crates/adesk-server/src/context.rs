@@ -106,12 +106,18 @@ impl CursorTracker {
 
     /// Records a pointer position.
     pub fn set(&self, position: Point) {
-        *self.position.write().unwrap_or_else(|error| error.into_inner()) = Some(position);
+        *self
+            .position
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(position);
     }
 
     /// The most recent pointer position, if any.
     pub fn get(&self) -> Option<Point> {
-        *self.position.read().unwrap_or_else(|error| error.into_inner())
+        *self
+            .position
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
     }
 }
 

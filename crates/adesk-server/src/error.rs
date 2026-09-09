@@ -205,7 +205,9 @@ mod tests {
                 ErrorCode::InvalidRequest,
             ),
             (
-                ServerError::Inspector(adesk_inspector::Error::InvalidFrame("size mismatch".into())),
+                ServerError::Inspector(adesk_inspector::Error::InvalidFrame(
+                    "size mismatch".into(),
+                )),
                 ErrorCode::InvalidRequest,
             ),
             (
