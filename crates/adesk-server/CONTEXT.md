@@ -15,7 +15,7 @@ Everything below is re-exported at the crate root; `adesk-testkit` is designed a
 
 - `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>> }` (`src/config.rs`)
   - `new(socket_path, compositor)` (the constructor `adesk-testkit`'s harness calls) and `Default` (environment-resolved socket path, compositor defaults); builders `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
-  - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; identical to `adesk_client::default_socket_path`.
+  - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock` (`adesk_client::default_socket_path` currently diverges on the last fallback — see Known Issues).
   - `parse_size("WxH")` / `parse_renderer("auto|gl|pixman")` are the CLI value parsers.
 - `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
 - `RunningServer` (Clone handle; `Debug` prints only the socket path; dropping it does not stop the runtime):
