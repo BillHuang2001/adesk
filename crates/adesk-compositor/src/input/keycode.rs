@@ -97,7 +97,7 @@ impl Keysym {
 
 /// A key or an ordered chord.
 ///
-/// Chords are tapped, never held: [`chord_sequence`] presses the keys in order
+/// Chords are tapped, never held: `chord_sequence` presses the keys in order
 /// and releases them in reverse.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KeyCode {
