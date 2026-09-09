@@ -128,7 +128,9 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 
 ## Known Issues
 
-- **Skeleton state:** every transport, event-parsing, image-decoding and stream body is `todo!()`; only the wire encode/decode (`src/wire.rs`) and the method marshalling are written. `Client::connect` therefore panics until the Manager phase implements `transport.rs`.
+- **Skeleton state:** `src/transport.rs`, `src/events.rs`, `src/wire.rs`, `tests/common/mod.rs` and the `concurrency`/`framing`/`version`/`errors` test targets are implemented and green (11 tests). `src/image.rs` decoding and the `api`/`events`/`images` test bodies are still `todo!()`; `Client::capture_*`/`observe` therefore panic until the image phase lands.
+- **Close reasons travel out of band.** A `oneshot` can only carry the server's answer, so the reader/writer/`close()` store the first `CloseReason` (Protocol / Closed / Io) in the connection; every request cancelled afterwards reports it. `tests/framing.rs` pins Protocol for malformed/oversized frames and Closed for EOF.
+- **Unknown event kinds need the lenient wire path.** `adesk_proto::NdjsonCodec::decode` rejects an event name it does not know, so `wire::decode_line` retries the line as bare JSON (`event`/`seq`/`ts_ms`, optional `data`) before reporting `Protocol`; this is what makes `AgpEvent::Other` reachable for future kinds (protocol §7).
 - `docs/protocol.md` §5.7 does not specify the data shape of an `inspect_frame` event; the client assumes `{"image": ImagePayload}` and falls back to `AgpEvent::Other` if the payload does not fit.
 - `docs/protocol.md` §5.6 lists 11 `EventKind` values while `adesk_core::EventKind` has 9; the client's filter enum carries all 11 and `AgpEvent::Other` preserves any frame it cannot type.
 - `docs/protocol.md` §4 shows `image` inside `Observation` while `adesk-core::Observation` has no such field; see Design Decisions for how `ObserveResult` tolerates both layouts. Root may want to pin one layout.
