@@ -71,6 +71,8 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 |---|---|
 | Public façade, lifecycle entry points, compositor contract | `./src/manager.rs` |
 | Policy decisions — the multi-window seam | `./src/policy.rs` |
+| Policy unit test matrix (crate-internal) | `./src/policy_tests.rs` |
+| Public-API policy integration test | `./tests/policy_matrix.rs` |
 | `SurfaceKey`, `WindowRecord`, `MapRequest`, internal `WindowModel` | `./src/model.rs` |
 | `WmAction` decision vocabulary | `./src/action.rs` |
 | `PolicyConfig` (output size, tiled rect) | `./src/config.rs` |
@@ -98,27 +100,19 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 
 ## Test Strategy
 
-- Phase 2 (Manager) unit tests, inline `#[cfg(test)]`, all pure — no display, GPU, network, clock or installed application:
-  - map: id assignment, record defaults (`Active`, `mapped`, tiled geometry, zero commit/popups), action order `[ConfigureWindow, Activate]`, previous active deactivated but still mapped;
-  - destroy: active → `[ActivatePrevious]` with the MRU fallback, inactive → `[]`, last window → no active window, unknown → `[]`;
-  - activate: switch + MRU reordering across a sequence, `[None]` when already active, `[]` when unknown;
-  - id monotonicity and no reuse across destroy → remap;
-  - popup counting incl. saturation, title updates, commit watermark monotonicity, unknown-id tolerance for every event;
-  - `window_info` projection of all 11 fields, `windows()` creation order, `window_by_surface` round-trip, duplicate-map idempotence;
-  - `resolve_position`: zero and non-zero origins, pixel clamping, normalized corners/center/NaN, unknown → `None`;
-  - `tiled_rect` and `set_output_size` re-tiling every mapped window;
-  - invariant sweep: after any operation sequence at most one `Active` record and it equals `active_window()`.
-- One integration test `./tests/policy_matrix.rs` driving the full lifecycle through the public API only.
-- Phase 1 tests cover only the implemented data plumbing: 10 unit tests (`config`, `error`, `model`, `action`) plus 1 doctest in `src/lib.rs`; they must stay green.
+- 40 tests, all pure — no display, GPU, network, clock or installed application; run with `./scripts/dev.sh cargo test -p adesk-wm`.
+- Unit tests live in `./src/policy_tests.rs` (declared `#[cfg(test)] mod policy_tests;` in `lib.rs`), not inline in `policy.rs`: the full matrix pushed `policy.rs` past the ~1000-line threshold, so the module was extracted. Unit tests may construct `WindowModel` directly — that is how non-origin geometry and saturated counters are exercised.
+- Coverage: map (id assignment, record defaults, action order, previous active deactivated but mapped), duplicate-surface-key idempotence, destroy (MRU fallback / inactive / last window / unknown), activate (switch + MRU reorder, `[None]`, `[]`), id monotonicity and no reuse, popup saturation in both directions, title, commit watermark monotonicity, unknown-id tolerance on every event path, `window_info` field projection, `windows()` creation order, `window_by_surface` round-trip, `resolve_position` (documented non-origin examples, origin clamping, normalized corners/center/NaN/∞, empty window), `set_output_size` re-tiling in creation order, and an invariant sweep after every step of a mixed sequence.
+- `./tests/policy_matrix.rs` (3 tests) drives the full lifecycle through the public API only — the exact calls `adesk-compositor` makes.
+- The `src/lib.rs` doctest is a running example (id assignment, action order, activation, `resolve_position`); it must stay green.
+- The data-plumbing tests in `config`/`error`/`model`/`action` (10) stay green.
 
 ## Notes for Agents
 
-- The workspace does not load while any `crates/*` sibling lacks a `Cargo.toml`; until every sibling has a manifest, validate standalone: copy `crates/adesk-core` + `crates/adesk-wm` into a temp dir with a minimal workspace manifest (`[workspace.package]` + `[workspace.dependencies]` for `adesk-core` path, `serde`, `serde_json`, `thiserror`, `tracing`) and run `bash scripts/dev.sh cargo check --manifest-path <tmp>/Cargo.toml -p adesk-wm --all-targets`.
-- `adesk_core::Position::resolve(rect)` documents window-relative→window-relative, but for a rect with a non-zero origin it clamps `Pixels` into the rect's coordinate space and offsets `Normalized` by the origin; resolve against a rect at the origin and translate afterwards.
+- `adesk_core::Position::resolve(rect)` documents window-relative→window-relative, but for a rect with a non-zero origin it clamps `Pixels` into the rect's coordinate space and offsets `Normalized` by the origin; `policy::resolve_position` therefore resolves against a rect at the origin and translates afterwards.
 - Do not add Smithay or tokio "temporarily": the crate must stay pure; compositor integration lives in `adesk-compositor`.
-- `WindowModel` carries `#[allow(dead_code)]` only because Phase 1 policy bodies are `todo!()`; remove the attribute when the policy lands.
 
 ## Status
 
-- Phase 1 (architecture) complete: public API, module skeleton, `Cargo.toml`, this file. `cargo check --all-targets` clean (0 warnings), clippy clean, 10 unit tests + 1 doctest pass, rustfmt clean.
-- Phase 2 (Manager) pending: implement every `todo!()` in `src/policy.rs` per its doc comment, add the policy test matrix and `./tests/policy_matrix.rs`, keep the public signatures unchanged.
+- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes left, `cargo check`/`clippy --all-targets -- -D warnings`/`fmt --check` clean under the dev shell, 36 unit + 3 integration + 1 doctest passing.
+- Public API is unchanged from the architecture phase; `adesk-compositor` applies the `WmAction`s per the integration section above.

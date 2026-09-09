@@ -1,11 +1,14 @@
 //! Offscreen render targets and the frames read back from them.
 
+use std::fmt;
+
 use adesk_core::{ImageBuffer, Region, Size};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::Offscreen;
 use smithay::utils::{Buffer as BufferCoords, Size as TargetSize};
 
-use crate::error::Result;
+use crate::config::TARGET_FORMAT;
+use crate::error::{RenderError, Result};
 
 /// An offscreen render target of a known size and pixel format.
 ///
@@ -66,13 +69,53 @@ impl<T> OffscreenTarget<T> {
 /// `T` is the renderer's offscreen target type; the renderer must implement
 /// `Offscreen<T>` (both `GlesRenderer` and `PixmanRenderer` do, for
 /// `GlesRenderbuffer` and `pixman::Image<'static, 'static>` respectively).
+///
+/// The target always uses [`TARGET_FORMAT`]. Sizes larger than `i32::MAX` in a
+/// dimension are saturated (the renderer will reject them); an empty size is
+/// rejected up front with [`RenderError::TargetCreation`] because no renderer
+/// can allocate a `0x0` target and a structured error is more useful than a
+/// backend-specific one.
 pub fn create_target<R, T>(renderer: &mut R, size: Size) -> Result<OffscreenTarget<T>>
 where
     R: Offscreen<T>,
 {
-    let _ = (renderer, size);
-    todo!("create_target: renderer.create_buffer(TARGET_FORMAT, size), wrap in OffscreenTarget")
+    if size.is_empty() {
+        return Err(RenderError::TargetCreation {
+            size,
+            source: Box::new(RendererErrorText(format!(
+                "a {size:?} render target cannot be allocated"
+            ))),
+        });
+    }
+    let target_size = TargetSize::<i32, BufferCoords>::from((
+        size.w.min(i32::MAX as u32) as i32,
+        size.h.min(i32::MAX as u32) as i32,
+    ));
+    let target = renderer
+        .create_buffer(TARGET_FORMAT, target_size)
+        .map_err(|err| RenderError::TargetCreation {
+            size,
+            source: Box::new(RendererErrorText(err.to_string())),
+        })?;
+    Ok(OffscreenTarget::new(target, target_size, TARGET_FORMAT))
 }
+
+/// Renderer error text adapted to the `Box<dyn Error + Send + Sync>` field of
+/// [`RenderError::TargetCreation`].
+///
+/// Smithay only guarantees `RendererSuper::Error: std::error::Error` (no
+/// `Send + Sync + 'static`), and [`create_target`]'s signature must not grow
+/// that bound, so the renderer error is preserved as its `Display` text.
+#[derive(Debug)]
+struct RendererErrorText(String);
+
+impl fmt::Display for RendererErrorText {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for RendererErrorText {}
 
 /// The result of one offscreen render pass.
 ///

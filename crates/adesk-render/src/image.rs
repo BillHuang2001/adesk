@@ -128,10 +128,12 @@ pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
 
 /// Converts raw read-back bytes into a tightly packed [`ImageBuffer`].
 ///
-/// `stride` is the source row length in bytes (`>= width * 4`); `flipped`
-/// states whether the source rows are bottom-to-top, which is what GL readback
-/// reports (`TextureMapping::flipped() == true`) while pixman reports `false`.
-/// Padding bytes and the row order are normalized away here.
+/// `stride` is the source row length in bytes (`>= width * 4`); `flipped` is
+/// the caller's statement about the row order of `data`: `true` means the rows
+/// run bottom-to-top and must be reversed, `false` means they are already
+/// top-to-bottom in the caller's coordinate space. It is a general utility, not
+/// a renderer-specific signal — the caller decides. Padding bytes and the row
+/// order are normalized away here.
 pub fn image_from_readback(
     data: &[u8],
     width: u32,

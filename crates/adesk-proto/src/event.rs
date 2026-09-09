@@ -10,7 +10,7 @@ use adesk_core::{AppId, LaunchId, Region, RuntimeEvent, WindowId};
 use serde::{Deserialize, Serialize};
 
 use crate::image::ImagePayload;
-use crate::Result;
+use crate::{ProtoError, Result};
 
 /// Event kind: the `event` field of an event frame and the `kinds` filter of
 /// `subscribe_events` (§5.6).
@@ -79,7 +79,39 @@ impl EventKind {
     /// counts every commit; `Quiet`/`InspectFrame` are not derived from
     /// [`RuntimeEvent`]s and therefore never match one.
     pub fn matches(&self, event: &RuntimeEvent) -> bool {
-        todo!()
+        match event {
+            RuntimeEvent::SurfaceCommit { damage, .. } => match self {
+                EventKind::SurfaceCommit => true,
+                EventKind::SurfaceDamage => !damage.is_empty(),
+                _ => false,
+            },
+            RuntimeEvent::WindowCreated { .. } => *self == EventKind::WindowCreated,
+            RuntimeEvent::WindowDestroyed { .. } => *self == EventKind::WindowDestroyed,
+            RuntimeEvent::WindowActivated { .. } => *self == EventKind::WindowActivated,
+            RuntimeEvent::TitleChanged { .. } => *self == EventKind::TitleChanged,
+            RuntimeEvent::FocusChanged { .. } => *self == EventKind::FocusChanged,
+            RuntimeEvent::PopupAppeared { .. } => *self == EventKind::PopupAppeared,
+            RuntimeEvent::PopupDisappeared { .. } => *self == EventKind::PopupDisappeared,
+            RuntimeEvent::AppLaunched { .. } => *self == EventKind::AppLaunched,
+        }
+    }
+}
+
+/// The wire name of an event kind (`snake_case`, §5.6).
+fn kind_name(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::WindowCreated => "window_created",
+        EventKind::WindowDestroyed => "window_destroyed",
+        EventKind::WindowActivated => "window_activated",
+        EventKind::TitleChanged => "title_changed",
+        EventKind::SurfaceCommit => "surface_commit",
+        EventKind::SurfaceDamage => "surface_damage",
+        EventKind::FocusChanged => "focus_changed",
+        EventKind::PopupAppeared => "popup_appeared",
+        EventKind::PopupDisappeared => "popup_disappeared",
+        EventKind::Quiet => "quiet",
+        EventKind::AppLaunched => "app_launched",
+        EventKind::InspectFrame => "inspect_frame",
     }
 }
 
@@ -250,7 +282,82 @@ impl EventPayload {
     ///
     /// `seq`/`ts_ms` are dropped: they live on the event frame (§1).
     pub fn from_runtime(event: &RuntimeEvent) -> EventPayload {
-        todo!()
+        match event {
+            RuntimeEvent::WindowCreated {
+                window_id,
+                app_id,
+                pid,
+                launch_id,
+                title,
+                ..
+            } => EventPayload::WindowCreated(WindowCreatedEvent {
+                window_id: *window_id,
+                app_id: app_id.clone(),
+                pid: *pid,
+                launch_id: *launch_id,
+                title: title.clone(),
+            }),
+            RuntimeEvent::WindowDestroyed { window_id, .. } => {
+                EventPayload::WindowDestroyed(WindowDestroyedEvent {
+                    window_id: *window_id,
+                })
+            }
+            RuntimeEvent::WindowActivated {
+                window_id,
+                previous,
+                ..
+            } => EventPayload::WindowActivated(WindowActivatedEvent {
+                window_id: *window_id,
+                previous: *previous,
+            }),
+            RuntimeEvent::TitleChanged {
+                window_id, title, ..
+            } => EventPayload::TitleChanged(TitleChangedEvent {
+                window_id: *window_id,
+                title: title.clone(),
+            }),
+            RuntimeEvent::SurfaceCommit {
+                window_id,
+                commit_seq,
+                damage,
+                ..
+            } => EventPayload::SurfaceCommit(SurfaceCommitEvent {
+                window_id: *window_id,
+                commit_seq: *commit_seq,
+                damage: damage.clone(),
+            }),
+            RuntimeEvent::FocusChanged { window_id, .. } => {
+                EventPayload::FocusChanged(FocusChangedEvent {
+                    window_id: *window_id,
+                })
+            }
+            RuntimeEvent::PopupAppeared {
+                window_id,
+                popup_id,
+                ..
+            } => EventPayload::PopupAppeared(PopupAppearedEvent {
+                window_id: *window_id,
+                popup_id: *popup_id,
+            }),
+            RuntimeEvent::PopupDisappeared {
+                window_id,
+                popup_id,
+                ..
+            } => EventPayload::PopupDisappeared(PopupDisappearedEvent {
+                window_id: *window_id,
+                popup_id: *popup_id,
+            }),
+            RuntimeEvent::AppLaunched {
+                launch_id,
+                app_id,
+                pid,
+                ..
+            } => EventPayload::AppLaunched(AppLaunchedEvent {
+                launch_id: *launch_id,
+                app_id: app_id.clone(),
+                pid: *pid,
+            }),
+        }
     }
 
     /// Rebuilds the core runtime event, stamping `seq`/`ts_ms` onto it.
@@ -258,7 +365,66 @@ impl EventPayload {
     /// Returns `None` for protocol-only kinds (`quiet`, `inspect_frame`), which
     /// have no [`RuntimeEvent`] counterpart.
     pub fn to_runtime(&self, seq: u64, ts_ms: u64) -> Option<RuntimeEvent> {
-        todo!()
+        Some(match self {
+            EventPayload::WindowCreated(event) => RuntimeEvent::WindowCreated {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                app_id: event.app_id.clone(),
+                pid: event.pid,
+                launch_id: event.launch_id,
+                title: event.title.clone(),
+            },
+            EventPayload::WindowDestroyed(event) => RuntimeEvent::WindowDestroyed {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+            },
+            EventPayload::WindowActivated(event) => RuntimeEvent::WindowActivated {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                previous: event.previous,
+            },
+            EventPayload::TitleChanged(event) => RuntimeEvent::TitleChanged {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                title: event.title.clone(),
+            },
+            EventPayload::SurfaceCommit(event) => RuntimeEvent::SurfaceCommit {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                commit_seq: event.commit_seq,
+                damage: event.damage.clone(),
+            },
+            EventPayload::FocusChanged(event) => RuntimeEvent::FocusChanged {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+            },
+            EventPayload::PopupAppeared(event) => RuntimeEvent::PopupAppeared {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                popup_id: event.popup_id,
+            },
+            EventPayload::PopupDisappeared(event) => RuntimeEvent::PopupDisappeared {
+                seq,
+                ts_ms,
+                window_id: event.window_id,
+                popup_id: event.popup_id,
+            },
+            EventPayload::AppLaunched(event) => RuntimeEvent::AppLaunched {
+                seq,
+                ts_ms,
+                launch_id: event.launch_id,
+                app_id: event.app_id.clone(),
+                pid: event.pid,
+            },
+            EventPayload::Quiet(_) | EventPayload::InspectFrame(_) => return None,
+        })
     }
 
     /// Decodes a `data` object for `kind`.
@@ -270,7 +436,35 @@ impl EventPayload {
     /// [`ProtoError::Malformed`](crate::ProtoError::Malformed) for
     /// `surface_damage`, which is a filter alias and never an emitted kind.
     pub fn from_data(kind: EventKind, data: serde_json::Value) -> Result<EventPayload> {
-        todo!()
+        fn parse<T: serde::de::DeserializeOwned>(
+            kind: EventKind,
+            data: serde_json::Value,
+        ) -> Result<T> {
+            serde_json::from_value(data).map_err(|error| ProtoError::InvalidEventData {
+                kind: kind_name(kind).to_owned(),
+                message: error.to_string(),
+            })
+        }
+
+        Ok(match kind {
+            EventKind::WindowCreated => EventPayload::WindowCreated(parse(kind, data)?),
+            EventKind::WindowDestroyed => EventPayload::WindowDestroyed(parse(kind, data)?),
+            EventKind::WindowActivated => EventPayload::WindowActivated(parse(kind, data)?),
+            EventKind::TitleChanged => EventPayload::TitleChanged(parse(kind, data)?),
+            EventKind::SurfaceCommit => EventPayload::SurfaceCommit(parse(kind, data)?),
+            EventKind::FocusChanged => EventPayload::FocusChanged(parse(kind, data)?),
+            EventKind::PopupAppeared => EventPayload::PopupAppeared(parse(kind, data)?),
+            EventKind::PopupDisappeared => EventPayload::PopupDisappeared(parse(kind, data)?),
+            EventKind::AppLaunched => EventPayload::AppLaunched(parse(kind, data)?),
+            EventKind::Quiet => EventPayload::Quiet(parse(kind, data)?),
+            EventKind::InspectFrame => EventPayload::InspectFrame(parse(kind, data)?),
+            EventKind::SurfaceDamage => {
+                return Err(ProtoError::Malformed(
+                    "`surface_damage` is a subscription filter alias, never an emitted event kind"
+                        .to_owned(),
+                ))
+            }
+        })
     }
 
     /// Encodes this payload as its `data` object.
@@ -279,6 +473,18 @@ impl EventPayload {
     ///
     /// Returns [`ProtoError::Json`](crate::ProtoError::Json) if serialization fails.
     pub fn to_data(&self) -> Result<serde_json::Value> {
-        todo!()
+        Ok(match self {
+            EventPayload::WindowCreated(event) => serde_json::to_value(event)?,
+            EventPayload::WindowDestroyed(event) => serde_json::to_value(event)?,
+            EventPayload::WindowActivated(event) => serde_json::to_value(event)?,
+            EventPayload::TitleChanged(event) => serde_json::to_value(event)?,
+            EventPayload::SurfaceCommit(event) => serde_json::to_value(event)?,
+            EventPayload::FocusChanged(event) => serde_json::to_value(event)?,
+            EventPayload::PopupAppeared(event) => serde_json::to_value(event)?,
+            EventPayload::PopupDisappeared(event) => serde_json::to_value(event)?,
+            EventPayload::AppLaunched(event) => serde_json::to_value(event)?,
+            EventPayload::Quiet(event) => serde_json::to_value(event)?,
+            EventPayload::InspectFrame(event) => serde_json::to_value(event)?,
+        })
     }
 }

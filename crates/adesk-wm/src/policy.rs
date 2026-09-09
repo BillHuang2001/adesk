@@ -16,12 +16,37 @@
 //! ignored (returning no actions), because a compositor may legitimately
 //! observe an event for a window it has just destroyed.
 
-use adesk_core::{Point, Position, Region, Size, WindowId, WindowInfo};
+use adesk_core::{Point, Position, Rect, Region, Size, WindowId, WindowInfo, WindowState};
+use tracing::{debug, trace};
 
 use crate::action::WmAction;
 use crate::config::PolicyConfig;
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::model::{MapRequest, SurfaceKey, WindowModel, WindowRecord};
+
+/// Index of `id` in `model.records`, or `None` when it is not tracked.
+fn index_of(model: &WindowModel, id: WindowId) -> Option<usize> {
+    model.records.iter().position(|record| record.id == id)
+}
+
+/// Mutable record for `id`, or `None` when it is not tracked.
+fn record_mut(model: &mut WindowModel, id: WindowId) -> Option<&mut WindowRecord> {
+    model.records.iter_mut().find(|record| record.id == id)
+}
+
+/// Makes `id` the only `Active` record and marks every other record `Inactive`.
+///
+/// Only touches `records`; the MRU order is maintained by the callers so the
+/// two representations can never drift.
+fn mark_active(model: &mut WindowModel, id: WindowId) {
+    for record in &mut model.records {
+        record.state = if record.id == id {
+            WindowState::Active
+        } else {
+            WindowState::Inactive
+        };
+    }
+}
 
 /// Handles a toplevel map.
 ///
@@ -41,8 +66,46 @@ pub(crate) fn on_map(
     config: &PolicyConfig,
     request: MapRequest,
 ) -> (WindowId, Vec<WmAction>) {
-    let _ = (model, config, request);
-    todo!("adesk-wm policy: on_map")
+    if let Some(existing) = window_by_surface(model, request.surface_key) {
+        debug!(
+            surface = %request.surface_key,
+            window_id = existing.0,
+            "duplicate map of tracked surface key, reusing window"
+        );
+        return (existing, vec![WmAction::None]);
+    }
+
+    let id = WindowId(model.next_id);
+    model.next_id += 1;
+    let geometry = config.tiled_rect();
+    model.records.push(WindowRecord {
+        id,
+        surface_key: request.surface_key,
+        app_id: request.app_id,
+        pid: request.pid,
+        title: request.title,
+        geometry,
+        state: WindowState::Active,
+        mapped: true,
+        created_seq: request.created_seq,
+        last_commit_seq: 0,
+        popup_count: 0,
+    });
+    mark_active(model, id);
+    model.mru.insert(0, id);
+    debug!(
+        window_id = id.0,
+        surface = %request.surface_key,
+        ?geometry,
+        "mapped toplevel"
+    );
+    (
+        id,
+        vec![
+            WmAction::ConfigureWindow { id, rect: geometry },
+            WmAction::Activate { id },
+        ],
+    )
 }
 
 /// Handles a toplevel destroy (v1 does not distinguish unmap from destroy).
@@ -57,8 +120,36 @@ pub(crate) fn on_map(
 /// If `id` was not active (or unknown) the active window is unchanged and the
 /// returned list is empty.
 pub(crate) fn on_destroy(model: &mut WindowModel, id: WindowId) -> Vec<WmAction> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: on_destroy")
+    let Some(index) = index_of(model, id) else {
+        return Vec::new();
+    };
+    let was_active = active_window(model) == Some(id);
+    model.records.remove(index);
+    model.mru.retain(|entry| *entry != id);
+
+    if !was_active {
+        debug!(window_id = id.0, "destroyed inactive toplevel");
+        return Vec::new();
+    }
+
+    match active_window(model) {
+        Some(fallback) => {
+            mark_active(model, fallback);
+            debug!(
+                window_id = id.0,
+                fallback = fallback.0,
+                "destroyed active toplevel, falling back to MRU window"
+            );
+            vec![WmAction::ActivatePrevious { id: fallback }]
+        }
+        None => {
+            debug!(
+                window_id = id.0,
+                "destroyed last toplevel, no active window"
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// Handles a title change.
@@ -70,8 +161,11 @@ pub(crate) fn on_title(
     id: WindowId,
     title: Option<String>,
 ) -> Vec<WmAction> {
-    let _ = (model, id, title);
-    todo!("adesk-wm policy: on_title")
+    if let Some(record) = record_mut(model, id) {
+        record.title = title;
+        trace!(window_id = id.0, "title changed");
+    }
+    Vec::new()
 }
 
 /// Handles a surface commit on the window's surface tree.
@@ -87,8 +181,18 @@ pub(crate) fn on_commit(
     commit_seq: u64,
     damage: &Region,
 ) -> Vec<WmAction> {
-    let _ = (model, id, commit_seq, damage);
-    todo!("adesk-wm policy: on_commit")
+    if let Some(record) = record_mut(model, id) {
+        // `max` keeps the watermark monotonic when commits arrive out of order
+        // or twice; no allocation, this is the hot path.
+        record.last_commit_seq = record.last_commit_seq.max(commit_seq);
+        trace!(
+            window_id = id.0,
+            commit_seq,
+            damage = damage.len(),
+            "surface commit"
+        );
+    }
+    Vec::new()
 }
 
 /// Handles a popup being mapped for this window.
@@ -97,8 +201,11 @@ pub(crate) fn on_commit(
 /// above their parent and never change which toplevel is visible. Unknown ids
 /// are ignored.
 pub(crate) fn on_popup_added(model: &mut WindowModel, id: WindowId) -> Vec<WmAction> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: on_popup_added")
+    if let Some(record) = record_mut(model, id) {
+        record.popup_count = record.popup_count.saturating_add(1);
+        trace!(window_id = id.0, popups = record.popup_count, "popup added");
+    }
+    Vec::new()
 }
 
 /// Handles a popup being unmapped for this window.
@@ -107,8 +214,15 @@ pub(crate) fn on_popup_added(model: &mut WindowModel, id: WindowId) -> Vec<WmAct
 /// ignored rather than wrapping) and returns no actions. Unknown ids are
 /// ignored.
 pub(crate) fn on_popup_removed(model: &mut WindowModel, id: WindowId) -> Vec<WmAction> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: on_popup_removed")
+    if let Some(record) = record_mut(model, id) {
+        record.popup_count = record.popup_count.saturating_sub(1);
+        trace!(
+            window_id = id.0,
+            popups = record.popup_count,
+            "popup removed"
+        );
+    }
+    Vec::new()
 }
 
 /// Activates a window (`activate_window`, and the auto-focus on map).
@@ -121,8 +235,23 @@ pub(crate) fn on_popup_removed(model: &mut WindowModel, id: WindowId) -> Vec<WmA
 ///   mapped), `id` becomes `Active` and moves to the front of the MRU order,
 ///   and the returned list is `[WmAction::Activate { id }]`.
 pub(crate) fn activate(model: &mut WindowModel, id: WindowId) -> Vec<WmAction> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: activate")
+    if index_of(model, id).is_none() {
+        return Vec::new();
+    }
+    if active_window(model) == Some(id) {
+        return vec![WmAction::None];
+    }
+
+    let previous = active_window(model);
+    mark_active(model, id);
+    model.mru.retain(|entry| *entry != id);
+    model.mru.insert(0, id);
+    debug!(
+        window_id = id.0,
+        previous = previous.map(|previous| previous.0),
+        "activated window"
+    );
+    vec![WmAction::Activate { id }]
 }
 
 /// Changes the virtual output size and re-tiles every mapped window.
@@ -137,47 +266,62 @@ pub(crate) fn on_output_size(
     config: &mut PolicyConfig,
     size: Size,
 ) -> Vec<WmAction> {
-    let _ = (model, config, size);
-    todo!("adesk-wm policy: on_output_size")
+    config.output_size = size;
+    let rect = config.tiled_rect();
+    let mut actions = Vec::with_capacity(model.records.len());
+    for record in &mut model.records {
+        record.geometry = rect;
+        if record.mapped {
+            actions.push(WmAction::ConfigureWindow {
+                id: record.id,
+                rect,
+            });
+        }
+    }
+    debug!(
+        width = size.w,
+        height = size.h,
+        windows = model.records.len(),
+        "output resized, re-tiled every mapped window"
+    );
+    actions
 }
 
 /// The active window id: the front of the MRU order, or `None` when no window
 /// is mapped.
 pub(crate) fn active_window(model: &WindowModel) -> Option<WindowId> {
-    let _ = model;
-    todo!("adesk-wm policy: active_window")
+    model.mru.first().copied()
 }
 
 /// The record for `id`, or `None` when the window is not tracked.
 pub(crate) fn window(model: &WindowModel, id: WindowId) -> Option<&WindowRecord> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: window")
+    model.records.iter().find(|record| record.id == id)
 }
 
 /// The record for `id` as a crate error, for command paths that must answer the
 /// AGP `unknown_window` code.
 pub(crate) fn require_window(model: &WindowModel, id: WindowId) -> Result<&WindowRecord> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: require_window")
+    window(model, id).ok_or(Error::UnknownWindow(id))
 }
 
 /// All tracked windows in creation order (ascending id).
 pub(crate) fn windows(model: &WindowModel) -> &[WindowRecord] {
-    let _ = model;
-    todo!("adesk-wm policy: windows")
+    &model.records
 }
 
 /// The id of the window owning `key`, or `None` when the surface key is not
 /// tracked.
 pub(crate) fn window_by_surface(model: &WindowModel, key: SurfaceKey) -> Option<WindowId> {
-    let _ = (model, key);
-    todo!("adesk-wm policy: window_by_surface")
+    model
+        .records
+        .iter()
+        .find(|record| record.surface_key == key)
+        .map(|record| record.id)
 }
 
 /// Projects `id` into the wire-facing [`WindowInfo`] (AGP §4), or `None`.
 pub(crate) fn window_info(model: &WindowModel, id: WindowId) -> Option<WindowInfo> {
-    let _ = (model, id);
-    todo!("adesk-wm policy: window_info")
+    window(model, id).map(WindowRecord::info)
 }
 
 /// Resolves a window-relative [`Position`] to output coordinates.
@@ -198,6 +342,13 @@ pub(crate) fn resolve_position(
     id: WindowId,
     position: Position,
 ) -> Option<Point> {
-    let _ = (model, id, position);
-    todo!("adesk-wm policy: resolve_position")
+    let geometry = window(model, id)?.geometry;
+    // Resolve against a rect at the origin so core's `Pixels` clamping cannot
+    // mistake output coordinates for window-relative ones, then translate by
+    // the geometry origin. The output origin is never hard-coded.
+    let local = position.resolve(Rect::from_size(geometry.size()));
+    Some(Point::new(
+        geometry.x.saturating_add(local.x),
+        geometry.y.saturating_add(local.y),
+    ))
 }

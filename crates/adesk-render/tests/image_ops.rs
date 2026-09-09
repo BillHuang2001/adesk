@@ -193,7 +193,8 @@ fn image_from_readback_packs_tight_rows() {
 
 #[test]
 fn image_from_readback_strips_padding_and_unflips() {
-    // Two rows, stride 12 (4 bytes of padding), stored bottom-to-top (GL).
+    // Two rows, stride 12 (4 bytes of padding), stored bottom-to-top
+    // (`flipped = true`; the caller states the row order).
     let row0 = [10u8, 11, 12, 13, 14, 15, 16, 17];
     let row1 = [20u8, 21, 22, 23, 24, 25, 26, 27];
     let mut data = Vec::new();

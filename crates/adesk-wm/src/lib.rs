@@ -39,7 +39,7 @@
 //!
 //! ## Example
 //!
-//! ```no_run
+//! ```
 //! use adesk_core::{Point, Position, Rect, Size, WindowId};
 //! use adesk_wm::{MapRequest, PolicyConfig, SurfaceKey, WindowManager, WmAction};
 //!
@@ -82,6 +82,8 @@ pub mod model;
 
 pub(crate) mod policy;
 
+#[cfg(test)]
+mod policy_tests;
 pub use action::WmAction;
 pub use config::PolicyConfig;
 pub use error::{Error, Result};

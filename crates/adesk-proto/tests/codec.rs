@@ -1,9 +1,9 @@
 //! Frame-level wire behavior pinned against `docs/protocol.md` (§1, §4, §5.4, §6).
 //!
-//! These tests are the Phase-2 acceptance spec for the codec bodies; they are
-//! `#[ignore]`d while those bodies are `todo!()` stubs. Implementation rule:
-//! remove the `#[ignore]` attributes (do not edit the assertions) once the
-//! codec is implemented.
+//! This is the frozen frame-level acceptance spec for `adesk-proto`: the
+//! assertions are normative and must never be weakened or edited. To change
+//! wire behavior, change `docs/protocol.md` first and update this file in the
+//! same change.
 
 use adesk_core::{
     ActionId, AppId, Button, ErrorCode, LaunchId, Observation, Position, Rect, Region, RuntimeEvent,
@@ -50,7 +50,6 @@ fn image_payload() -> ImagePayload {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn encode_ping_request_exact_json() {
     let frame = Frame::Request(RequestFrame::new(1, Method::Ping(PingParams {})));
     let line = encode_frame(&frame).unwrap();
@@ -63,7 +62,6 @@ fn encode_ping_request_exact_json() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn encode_click_request_matches_protocol_example() {
     let frame = Frame::Request(RequestFrame::new(
         1,
@@ -92,7 +90,6 @@ fn encode_click_request_matches_protocol_example() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn round_trip_all_frame_kinds() {
     let request = Frame::Request(RequestFrame::new(
         1,
@@ -129,7 +126,6 @@ fn round_trip_all_frame_kinds() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn response_frames_match_protocol_examples() {
     let frame = decode_frame(r#"{"id": 1, "result": {"action_id": 582}}"#).unwrap();
     match frame {
@@ -166,7 +162,6 @@ fn response_frames_match_protocol_examples() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn response_with_both_or_neither_result_and_error_is_malformed() {
     let both = r#"{"id": 1, "result": {}, "error": {"code": "internal", "message": "x"}}"#;
     assert!(matches!(
@@ -181,7 +176,6 @@ fn response_with_both_or_neither_result_and_error_is_malformed() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn unknown_method_reports_unknown_method() {
     let err = decode_frame(r#"{"id": 1, "method": "bogus", "params": {}}"#).unwrap_err();
     assert!(matches!(err, ProtoError::UnknownMethod(ref name) if name == "bogus"));
@@ -189,7 +183,6 @@ fn unknown_method_reports_unknown_method() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn missing_or_null_params_defaults_to_empty_object() {
     let expected = Frame::Request(RequestFrame::new(1, Method::Ping(PingParams {})));
     assert_eq!(
@@ -203,7 +196,6 @@ fn missing_or_null_params_defaults_to_empty_object() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn decode_ignores_unknown_fields() {
     let expected = Frame::Request(RequestFrame::new(1, Method::Ping(PingParams {})));
     assert_eq!(
@@ -230,7 +222,6 @@ fn decode_ignores_unknown_fields() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn unknown_event_kind_is_rejected() {
     let err = decode_frame(r#"{"event": "bogus", "seq": 1, "ts_ms": 1, "data": {}}"#).unwrap_err();
     assert!(matches!(err, ProtoError::UnknownEventKind(ref name) if name == "bogus"));
@@ -238,7 +229,6 @@ fn unknown_event_kind_is_rejected() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn event_frame_matches_protocol_example() {
     let frame = EventFrame::new(
         EventKind::SurfaceCommit,
@@ -268,7 +258,6 @@ fn event_frame_matches_protocol_example() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn event_frame_round_trips_through_runtime_event() {
     let event = RuntimeEvent::SurfaceCommit {
         seq: 8291,
@@ -289,7 +278,6 @@ fn event_frame_round_trips_through_runtime_event() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn event_payload_maps_every_runtime_event() {
     let events = vec![
         RuntimeEvent::WindowCreated {
@@ -365,7 +353,6 @@ fn event_payload_maps_every_runtime_event() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn quiet_and_inspect_frame_have_no_runtime_event() {
     let quiet = EventPayload::Quiet(QuietEvent {
         window_id: Some(WindowId(17)),
@@ -381,7 +368,6 @@ fn quiet_and_inspect_frame_have_no_runtime_event() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn observe_result_wire_shape_and_round_trip() {
     let result = ObserveResult {
         observation: observation(),
@@ -416,7 +402,6 @@ fn observe_result_wire_shape_and_round_trip() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn result_payload_new_and_decode() {
     let payload = ResultPayload::new(&PingResult {
         protocol_version: 1,
@@ -432,7 +417,6 @@ fn result_payload_new_and_decode() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn image_payload_base64_helpers() {
     let rgba: Vec<u8> = (0..32).collect(); // 4x2 pixels
     let payload = ImagePayload::from_rgba8(4, 2, &rgba, 1.0).unwrap();
@@ -455,7 +439,6 @@ fn image_payload_base64_helpers() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn event_kind_matches_semantics() {
     let empty_commit = RuntimeEvent::SurfaceCommit {
         seq: 1,
@@ -489,7 +472,6 @@ fn event_kind_matches_semantics() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn malformed_lines_are_rejected() {
     for line in ["", "   ", "not json", "{}", "[]", "{\"id\": 1}"] {
         assert!(decode_frame(line).is_err(), "line {line:?} must not decode");
@@ -497,7 +479,6 @@ fn malformed_lines_are_rejected() {
 }
 
 #[test]
-#[ignore = "phase 2: codec bodies are todo!() stubs"]
 fn ndjson_codec_works_through_the_trait() {
     let codec: &dyn Codec = &NdjsonCodec;
     assert_eq!(codec.name(), "ndjson");

@@ -5,7 +5,7 @@
 //! NDJSON-specific string conveniences are [`NdjsonCodec::encode_str`],
 //! [`NdjsonCodec::decode_str`], [`encode_frame`] and [`decode_frame`].
 
-use crate::{Frame, Result};
+use crate::{Frame, ProtoError, Result};
 
 /// A wire codec: one frame ↔ one transport payload.
 ///
@@ -44,7 +44,9 @@ impl NdjsonCodec {
     ///
     /// Returns [`ProtoError::Json`](crate::ProtoError::Json) on serialization failure.
     pub fn encode_str(&self, frame: &Frame) -> Result<String> {
-        todo!()
+        // `serde_json` escapes control characters inside strings, so the object
+        // never contains a raw newline (§1: no embedded newlines).
+        Ok(serde_json::to_string(frame)?)
     }
 
     /// Decodes one JSON line.
@@ -54,7 +56,8 @@ impl NdjsonCodec {
     /// Returns a [`ProtoError`](crate::ProtoError) for malformed JSON, unknown
     /// methods/kinds, or frames that match no frame shape.
     pub fn decode_str(&self, line: &str) -> Result<Frame> {
-        todo!()
+        let value: serde_json::Value = serde_json::from_str(line)?;
+        Frame::from_value(value)
     }
 }
 
@@ -64,11 +67,14 @@ impl Codec for NdjsonCodec {
     }
 
     fn encode(&self, frame: &Frame) -> Result<Vec<u8>> {
-        todo!()
+        Ok(self.encode_str(frame)?.into_bytes())
     }
 
     fn decode(&self, payload: &[u8]) -> Result<Frame> {
-        todo!()
+        let line = std::str::from_utf8(payload).map_err(|error| {
+            ProtoError::Malformed(format!("payload is not valid UTF-8: {error}"))
+        })?;
+        self.decode_str(line)
     }
 }
 

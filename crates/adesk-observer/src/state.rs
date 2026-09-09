@@ -5,12 +5,7 @@
 //! [`StateSnapshot`] to resync after a broadcast `Lagged` error
 //! (`docs/architecture.md` §1).
 
-// Phase 1 architecture skeleton: method bodies are `todo!()`, so the fields they
-// will read look unused. Remove this allow together with the last `todo!()` in
-// this file (see `CONTEXT.md` → Status).
-#![allow(dead_code)]
-
-use adesk_core::{Region, Rect, WindowId};
+use adesk_core::{Rect, Region, WindowId};
 
 /// A waiter currently registered on a window.
 ///
