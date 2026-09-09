@@ -39,15 +39,21 @@ use serde_json::Value;
 use tokio::sync::{broadcast, mpsc, oneshot};
 
 use crate::wire::ServerError;
-use crate::{AgpEvent, ClientError, ConnectOptions, Result};
+// Named by the intra-doc links below and by the request/reader bodies the
+// Manager phase adds; unused until then (skeleton phase).
+#[allow(unused_imports)]
+use crate::ClientError;
+use crate::{AgpEvent, ConnectOptions, Result};
 
 /// Capacity of the per-connection event broadcast channel.
 ///
 /// Large enough to absorb bursts of `surface_commit` events between two polls
 /// of a stream; lagging beyond this is reported, never silently ignored.
+#[allow(dead_code)] // skeleton phase: used by the reader task once it lands
 pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 4096;
 
 /// Capacity of the outbound request queue.
+#[allow(dead_code)] // skeleton phase: used by `Connection::connect` once it lands
 pub(crate) const OUTBOUND_QUEUE_CAPACITY: usize = 64;
 
 /// One in-flight request: where to deliver its result.
@@ -108,6 +114,7 @@ impl Connection {
     ///
     /// Used by the stream `Drop` impls to send `unsubscribe_events`; failures
     /// are ignored (the connection is going away anyway).
+    #[allow(dead_code)] // skeleton phase: called by `unsubscribe_fire_and_forget`
     pub(crate) fn fire_and_forget<P>(&self, method: &str, params: &P)
     where
         P: Serialize + ?Sized,

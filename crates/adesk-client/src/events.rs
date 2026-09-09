@@ -19,6 +19,10 @@
 //! filtering for it. Streams are `Send + Unpin`, so they can be moved into
 //! `tokio::spawn`ed tasks.
 
+// Skeleton phase: the stream fields and `EventFilter::matches` are read by the
+// `Stream` bodies, which are not written yet. Drop this once they land.
+#![allow(dead_code)]
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -70,6 +74,7 @@ impl EventKind {
 }
 
 impl From<CoreEventKind> for EventKind {
+    #[allow(unused_variables)] // skeleton phase: the todo!() body does not read it yet
     fn from(kind: CoreEventKind) -> Self {
         todo!("map the 9 core event kinds onto the matching variants")
     }

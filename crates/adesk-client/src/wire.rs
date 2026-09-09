@@ -21,6 +21,10 @@
 //! Error{id,error}}`, `EventFrame { event, seq, ts_ms, data }`, and
 //! `ImagePayload`.
 
+// Skeleton phase: every item below is consumed by the transport, whose bodies
+// are not written yet. Drop this once the transport uses them.
+#![allow(dead_code)]
+
 use adesk_core::ErrorCode;
 use adesk_proto::{Codec, EventFrame, Frame, Request, Response};
 use serde_json::Value;
