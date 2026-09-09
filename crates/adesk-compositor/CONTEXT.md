@@ -204,6 +204,9 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 - The `adesk-render` API vs. the element-walker assumptions is verified only through the crate's own tests and the GL clear-frame path; end-to-end pixel assertions arrive with `adesk-testkit` (Phase 4).
+- A late `xdg_toplevel.app_id` (set after the first buffer commit) is not written back into the window model: `WmBridge::app_id_changed` (src/wm.rs:805) updates only its own change-detection map and the launch ledger, and `adesk-wm` has no app-id setter, so `WindowInfo.app_id`/`list_windows` keep the map-time value. Clients that set `app_id` before their first commit are unaffected.
+- Output composition stacks every mapped window at the same tiled rect (`State::render_output` includes all windows; `output_scene` pushes them in creation order). `OutputWindow.active` only drives the `focus` overlay, so with 2+ windows `render_output`/`inspect_capture` shows the last-created window on top regardless of which one is active. Window-level `render_window` is unaffected.
+- The `WmBridge::note_launch` doc comment (src/wm.rs:624-627) still claims "No AGP command feeds this today"; `adesk-server` sends `RuntimeCommand::NoteLaunch` (crates/adesk-server/src/dispatch/apps.rs:82) and `dispatch.rs:65-81` serves it.
 
 ## Dependencies
 
