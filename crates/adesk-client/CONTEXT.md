@@ -110,7 +110,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/events.rs` — subscribe yields typed `RuntimeEvent`s; kind/window filtering is applied locally; `subscribe_frames` surfaces `Other`/`InspectFrame`; dropping a stream sends `unsubscribe_events`; lag yields `Lagged`; connection close ends the stream with `Closed`.
 - `tests/framing.rs` — malformed JSON → `Protocol`; a line above `max_frame_len` → `Protocol`; EOF with requests in flight → `Closed`.
 - `tests/version.rs` — `ping` with a mismatched `protocol_version` → `VersionMismatch`; `connect` fails by default, `verify_version(false)` connects.
-- `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format, truncated PNG).
+- `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format rejected at the wire boundary, truncated PNG) and client-owned extras for length/stride/dimension mismatches.
 - Determinism: no sleeps longer than needed, deadlines explicit, `tokio::time::pause()` only if `test-util` is enabled in dev-deps, otherwise real time with generous margins (`docs/architecture.md` §10).
 
 ## Dependencies
