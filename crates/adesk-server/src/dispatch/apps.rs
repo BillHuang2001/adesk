@@ -3,15 +3,20 @@
 //! `launch_app` is the only method that starts a process: it launches through
 //! `AppRegistry`, emits `AppLaunched` on the compositor's event broadcast and
 //! records the launch with the correlator so a later `WindowCreated` can be
-//! attributed to the app. Child reaping is the server's job.
+//! attributed to the app. The same launch is also noted in the compositor's own
+//! ledger (`RuntimeCommand::NoteLaunch`), because the compositor publishes
+//! `WindowCreated` on its own broadcast, where only it can stamp `launch_id`.
+//! Child reaping is the server's job.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use adesk_app_registry::{Error as RegistryError, LaunchEnv};
+use adesk_compositor::RuntimeCommand;
 use adesk_core::{AppId, AppInfo, RuntimeEvent};
 use adesk_proto::{
     GetAppParams, GetAppResult, LaunchAppParams, LaunchAppResult, ListAppsParams, ListAppsResult,
 };
+use tokio::sync::oneshot;
 
 use crate::dispatch::{windows, RequestContext};
 use crate::error::{Result, ServerError};
@@ -68,6 +73,32 @@ pub async fn launch_app(
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .record_launch(record.clone(), &app);
+
+    // The compositor publishes `WindowCreated` on its *own* event broadcast, so it
+    // needs the launch in its ledger too (the server-side correlator only stamps the
+    // events this crate projects). Best-effort: the child is already running, so a
+    // compositor that is shutting down is logged, never turned into a failure.
+    let (reply, acknowledged) = oneshot::channel();
+    match ctx.server.compositor.send(RuntimeCommand::NoteLaunch {
+        launch_id: record.launch_id,
+        app_id: record.app_id.clone(),
+        pid: record.pid,
+        reply,
+    }) {
+        Ok(()) => {
+            if acknowledged.await.is_err() {
+                tracing::warn!(
+                    launch_id = record.launch_id.0,
+                    "compositor dropped the note_launch acknowledgement"
+                );
+            }
+        }
+        Err(error) => tracing::warn!(
+            launch_id = record.launch_id.0,
+            %error,
+            "compositor is not accepting note_launch"
+        ),
+    }
 
     let event = RuntimeEvent::AppLaunched {
         seq,

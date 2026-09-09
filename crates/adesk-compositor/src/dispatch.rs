@@ -62,6 +62,23 @@ pub(crate) fn handle_command(state: &mut State, command: RuntimeCommand) -> Comm
             let _ = reply.send(state.snapshot());
             CommandOutcome::Continue
         }
+        RuntimeCommand::NoteLaunch {
+            launch_id,
+            app_id,
+            pid,
+            reply,
+        } => {
+            // Infallible bookkeeping: the launch is only remembered, so the reply is
+            // an acknowledgement, not a result.
+            tracing::debug!(
+                launch_id = launch_id.0,
+                app_id = app_id.as_str(),
+                "launch recorded for window correlation"
+            );
+            state.note_launch(launch_id, app_id, pid);
+            let _ = reply.send(());
+            CommandOutcome::Continue
+        }
         RuntimeCommand::ActivateWindow { window_id, reply } => {
             let result = state.activate_window(window_id);
             let _ = reply.send(result.map_err(Into::into));
@@ -118,7 +135,7 @@ fn shutdown(reply: oneshot::Sender<()>) -> CommandOutcome {
 mod tests {
     use super::*;
     use crate::{command::RuntimeCommand, snapshot::RenderedFrame};
-    use adesk_core::{Button, ButtonState, KeyState, Position, Rect, WindowId};
+    use adesk_core::{AppId, Button, ButtonState, KeyState, LaunchId, Position, Rect, WindowId};
 
     /// One `oneshot::Sender` of the right type for every result-bearing variant.
     fn render_reply() -> oneshot::Sender<adesk_core::Result<RenderedFrame>> {
@@ -151,6 +168,15 @@ mod tests {
                     reply: oneshot::channel().0,
                 },
                 "query_state",
+            ),
+            (
+                RuntimeCommand::NoteLaunch {
+                    launch_id: LaunchId(1),
+                    app_id: AppId::from("org.example.fixture"),
+                    pid: Some(4242),
+                    reply: oneshot::channel().0,
+                },
+                "note_launch",
             ),
             (
                 RuntimeCommand::ActivateWindow {

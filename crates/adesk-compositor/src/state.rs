@@ -13,8 +13,8 @@
 use std::time::Instant;
 
 use adesk_core::{
-    AppId, Button, ButtonState, KeyState, OverlayKind, Position, Rect, Region, RuntimeEvent, Size,
-    WindowId,
+    AppId, Button, ButtonState, KeyState, LaunchId, OverlayKind, Position, Rect, Region,
+    RuntimeEvent, Size, WindowId,
 };
 use adesk_wm::WmAction;
 use smithay::{
@@ -278,6 +278,15 @@ impl State {
             launch_id = change.launch_id.map(|launch_id| launch_id.0),
             "app id changed"
         );
+    }
+
+    /// Record a successful `launch_app` so a toplevel mapping shortly afterwards can
+    /// be attributed to it (`WindowCreated.launch_id`).
+    ///
+    /// Purely bookkeeping: the compositor correlates the next matching mapping with
+    /// the recorded launch and stamps the id on the event it publishes.
+    pub(crate) fn note_launch(&mut self, launch_id: LaunchId, app_id: AppId, pid: Option<i32>) {
+        self.wm.note_launch(launch_id, app_id, pid);
     }
 
     /// An xdg-popup was created; track it under its owner window.

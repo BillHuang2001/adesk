@@ -56,10 +56,10 @@
 //! be correlated with it. The tiers are the documented ones (exact pid → app id /
 //! `StartupWMClass` → title substring, most-recent tie-break, expiry after 10s).
 //!
-//! **No AGP command feeds `note_launch` today**: `adesk_app_registry::Correlator` runs
-//! server-side and stamps `app_id` on its own side, so this path exists for the
-//! compositor-local correlation the architecture allows and is covered by unit tests
-//! rather than by an end-to-end flow.
+//! The server feeds it with `RuntimeCommand::NoteLaunch` after every successful
+//! `launch_app`; the compositor's own `WindowCreated` broadcast is the event that
+//! needs the id, because the server-side `adesk_app_registry::Correlator` only
+//! stamps the events the server projects.
 //!
 //! # Popup grabs (v1 semantics)
 //!

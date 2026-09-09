@@ -10,7 +10,9 @@
 //! layer can map failures straight to an `ErrorCode`; `QueryState` is infallible and
 //! `Shutdown` acknowledges with `()`.
 
-use adesk_core::{Button, ButtonState, KeyState, OverlayKind, Position, Rect, WindowId};
+use adesk_core::{
+    AppId, Button, ButtonState, KeyState, LaunchId, OverlayKind, Position, Rect, WindowId,
+};
 use tokio::sync::oneshot;
 
 use crate::input::KeyCode;
@@ -52,6 +54,23 @@ pub enum RuntimeCommand {
     QueryState {
         /// Always answered, unless the compositor thread is gone.
         reply: oneshot::Sender<StateSnapshot>,
+    },
+    /// Record a successful `launch_app` in the compositor's launch ledger.
+    ///
+    /// The server records every launch it spawned (server-side correlation stamps
+    /// the events *it* projects), but the compositor publishes `WindowCreated` on
+    /// its own event broadcast. Feeding the ledger here lets a toplevel mapping
+    /// shortly afterwards be attributed to the launch, so that raw broadcast also
+    /// carries `launch_id`.
+    NoteLaunch {
+        /// Id of the launch the server started.
+        launch_id: LaunchId,
+        /// Registry id of the launched application.
+        app_id: AppId,
+        /// Child process id, when the registry reported one.
+        pid: Option<i32>,
+        /// Acknowledged once the ledger recorded the launch.
+        reply: oneshot::Sender<()>,
     },
     /// Make a window the active (visible, focused) window.
     ///
@@ -126,6 +145,7 @@ impl RuntimeCommand {
             RuntimeCommand::RenderWindow { .. } => "render_window",
             RuntimeCommand::RenderOutput { .. } => "render_output",
             RuntimeCommand::QueryState { .. } => "query_state",
+            RuntimeCommand::NoteLaunch { .. } => "note_launch",
             RuntimeCommand::ActivateWindow { .. } => "activate_window",
             RuntimeCommand::CloseWindow { .. } => "close_window",
             RuntimeCommand::PointerMove { .. } => "pointer_move",
