@@ -36,6 +36,7 @@ use adesk_observer::ObserverService;
 use adesk_server::{RunningServer, Server, ServerConfig};
 use tokio::sync::broadcast;
 
+use crate::assert::{EventAssert, Expected};
 use crate::env::{EnvScope, TestEnv};
 use crate::error::{Result, TestkitError};
 use crate::fixtures::FixtureDir;
@@ -315,19 +316,34 @@ impl TestRuntime {
     }
 
     /// Waits for the next `WindowCreated` event and returns its id.
+    ///
+    /// Subscribes to the event broadcast *now*: events are not replayed, so the window must
+    /// be created after this call. The wait is bounded by `timeout` and fails with
+    /// [`TestkitError::Timeout`] whose `what` is the expectation's
+    /// [`describe`](crate::Expected::describe) (`"window_created"`).
     pub async fn wait_for_window(&self, timeout: Duration) -> Result<WindowId> {
-        let _ = timeout;
-        todo!("stub: implementation phase — EventAssert over self.event_tap()")
+        let mut events = EventAssert::tap(self);
+        let event = events
+            .wait_for_expected(&Expected::WindowCreated, timeout)
+            .await?;
+        created_window_id(event)
     }
 
     /// Waits for the next `WindowCreated` event whose `app_id` matches.
+    ///
+    /// A creation event without a resolved app id does **not** satisfy the wait (see
+    /// [`Expected::WindowCreatedFor`]), so a test can never observe an unidentified window
+    /// as its own. Bounded like [`TestRuntime::wait_for_window`].
     pub async fn wait_for_window_app(
         &self,
         app_id: &adesk_core::AppId,
         timeout: Duration,
     ) -> Result<WindowId> {
-        let _ = (app_id, timeout);
-        todo!("stub: implementation phase — EventAssert over self.event_tap()")
+        let mut events = EventAssert::tap(self);
+        let event = events
+            .wait_for_expected(&Expected::WindowCreatedFor(app_id.clone()), timeout)
+            .await?;
+        created_window_id(event)
     }
 
     /// Gracefully stops the runtime within the configured shutdown bound.
@@ -355,6 +371,20 @@ impl TestRuntime {
             .as_ref()
             .expect("TestRuntime used after shutdown()")
     }
+}
+
+/// Extracts the window id of a matched `WindowCreated` event.
+///
+/// [`Expected::WindowCreated`] and [`Expected::WindowCreatedFor`] only match creation
+/// events, which always carry a window id; anything else is a harness bug, reported as an
+/// error because the request path never panics.
+fn created_window_id(event: RuntimeEvent) -> Result<WindowId> {
+    event.window_id().ok_or_else(|| TestkitError::Unexpected {
+        message: format!(
+            "wait_for_window matched a {:?} event, which carries no window id",
+            event.kind()
+        ),
+    })
 }
 
 impl Drop for TestRuntime {
