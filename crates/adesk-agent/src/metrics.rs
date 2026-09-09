@@ -31,7 +31,7 @@ use adesk_proto::ImagePayload;
 use serde::{Deserialize, Serialize};
 
 use crate::decision::ActionKind;
-use crate::error::{Error, ProviderError};
+use crate::error::Error;
 
 /// Why the loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -199,15 +199,15 @@ impl Metrics {
     }
 
     /// Record a failed step and its error.
+    ///
+    /// The failure is keyed by [`Error::kind_key`], the single source of truth
+    /// for [`MetricsReport::failures_by_kind`] keys.
     pub fn record_failure(&mut self, kind: ActionKind, error: &Error) {
         tracing::debug!(action = ?kind, error = %error, "step failed");
         self.failures += 1;
         self.consecutive_failures += 1;
         self.last_step_failed = true;
-        *self
-            .failures_by_kind
-            .entry(failure_kind_key(error))
-            .or_insert(0) += 1;
+        *self.failures_by_kind.entry(error.kind_key()).or_insert(0) += 1;
     }
 
     /// Record a successful step (used to derive `recoveries`).
@@ -269,36 +269,6 @@ fn is_input_kind(kind: ActionKind) -> bool {
         kind,
         ActionKind::Click | ActionKind::TypeText | ActionKind::Keypress | ActionKind::Scroll
     )
-}
-
-/// Stable key for [`MetricsReport::failures_by_kind`].
-///
-/// Mirrors the documented keys of `Error::kind_key` (`"unknown_window"`,
-/// `"transport"`, `"provider_timeout"`, ...), which is owned by `src/error.rs`;
-/// the two must stay in sync until that method is implemented, at which point
-/// this helper can delegate to it (or be deleted).
-pub(crate) fn failure_kind_key(error: &Error) -> String {
-    match error {
-        Error::Client(error) => error.code.as_str().to_string(),
-        Error::Provider(error) => match error {
-            ProviderError::MissingApiKey => "provider_missing_api_key".to_string(),
-            ProviderError::Transport(_) => "provider_transport".to_string(),
-            ProviderError::Status { .. } => "provider_status".to_string(),
-            ProviderError::Timeout(_) => "provider_timeout".to_string(),
-            ProviderError::InvalidResponse(_) => "provider_invalid_response".to_string(),
-            ProviderError::Unsupported(_) => "provider_unsupported".to_string(),
-        },
-        Error::Transport(_) => "transport".to_string(),
-        Error::ProtocolVersion { .. } => "protocol_version".to_string(),
-        Error::StepBudgetExhausted(_) => "step_budget_exhausted".to_string(),
-        Error::FailureBudgetExhausted(_) => "failure_budget_exhausted".to_string(),
-        Error::StepTimeout { .. } => "step_timeout".to_string(),
-        Error::NoActiveWindow => "no_active_window".to_string(),
-        Error::InvalidDecision(_) => "invalid_decision".to_string(),
-        Error::Config(_) => "config".to_string(),
-        Error::Io(_) => "io".to_string(),
-        Error::Json(_) => "json".to_string(),
-    }
 }
 
 /// Serializable snapshot of one task run; written by `--report`.
