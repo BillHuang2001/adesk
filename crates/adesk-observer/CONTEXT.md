@@ -91,6 +91,11 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
 - The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
 - `Clock::now_ms()` truncates to whole milliseconds, so a deadline can fire up to ~1 ms early — inherent to the event-ts domain, consistent with "quiet is evidence, never a promise".
+- Popups have no state of their own: `PopupAppeared`/`PopupDisappeared` are owner-window counted events and `WindowSnapshot::popup_count` is accepted by `resync` but ignored.
+  A popup-driven `SurfaceCommit` carries the owner's `window_id` with popup-relative damage, so it advances the owner's `commit_seq`/`commit_count`, re-arms `wait_for_quiet`, and its damage is clipped against the owner's geometry — damage from a popup outside the window can be clipped away or misattributed.
+- `FocusChanged { window_id: None }` is invisible to window-filtered waits (the filter requires `Some(window_id)`); when an unfiltered wait counts it, `Observation::focus_changed` becomes `Some(true)` even though no window received focus.
+- `last_meaningful_change_at` is updated by every counted non-commit event but is not read by any production code path; it exists for server/inspector state queries only.
+- A window-scoped event for an unknown window (commit, title, activation, popup, focus) creates its `WindowTemporalState` on demand, so `window_ids()`/`snapshot()` can contain a window the observer never saw a `WindowCreated` for; a later `resync` removes it if the snapshot does not cover it.
 ## Status
 Phase 2 (implementation) complete — zero `todo!()` in the crate; every module body, wait loop, resync path and frozen spec body is implemented.
 Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets -- -D warnings` clean; `cargo test -p adesk-observer` → 125 passed, 0 failed, 0 ignored (85 lib unit + 5 api_surface + 34 frozen specs + 1 doctest).
