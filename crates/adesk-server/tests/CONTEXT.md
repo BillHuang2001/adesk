@@ -1,50 +1,71 @@
-# adesk-server tests — E2E plan
+# adesk-server tests — E2E AGP suites
 
 ## Intent
 
-End-to-end coverage for the AGP server: a real `adesk-server` runtime on a temp
-socket, driven by `adesk-client`, with real Wayland clients from `adesk-testkit`.
-These tests are the acceptance gate for Phase 2 — they exercise the composition
-(compositor + observer + registry + inspector + server), not individual modules.
+End-to-end coverage of the AGP v1 server: a real runtime (`Server::start`) on a private temp socket,
+driven through `adesk-client` (typed) and raw NDJSON, with no display, GPU, network or installed application.
+These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + transport).
+They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond generous bounds.
 
-Phase 1 status: **plan only**. No test files exist yet because `adesk-testkit`
-has no `Cargo.toml`, so a dev-dependency cannot be declared. When testkit lands:
-add `adesk-testkit.workspace = true`, `adesk-client.workspace = true` and
-`tempfile.workspace = true` to `[dev-dependencies]` and write the suites below.
+## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
 
-## Harness
-
-- `adesk-testkit::TestRuntime::start()` — starts `Server::start` on a temp socket
-  with the **pixman** renderer (CI has no GPU) and returns the socket path plus
-  handles; `TestRuntime::shutdown()` must complete cleanly.
-- `adesk-testkit::WaylandTestClient` — a minimal Wayland client that creates a
-  `xdg_toplevel`, commits buffers with known pixels and can be told to stop
-  committing (quiet) or to damage a region.
-- `adesk_testkit` fixtures — deterministic frames/pixels for capture assertions.
-- `adesk_client::Client` — typed AGP client, connected to the temp socket.
-- No display, GPU, network or installed application may be required.
+- `TestRuntime` starts one runtime per test: process-wide env lock + private `0700` temp `XDG_RUNTIME_DIR`
+  (the ambient `/run/user/1000` is read-only), pixman renderer, 1280x720 output,
+  `app_dirs = Some(vec![])` unless overridden, and a dedicated multi-thread tokio runtime owned by the guard.
+- Sync `#[test]` bodies with `t.block_on(...)` / `t.block_on_timeout(...)`; `Drop` shuts the runtime down even when a test panics.
+- Never have two live `TestRuntime`s in one test (the harness panics by design); to rebind a socket path:
+  `t1.shutdown()`, `drop(t1)`, then start `t2`.
+- `RawClient` speaks NDJSON over `UnixStream` for wire-only cases (unknown methods, malformed frames, event frames,
+  protocol defaults). `futures` is not a dev-dependency, so typed event streams cannot be polled — use `RawClient`.
+- Helpers: `assert_error_code`, `expect_ok`, `eventually`, `write_desktop_entry`, `output_size()`,
+  `OUTPUT_WIDTH`/`OUTPUT_HEIGHT`, `REQUEST_TIMEOUT`.
 
 ## Suites
 
 | File | Covers |
 |---|---|
-| `protocol.rs` | `ping` identity/version/uptime; all 29 methods answer exactly once; unknown method → `unknown_method` and the connection stays open; malformed NDJSON closes only that connection (a second client is unaffected); error responses do not close the connection; concurrent requests on one connection. |
-| `tiling_focus.rs` | exactly one visible toplevel tiled to the whole output; `list_windows`/`get_window`/`get_focus`; `activate_window` changes focus without synthetic input and returns an `action_id`; `close_window` is runtime-native; a second toplevel follows the single-visible policy. |
-| `input.rs` | `pointer_move`/`click`/`double_click`/`mouse_down`/`mouse_up`/`scroll`/`drag`/`keypress`/`key_down`/`key_up`/`type_text` deliver seat events (observed by the Wayland client); window-relative and normalized coordinates resolve through window geometry; `type_text.skipped` reports unmappable characters; input commands on one connection execute in submission order; every action returns an `ActionId` recorded before the command. |
-| `observation.rs` | `wait_for_change` resolves on a commit, times out as `timed_out: true` (not an error); `wait_for_quiet` resolves after `quiet_ms` of silence; `observe` with `until=change/quiet/timeout`; `after_action` correlates to the action's seq; `since_commit`; `include_image` attaches an image only when requested; broadcast-lag resync marks windows uncertain instead of losing events. |
-| `capture.rs` | `capture_window` and `capture_region` return the committed pixels (PNG default, `rgba8` opt-in); `region` and `max_dimension` crop/downscale; `commit_seq` and `changed_regions` match the observer's view; unknown window → `unknown_window`. |
-| `launch.rs` | `list_apps`/`get_app` against a fixture `.desktop` dir; `launch_app` sets `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`, emits `AppLaunched`, returns `launch_id`/`pid`; the launched window correlates to the app id via `WindowCreated`; an uncorrelated window keeps `app_id: null`; unknown app → `unknown_app`; children are reaped. |
-| `inspector.rs` | `inspect_capture` returns a PNG of the full output with the requested overlays (window ids, focus, damage) and no overlays when `overlays: []`; `inspect_subscribe` pushes throttled `inspect_frame` events with the subscription id; `unsubscribe_events` stops the stream; region/max_dimension apply after overlays. |
-| `subscriptions.rs` | `subscribe_events` filters by kind and window; `seq`/`ts_ms` are monotonic; `unsubscribe_events` stops delivery; a slow consumer loses event frames but never responses; disconnect removes all subscriptions. |
-| `shutdown.rs` | `RunningServer::shutdown()` is idempotent; in-flight requests fail with `shutting_down`; the socket file is removed; `wait()` resolves `Ok(())`; the Wayland display is gone afterwards; SIGINT/SIGTERM trigger the same path. |
+| `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; error responses keep the connection open; malformed NDJSON closes only that connection; concurrent + pipelined requests; blank lines ignored. |
+| `apps.rs` | §5.2 `list_apps` (query, include_hidden, invalid entries skipped, Exec-less entries), `get_app`, unknown app. |
+| `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix). |
+| `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire. |
+| `capture.rs` | §5.4 `capture_window`/`capture_region` unknown-window errors (no windows exist in this wave). |
+| `inspector.rs` | §5.7 `inspect_capture` PNG/dimensions/overlays/`max_dimension`; `inspect_subscribe` frame stream + unsubscribe. |
+| `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids. |
+| `shutdown.rs` | idempotent shutdown, socket removal, `wait()`, rebinding the same path, handle drop does not stop the runtime, in-flight `shutting_down`. |
 
-## Constraints
+## Known Issues — red tests blocked on src bugs (assertions are CORRECT; do NOT weaken them)
 
-- Every test must shut its runtime down (success or failure) — use a guard so a
-  failing assertion cannot leak a compositor thread or a socket file.
-- Assert on protocol values (`Observation` fields, `commit_seq`, image
-  dimensions), not on timing beyond generous bounds.
-- Keep suites independent: no shared socket paths, no fixed ports, no ordering
-  between files.
-- Run with `./scripts/dev.sh cargo test -p adesk-server` once the root workspace
-  loads (bare `cargo test` cannot link outside the Nix dev shell).
+Baseline `bash scripts/dev.sh cargo test -p adesk-server --no-fail-fast` = **154 passed / 18 failed**;
+every failure is one of these five src defects:
+1. `src/error.rs:86-91` maps `ServerError::Compositor(_)` to `internal`, so compositor-path `unknown_window` is unreachable
+   (red: `capture.rs` 3, `windows.rs` 4, `protocol.rs` sweep + `unknown_window_error_keeps_the_connection_open`).
+   Fix: honour `CompositorError::code()`.
+2. The same lines map `ServerError::Proto(_)` to `internal`, so a non-subscribable event kind answers `internal`
+   instead of `invalid_request` (red: `subscriptions.rs::subscribe_with_inspect_frame_kind_is_invalid_request`).
+   Fix: honour `ProtoError::error_code()`.
+3. `src/connection.rs:60-83` never calls `register_session_sink`, so `subscribe_events`/`inspect_subscribe` answer
+   `internal` instead of a `subscription_id` (red: `subscriptions.rs` 5, `inspector.rs` 1, `protocol.rs` sweep).
+4. `src/connection.rs:141-147` closes the connection on `ProtoError::UnknownMethod` instead of answering
+   `unknown_method` (red: `protocol.rs::unknown_method_answers_unknown_method_and_keeps_the_connection_open`).
+5. In-flight requests are not failed with `shutting_down` (`src/connection.rs:122-175` spawns dispatch tasks that
+   ignore the shutdown token) (red: `shutdown.rs::in_flight_requests_fail_with_shutting_down`).
+Delete each entry (and the matching blocker note in the suite module docs) when the src fix lands.
+
+## Notes for Agents
+
+- `cargo test` stops at the first failing test target; always pass `--no-fail-fast` for the full picture.
+- Build/test only via `bash scripts/dev.sh cargo ...` (bare cargo cannot link outside the Nix dev shell).
+- `observe(until=timeout)` resolves `timed_out: false` by design — reaching the horizon IS the condition
+  (`adesk-observer` acceptance test `observe_timeout_condition_never_reports_timed_out`);
+  `wait_for_*` whose `timeout_ms` is shorter than the condition window report `timed_out: true`.
+- apps fixtures: `ServerConfig::with_app_dirs` REPLACES the XDG search dirs, so `list_apps` sees only the fixture dir;
+  a missing `Exec` is a VALID entry (`exec: None`, `launch_app` → `not_supported`), while a missing `Type`/`Name`
+  entry is skipped by `scan()`.
+- `InspectCaptureRequest` is `#[non_exhaustive]`: build the empty-overlay request with
+  `InspectCaptureRequest::overlays(vec![])`.
+- `ImagePayload::format` is `adesk_proto::ImageFormat`, a different type from `adesk_client::ImageFormat`;
+  compare serialized wire values.
+- Registry truth for subscriptions comes from `RunningServer::context().subscriptions` / `.inspect_subscriptions`;
+  the typed `EventStream` unsubscribes on drop, so keep it alive while asserting.
+- Window-creating E2E (tiling/focus/input delivery/launch correlation) belongs to the next wave and needs
+  `adesk-testkit`; it is not covered here.
