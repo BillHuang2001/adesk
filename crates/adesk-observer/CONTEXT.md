@@ -96,7 +96,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Determinism: `#[tokio::test(start_paused = true)]` + events with explicit `seq`/`ts_ms` from `./tests/common/mod.rs`; time only moves via `tokio::time::advance`. No real sleeps, no display, no GPU, no network, no installed apps.
 - Phase 1: behaviour tests are `#[ignore]`d and their bodies stop at `todo!()`; each doc comment states the scenario and expected assertions. Phase 2 rewrites the bodies — do **not** merely drop `#[ignore]`, because a wrong implementation makes paused-time waits hang forever.
 - `./tests/api_surface.rs` runs today and pins the public API shape (builders, enum mappings, snapshot structs).
-- Run: `bash crates/adesk-observer/check-standalone.sh test -p adesk-observer` (see Known Issues for why the root workspace cannot be used yet).
+- Run: `./scripts/dev.sh cargo test -p adesk-observer` (the root workspace loads; every sibling has a manifest).
 
 ## Known Issues
 - **The root workspace cannot load yet**: `members = ["crates/*"]` fails while any sibling crate directory lacks `Cargo.toml`, so `./scripts/dev.sh cargo check -p adesk-observer --all-targets` fails at manifest load (not in this crate). Use `./check-standalone.sh` (temp workspace mirroring root `[workspace.dependencies]`) until every sibling has a manifest; delete the script then. Reported to root.
