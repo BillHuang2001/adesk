@@ -27,6 +27,7 @@ Everything below is re-exported at the crate root; `adesk-testkit` is designed a
 - `ShutdownHandle` (`src/shutdown.rs`): `new()`, `initiate() -> bool`, `is_shutting_down()`, `async cancelled()`; `install_signal_handlers`, `run`, `remove_socket_file`.
 - `SubscriptionRegistry` / `InspectRegistry` (`src/subscriptions.rs`): `subscribe`, `unsubscribe`, `remove_connection`, `fan_out`/`list`, `len`, `is_empty`; `SubscriptionId = u64`, `EventSink = mpsc::Sender<Frame>`.
 - `InspectionCache` (`src/inspection.rs`): implements `adesk_inspector::InspectionSource` over a cached `InspectionSnapshot`; `store`, `snapshot`, async `refresh(&ServerContext)`.
+- `ServerError` (`src/error.rs`) with `code() -> ErrorCode` / `payload() -> ErrorPayload`, and the crate alias `Result<T, E = ServerError>` — `Result<T>` and `Result<T, ServerError>` are both valid spellings (startup/bind paths name the error explicitly).
 - `SocketListener::bind(&Path)`, `prepare_socket_path`, `Connection::new/run`, `ConnectionWriter::send/try_send`, `Dispatcher::new/dispatch`, `Session`/`InputQueue`, `event_pump::spawn/handle_event/resync`, `images::encode/encode_png`.
 - `PROTOCOL_VERSION: u32 = adesk_proto::PROTOCOL_VERSION`, `RUNTIME_VERSION: &str = env!("CARGO_PKG_VERSION")`.
 
@@ -130,7 +131,8 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 ## Known Issues
 
 - **The root workspace does not load while `crates/adesk-testkit/` has no `Cargo.toml`** (`members = ["crates/*"]`). `./scripts/dev.sh cargo check -p adesk-server` therefore fails at workspace load; use `./check-standalone.sh` until testkit lands. This is a root-owned condition, not a server bug.
-- **Phase 1 skeleton marker:** `src/lib.rs` carries `#![allow(dead_code, unused_variables)]` because `todo!()` bodies do not read their arguments or fields. Remove both when Phase 2 lands (they hide real lints).
+- **`check-standalone.sh` exits 101 because three *siblings* do not compile at HEAD** (not because of this crate): `adesk-client` (`adesk_proto::{Request, Response}` / `Codec::new()` do not exist; `EventFrame.event` is `EventKind`, `data` is `EventPayload`), `adesk-inspector` (`adesk_render::Error` is really `RenderError`; `crop`/`downscale` are infallible), `adesk-compositor` (`WindowManager::new` takes `PolicyConfig`; `resolve_position` takes `Position` by value and returns `Option`). `adesk-server` itself is warning-free once those are reconciled — verified with a temp workspace that patches the sibling copies only; `clippy --no-deps -- -D warnings` is clean, while the unscoped clippy invocation fails on sibling lints.
+- **Phase 1 skeleton marker:** `src/lib.rs` carries `#![allow(dead_code, unused_variables)]` and `src/main.rs` the same allowance plus `unused_imports`, because `todo!()` bodies do not read their arguments or call the helpers yet. Remove them when Phase 2 lands (they hide real lints).
 - **No E2E test files exist yet.** `./tests/` holds only the plan (`./tests/CONTEXT.md`); the suites are written in Phase 2 once `adesk-testkit` lands a manifest and a dev-dependency can be declared.
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
 

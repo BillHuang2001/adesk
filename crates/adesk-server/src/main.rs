@@ -3,6 +3,10 @@
 //! Every flag has an `ADESK_*` environment fallback (`clap`'s `env`), so the
 //! binary is usable both from a shell and from a service unit.
 
+// Phase-1 skeleton only: `main`/`build_config`/`init_tracing` are `todo!()`, so
+// they neither call each other nor read the CLI yet. This mirrors the crate-root
+// allowance in `lib.rs` and is **removed in Phase 2**.
+#![allow(dead_code, unused_variables, unused_imports)]
 use std::path::PathBuf;
 
 use clap::Parser;

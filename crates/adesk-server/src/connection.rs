@@ -13,7 +13,6 @@ use adesk_proto::{Frame, NdjsonCodec};
 
 use crate::context::ServerContext;
 use crate::error::{Result, ServerError};
-use crate::session::Session;
 
 /// Capacity of the per-connection outbound frame queue.
 ///
@@ -36,8 +35,9 @@ impl Connection {
     /// Reads requests until EOF, dispatching each through
     /// [`crate::dispatch::Dispatcher`].
     ///
-    /// Spawns the writer task for this connection, allocates a [`Session`],
-    /// and on exit removes the session's subscriptions.
+    /// Spawns the writer task for this connection, allocates a
+    /// [`crate::session::Session`], and on exit removes the session's
+    /// subscriptions.
     ///
     /// # Errors
     ///

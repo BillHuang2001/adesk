@@ -42,7 +42,10 @@ pub enum ServerError {
 }
 
 /// Convenience result for server operations.
-pub type Result<T> = std::result::Result<T, ServerError>;
+///
+/// The error type defaults to [`ServerError`], so `Result<T>` is the common
+/// spelling while the startup/bind paths can name `ServerError` explicitly.
+pub type Result<T, E = ServerError> = std::result::Result<T, E>;
 
 impl ServerError {
     /// The AGP error code (`docs/protocol.md` §6) this failure maps to.
