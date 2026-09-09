@@ -761,6 +761,13 @@ mod tests {
         assert_eq!(explicit.options().search_dirs, dirs);
     }
 
+    #[test]
+    fn registry_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<AppRegistry>();
+        assert_send_sync::<RegistryOptions>();
+    }
+
     // --- scan --------------------------------------------------------------
 
     #[test]
