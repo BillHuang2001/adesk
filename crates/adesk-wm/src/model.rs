@@ -134,7 +134,6 @@ impl MapRequest {
 ///
 /// Fields are crate-internal on purpose; the compositor goes through
 /// [`crate::WindowManager`].
-#[allow(dead_code)] // Phase 1 skeleton: the policy in `policy.rs` reads these.
 #[derive(Debug, Clone)]
 pub(crate) struct WindowModel {
     /// Tracked windows in creation order (`WindowManager::windows` order).
