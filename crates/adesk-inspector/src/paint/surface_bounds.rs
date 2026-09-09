@@ -9,6 +9,10 @@ use crate::style::OverlayStyle;
 ///
 /// Empty geometries are skipped; rects are clipped to the canvas.
 pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlayStyle) {
-    let _ = (canvas, input, style);
-    todo!("Phase 2: outline_rect(window.geometry, style.outline) for every window")
+    for window in &input.windows {
+        if window.geometry.is_empty() {
+            continue;
+        }
+        canvas.outline_rect(window.geometry, style.outline);
+    }
 }
