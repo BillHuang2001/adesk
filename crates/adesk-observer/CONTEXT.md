@@ -60,7 +60,6 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 | Behaviour tests (ignored stubs until Phase 2) | `./tests/waits.rs`, `./tests/filters.rs`, `./tests/concurrency.rs`, `./tests/resync.rs`, `./tests/actions.rs` |
 | Public API smoke test (runs today) | `./tests/api_surface.rs` |
 | Event fixtures for tests | `./tests/common/mod.rs` |
-| Standalone workspace validation | `./check-standalone.sh` |
 | Consumer: AGP dispatch, event pump, rendering after waits | `../adesk-server/` (sibling — read-only, escalate changes) |
 | `RuntimeEvent`, `Observation`, ids, geometry, `Error` | `../adesk-core/` (dependency — read-only) |
 | End-to-end harness that drives this crate | `../adesk-testkit/` (sibling — read-only) |
