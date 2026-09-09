@@ -81,5 +81,6 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 ## Notes for Agents
 
 - **`adesk-server` coupling**: `runtime.rs` is the only file that touches `ServerConfig`/`Server::start`/`RunningServer` (contract in its module docs); adapt only `TestRuntime::start_with`/`shutdown` when that contract changes.
+- **Consumer wiring**: the crate is declared once in the root `[workspace.dependencies]` (`Cargo.toml:31`); a consumer adds it under `[dev-dependencies]`. No crate does yet — `adesk-agent` reserves an `e2e` feature for this, but its `tests/e2e_runtime.rs` is a plan-only stub behind `#![cfg(feature = "e2e")]`.
 - `wayland/mod.rs` documents the reader-thread, lock-order and teardown rules; `wayland/shm.rs` documents the Argb8888 byte order; `wayland/state.rs` holds every `Dispatch` impl.
 - The frozen acceptance specs (`tests/api_surface.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/wayland_client.rs`) must not be edited; add new behavior proof in new test files instead.
