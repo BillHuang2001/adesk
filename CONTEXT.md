@@ -122,6 +122,17 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 - `xkbcommon`'s keymap data comes from `XKB_CONFIG_ROOT` set by the dev shell; running
   the binaries outside the shell will fail keyboard setup unless that variable is set.
 
+## Status
+Phase 1 (architecture) is complete: all 12 crates are scaffolded, the workspace builds (`./scripts/dev.sh cargo check --workspace --all-targets` is green), and `docs/protocol.md` / `docs/architecture.md` / `docs/core-api.md` are normative.
+`adesk-core` is fully implemented (85 tests).
+Every other crate has real signatures, module docs and frozen acceptance test suites whose bodies are `todo!()`; baseline `cargo test --workspace` = 217 passing, and every failure is a `not yet implemented` panic in those specs.
+Implementation proceeds in waves (one Manager owns each crate):
+1. `adesk-proto`, `adesk-wm`, `adesk-render`, `adesk-observer`, `adesk-app-registry` (no sibling-implementation dependencies)
+2. `adesk-compositor`, `adesk-inspector`, `adesk-client`, `adesk-agent`
+3. `adesk-server` (needs a live compositor for its end-to-end tests)
+4. `adesk-testkit` (needs a live server)
+A crate is implementation-complete when it has zero `todo!()`, no skeleton-phase crate-level `allow` attributes left, and its full non-ignored test suite passes under the dev shell.
+
 ## Routing Table
 
 | Area | Owner |
