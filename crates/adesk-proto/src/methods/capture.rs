@@ -128,10 +128,37 @@ pub struct ObserveResult {
     pub image: Option<ImagePayload>,
 }
 
+/// Name of the image field inside the §4 `observation` object.
+const IMAGE_FIELD: &str = "image";
+
 impl Serialize for ObserveResult {
     /// Emits `{"observation": {<core observation fields>, "image": <image|null>}}`.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        todo!()
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let observation =
+            serde_json::to_value(&self.observation).map_err(serde::ser::Error::custom)?;
+        let image = match &self.image {
+            Some(image) => serde_json::to_value(image).map_err(serde::ser::Error::custom)?,
+            None => serde_json::Value::Null,
+        };
+        let mut fields = match observation {
+            serde_json::Value::Object(fields) => fields,
+            _ => {
+                return Err(serde::ser::Error::custom(
+                    "observation must serialize as a JSON object",
+                ))
+            }
+        };
+        // §4: `image` is always present inside `observation`, `null` when absent.
+        fields.insert(IMAGE_FIELD.to_owned(), image);
+
+        let mut map = serializer.serialize_map(Some(1))?;
+        map.serialize_entry("observation", &serde_json::Value::Object(fields))?;
+        map.end()
     }
 }
 
@@ -140,6 +167,29 @@ impl<'de> Deserialize<'de> for ObserveResult {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        todo!()
+        /// Wire shape: `{"observation": {<core fields>, "image": <image|null>}}`.
+        #[derive(Deserialize)]
+        struct ObserveWire {
+            observation: serde_json::Value,
+        }
+
+        let wire = ObserveWire::deserialize(deserializer)?;
+        let mut fields = match wire.observation {
+            serde_json::Value::Object(fields) => fields,
+            _ => {
+                return Err(serde::de::Error::custom(
+                    "`observation` must be a JSON object",
+                ))
+            }
+        };
+        // A missing `image` is tolerated as `null` (§4 always sends it).
+        let image = fields
+            .remove(IMAGE_FIELD)
+            .unwrap_or(serde_json::Value::Null);
+        let observation: Observation = serde_json::from_value(serde_json::Value::Object(fields))
+            .map_err(serde::de::Error::custom)?;
+        let image: Option<ImagePayload> =
+            serde_json::from_value(image).map_err(serde::de::Error::custom)?;
+        Ok(ObserveResult { observation, image })
     }
 }
