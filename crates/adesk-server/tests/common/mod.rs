@@ -457,10 +457,9 @@ impl RawClient {
                 "raw client: connection closed before a line arrived\n{}",
                 self.recent()
             ),
-            ReadOutcome::Timeout => panic!(
-                "raw client: no line within {within:?}\n{}",
-                self.recent()
-            ),
+            ReadOutcome::Timeout => {
+                panic!("raw client: no line within {within:?}\n{}", self.recent())
+            }
         }
     }
 
@@ -646,7 +645,10 @@ pub fn write_desktop_entry(dir: &Path, file_name: &str, contents: &str) -> PathB
     });
     let path = dir.join(file_name);
     std::fs::write(&path, contents).unwrap_or_else(|error| {
-        panic!("E2E harness: write fixture {} failed: {error}", path.display())
+        panic!(
+            "E2E harness: write fixture {} failed: {error}",
+            path.display()
+        )
     });
     path
 }
