@@ -156,7 +156,43 @@ impl Method {
     /// [`crate::ProtoError::InvalidParams`] when `params` does not match the
     /// method's schema.
     pub fn from_parts(name: &str, params: serde_json::Value) -> Result<Method> {
-        todo!()
+        let params = match params {
+            serde_json::Value::Null => serde_json::Value::Object(serde_json::Map::new()),
+            other => other,
+        };
+        let method = match name {
+            "ping" => Method::Ping(decode_params(name, params)?),
+            "list_apps" => Method::ListApps(decode_params(name, params)?),
+            "get_app" => Method::GetApp(decode_params(name, params)?),
+            "launch_app" => Method::LaunchApp(decode_params(name, params)?),
+            "list_windows" => Method::ListWindows(decode_params(name, params)?),
+            "get_window" => Method::GetWindow(decode_params(name, params)?),
+            "activate_window" => Method::ActivateWindow(decode_params(name, params)?),
+            "close_window" => Method::CloseWindow(decode_params(name, params)?),
+            "get_focus" => Method::GetFocus(decode_params(name, params)?),
+            "capture_window" => Method::CaptureWindow(decode_params(name, params)?),
+            "capture_region" => Method::CaptureRegion(decode_params(name, params)?),
+            "observe" => Method::Observe(decode_params(name, params)?),
+            "wait_for_change" => Method::WaitForChange(decode_params(name, params)?),
+            "wait_for_quiet" => Method::WaitForQuiet(decode_params(name, params)?),
+            "pointer_move" => Method::PointerMove(decode_params(name, params)?),
+            "click" => Method::Click(decode_params(name, params)?),
+            "double_click" => Method::DoubleClick(decode_params(name, params)?),
+            "mouse_down" => Method::MouseDown(decode_params(name, params)?),
+            "mouse_up" => Method::MouseUp(decode_params(name, params)?),
+            "scroll" => Method::Scroll(decode_params(name, params)?),
+            "drag" => Method::Drag(decode_params(name, params)?),
+            "keypress" => Method::Keypress(decode_params(name, params)?),
+            "key_down" => Method::KeyDown(decode_params(name, params)?),
+            "key_up" => Method::KeyUp(decode_params(name, params)?),
+            "type_text" => Method::TypeText(decode_params(name, params)?),
+            "subscribe_events" => Method::SubscribeEvents(decode_params(name, params)?),
+            "unsubscribe_events" => Method::UnsubscribeEvents(decode_params(name, params)?),
+            "inspect_capture" => Method::InspectCapture(decode_params(name, params)?),
+            "inspect_subscribe" => Method::InspectSubscribe(decode_params(name, params)?),
+            other => return Err(crate::ProtoError::UnknownMethod(other.to_owned())),
+        };
+        Ok(method)
     }
 
     /// Encodes the params as a JSON object (`{}` for methods without params).
@@ -165,15 +201,68 @@ impl Method {
     ///
     /// Returns [`ProtoError::Json`] if serialization fails.
     pub fn params_value(&self) -> Result<serde_json::Value> {
-        todo!()
+        let value = match self {
+            Method::Ping(params) => serde_json::to_value(params)?,
+            Method::ListApps(params) => serde_json::to_value(params)?,
+            Method::GetApp(params) => serde_json::to_value(params)?,
+            Method::LaunchApp(params) => serde_json::to_value(params)?,
+            Method::ListWindows(params) => serde_json::to_value(params)?,
+            Method::GetWindow(params) => serde_json::to_value(params)?,
+            Method::ActivateWindow(params) => serde_json::to_value(params)?,
+            Method::CloseWindow(params) => serde_json::to_value(params)?,
+            Method::GetFocus(params) => serde_json::to_value(params)?,
+            Method::CaptureWindow(params) => serde_json::to_value(params)?,
+            Method::CaptureRegion(params) => serde_json::to_value(params)?,
+            Method::Observe(params) => serde_json::to_value(params)?,
+            Method::WaitForChange(params) => serde_json::to_value(params)?,
+            Method::WaitForQuiet(params) => serde_json::to_value(params)?,
+            Method::PointerMove(params) => serde_json::to_value(params)?,
+            Method::Click(params) => serde_json::to_value(params)?,
+            Method::DoubleClick(params) => serde_json::to_value(params)?,
+            Method::MouseDown(params) => serde_json::to_value(params)?,
+            Method::MouseUp(params) => serde_json::to_value(params)?,
+            Method::Scroll(params) => serde_json::to_value(params)?,
+            Method::Drag(params) => serde_json::to_value(params)?,
+            Method::Keypress(params) => serde_json::to_value(params)?,
+            Method::KeyDown(params) => serde_json::to_value(params)?,
+            Method::KeyUp(params) => serde_json::to_value(params)?,
+            Method::TypeText(params) => serde_json::to_value(params)?,
+            Method::SubscribeEvents(params) => serde_json::to_value(params)?,
+            Method::UnsubscribeEvents(params) => serde_json::to_value(params)?,
+            Method::InspectCapture(params) => serde_json::to_value(params)?,
+            Method::InspectSubscribe(params) => serde_json::to_value(params)?,
+        };
+        Ok(value)
     }
+}
+
+/// Decodes a params object into the method's typed params struct.
+///
+/// Unknown fields are ignored by serde (§1 forward compatibility).
+fn decode_params<T: serde::de::DeserializeOwned>(
+    method: &str,
+    params: serde_json::Value,
+) -> Result<T> {
+    serde_json::from_value(params).map_err(|err| crate::ProtoError::InvalidParams {
+        method: method.to_owned(),
+        message: err.to_string(),
+    })
 }
 
 impl Serialize for Method {
     /// Emits `{"method": <name>, "params": <params>}` as a map so it can be
     /// flattened into a request frame.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        todo!()
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+
+        let params = self.params_value().map_err(serde::ser::Error::custom)?;
+        let mut map = serializer.serialize_map(Some(2))?;
+        map.serialize_entry("method", self.method_name())?;
+        map.serialize_entry("params", &params)?;
+        map.end()
     }
 }
 
@@ -183,6 +272,17 @@ impl<'de> Deserialize<'de> for Method {
     fn deserialize<D: serde::Deserializer<'de>>(
         deserializer: D,
     ) -> std::result::Result<Self, D::Error> {
-        todo!()
+        /// Wire shape of a method: the `method`/`params` sibling fields of a
+        /// request frame (§1). `params` is optional and may be `null`.
+        #[derive(Deserialize)]
+        struct MethodWire {
+            method: String,
+            #[serde(default)]
+            params: Option<serde_json::Value>,
+        }
+
+        let wire = MethodWire::deserialize(deserializer)?;
+        Method::from_parts(&wire.method, wire.params.unwrap_or(serde_json::Value::Null))
+            .map_err(serde::de::Error::custom)
     }
 }
