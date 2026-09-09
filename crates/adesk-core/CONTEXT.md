@@ -86,6 +86,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `right()`/`bottom()` saturate at `i32::MAX` rather than wrapping; all edge arithmetic goes through `i64`.
 - `Position::resolve` maps normalized values with `round(n * (dim - 1))` so `0.0`/`1.0` are the first/last pixel, clamps pixels into the window, maps `NaN` to `0.0` (infinities saturate), and resolves empty windows to their origin.
 - `ImageBuffer::new_rgba` is infallible and fills opaque black (alpha 255); `from_rgba` accepts only tightly packed data (`stride == width * 4`) and rejects length mismatch or stride > `u32::MAX` with `InvalidRequest`.
+- `ImageBuffer` data is row-major top-down, RGBA8 with straight (non-premultiplied) alpha; `stride` is a **public field**, not an accessor, and is only guaranteed `>= width * 4` (rows may be padded), so readers must not assume `stride == width * 4`.
 - `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says all four ids are `Copy`, which is impossible for a `String` payload — the three numeric ids are `Copy`.
 - `Observation` lives in `event.rs` (the task's module layout has no observation module); it is the temporal summary of the event vocabulary.
 - `Button`/`WindowState` derive `Default` via `#[default]` (`Left`/`Inactive`) so protocol defaults (`button = "left"`) are expressible with `#[serde(default)]` downstream.
