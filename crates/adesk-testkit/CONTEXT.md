@@ -5,7 +5,7 @@
 `adesk-testkit` makes the whole ADesk runtime testable without a display, GPU, network or installed application.
 It is the only supported way to run ADesk end-to-end tests: an in-process runtime on private temp paths, a real Wayland protocol client, `.desktop` fixtures, a helper process, and deadline-bounded image/event assertions.
 **Dev-dependency target only** — no runtime crate may depend on it, and the `adesk-test-app` binary is never shipped.
-Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnings` are clean, and `cargo test -p adesk-testkit` passes except two tests blocked on sibling crates (see Known Issues).
+Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!()` bodies, and the full `cargo test -p adesk-testkit` suite passes under the dev shell (46 tests + 3 doctests, 0 failures, 0 ignored test functions).
 
 ## API Surface
 
