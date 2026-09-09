@@ -68,7 +68,10 @@ async fn resync_marks_windows_uncertain() {
     let state = observer
         .window_state(WindowId(7))
         .expect("resync added the unknown window");
-    assert!(state.state_uncertain, "the lag leaves a hole in the history");
+    assert!(
+        state.state_uncertain,
+        "the lag leaves a hole in the history"
+    );
     assert_eq!(
         state.last_commit_seq, 3,
         "the snapshot's commit watermark is adopted"
@@ -181,7 +184,11 @@ async fn resync_advances_watermark_and_prunes_journal() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
     observer.handle_event(&common::commit(2, 10, 7, 1, &[common::rect(0, 0, 4, 4)]));
-    assert_eq!(observer.snapshot().journal_len, 2, "both events are retained");
+    assert_eq!(
+        observer.snapshot().journal_len,
+        2,
+        "both events are retained"
+    );
     let snapshot = StateSnapshot {
         seq: 2,
         ts_ms: 20,

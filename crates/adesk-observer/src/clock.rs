@@ -22,12 +22,6 @@
 //! - The clock never moves backwards, so a stale or replayed event cannot make a
 //!   quiet window un-quiet retroactively.
 
-// The clock is complete, but its only consumer (`service.rs`) is still a Phase-1
-// skeleton, so `Clock::new`/`observe_ts`/`deadline` look unused to the non-test
-// build. Remove this allow together with the last `todo!()` in `service.rs`
-// (see `CONTEXT.md` → Status).
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 /// Internal clock; owned by the service behind its own mutex (see `service.rs`).

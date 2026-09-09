@@ -341,7 +341,12 @@ impl ObserverService {
         self.inner
             .events
             .send_modify(|generation| *generation = generation.wrapping_add(1));
-        tracing::trace!(seq, ts_ms, counted = is_counted, "observer: event processed");
+        tracing::trace!(
+            seq,
+            ts_ms,
+            counted = is_counted,
+            "observer: event processed"
+        );
     }
 
     /// Resyncs after a broadcast `Lagged` error (`docs/architecture.md` §1).
@@ -410,8 +415,7 @@ impl ObserverService {
             match state.windows.get_mut(&window.window_id) {
                 None => {
                     // 3. Missed `WindowCreated`: seed the state from the snapshot.
-                    let mut fresh =
-                        WindowTemporalState::created(window.window_id, snapshot.ts_ms);
+                    let mut fresh = WindowTemporalState::created(window.window_id, snapshot.ts_ms);
                     fresh.last_commit_seq = window.last_commit_seq;
                     if window.last_commit_seq > 0 {
                         // Best effort: the commit timestamp is unknown, the snapshot
@@ -665,12 +669,8 @@ impl ObserverService {
 
         // (c) Announce the waiter for `pending_observation`; the guard is dropped on
         // resolution *and* on cancellation (client disconnect).
-        let _guard = PendingGuard::register(
-            inner,
-            plan.window_id,
-            plan.filters.min_seq,
-            plan.started_at,
-        );
+        let _guard =
+            PendingGuard::register(inner, plan.window_id, plan.filters.min_seq, plan.started_at);
 
         // (d) Seed from the journal; every iteration absorbs whatever the journal
         // holds beyond `cursor`, so a seeded event is never counted twice.
@@ -690,9 +690,8 @@ impl ObserverService {
                     if !plan.filters.counts(event) {
                         continue;
                     }
-                    let clip = window_geometry(
-                        event.window_id.and_then(|id| state.windows.get(&id)),
-                    );
+                    let clip =
+                        window_geometry(event.window_id.and_then(|id| state.windows.get(&id)));
                     accumulator.absorb(event, clip);
                 }
                 // Condition evaluation and quiet-deadline scheduling share this
@@ -1008,7 +1007,9 @@ mod tests {
         let observer = ObserverService::new();
         observer.handle_event(&commit(1, 10, 7, 3, &[rect(0, 0, 1, 1)]));
 
-        let state = observer.window_state(WindowId(7)).expect("created on demand");
+        let state = observer
+            .window_state(WindowId(7))
+            .expect("created on demand");
         assert_eq!(state.last_commit_seq, 3);
         assert_eq!(state.commit_count, 1);
         assert_eq!(observer.watermark(), 1);
@@ -1088,10 +1089,13 @@ mod tests {
 
         let report = observer.resync(state_snapshot(1, 10, Vec::new()));
 
-        assert_eq!(report, ResyncReport {
-            snapshot_seq: 5,
-            ..ResyncReport::default()
-        });
+        assert_eq!(
+            report,
+            ResyncReport {
+                snapshot_seq: 5,
+                ..ResyncReport::default()
+            }
+        );
         assert_eq!(observer.watermark(), 5, "never moves backwards");
         assert!(observer.window_state(WindowId(7)).is_some(), "no pruning");
         assert_eq!(observer.snapshot().journal_len, 1);
@@ -1170,10 +1174,7 @@ mod tests {
         assert_eq!(report.marked_uncertain, Vec::new());
         assert_eq!(observer.window_state(WindowId(7)), None);
         assert_eq!(observer.window_ids(), Vec::new());
-        assert_eq!(
-            journal_kinds(&observer),
-            vec![(20, CountedKind::Destroyed)]
-        );
+        assert_eq!(journal_kinds(&observer), vec![(20, CountedKind::Destroyed)]);
     }
 
     #[test]
@@ -1231,7 +1232,10 @@ mod tests {
         assert_eq!(record.id, id);
         assert_eq!(record.kind, ActionKind::Click);
         assert_eq!(record.window_id, Some(WindowId(7)));
-        assert_eq!(record.position, Some(Position::Normalized { x: 0.25, y: 0.75 }));
+        assert_eq!(
+            record.position,
+            Some(Position::Normalized { x: 0.25, y: 0.75 })
+        );
         assert_eq!(record.seq, 2, "watermark at record time");
         assert_eq!(record.ts_ms, 25, "clock at record time");
         assert_eq!(observer.action_seq(id), Some(2));
@@ -1266,7 +1270,9 @@ mod tests {
         let observer = ObserverService::new();
         let _ = observer.record_action(ActionKind::ActivateWindow, Some(WindowId(7)), None);
 
-        let state = observer.window_state(WindowId(7)).expect("created on demand");
+        let state = observer
+            .window_state(WindowId(7))
+            .expect("created on demand");
         assert_eq!(state.last_input_at, None, "not synthesized input");
         assert_eq!(state.commit_count, 0);
 
@@ -1319,7 +1325,10 @@ mod tests {
         let earlier = PendingGuard::register(&inner, Some(WindowId(7)), 3, 20);
 
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             Some(PendingObservation {
                 since_seq: 3,
                 started_at: 20
@@ -1329,7 +1338,10 @@ mod tests {
 
         drop(earlier);
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             Some(PendingObservation {
                 since_seq: 5,
                 started_at: 10
@@ -1339,7 +1351,10 @@ mod tests {
         // Same key, so the refcount keeps it alive until the last guard goes.
         drop(first);
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             Some(PendingObservation {
                 since_seq: 5,
                 started_at: 10
@@ -1347,7 +1362,10 @@ mod tests {
         );
         drop(duplicate);
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             None
         );
         assert!(lock_state(&observer.inner).pending.is_empty(), "no leak");
@@ -1396,7 +1414,11 @@ mod tests {
         observer.handle_event(&created(1, 0, 7));
 
         let error = observer
-            .wait_for_quiet(QuietSpec::new().window(WindowId(7)).after_action(ActionId(9)))
+            .wait_for_quiet(
+                QuietSpec::new()
+                    .window(WindowId(7))
+                    .after_action(ActionId(9)),
+            )
             .await
             .expect_err("unknown action");
         assert!(matches!(error, Error::UnknownAction(ActionId(9))));
@@ -1432,12 +1454,52 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn parked_waiter_resolves_when_paused_time_advances_past_the_deadline() {
+        let observer = ObserverService::new();
+        observer.handle_event(&created(1, 0, 7));
+
+        let mut wait =
+            Box::pin(observer.wait_for_change(WaitSpec::new().window(WindowId(7)).timeout_ms(300)));
+        tokio::select! {
+            biased;
+            observation = &mut wait => panic!("resolved before any event: {observation:?}"),
+            () = tokio::task::yield_now() => {}
+        }
+
+        // No event is ever fed: the waiter is parked on `sleep_until(deadline)` in
+        // the event `ts_ms` domain, so advancing paused time past the deadline must
+        // resolve it with a timeout observation.
+        tokio::time::advance(Duration::from_millis(300)).await;
+
+        let observation = wait.await.expect("known window");
+        assert!(
+            observation.timed_out,
+            "the deadline expired: {observation:?}"
+        );
+        assert_eq!(
+            observation.elapsed_ms, 300,
+            "timeout_ms in the ts_ms domain"
+        );
+        assert_eq!(observation.commits, 0);
+        assert_eq!(
+            observer.now_ms(),
+            300,
+            "the event clock reached the deadline"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn wait_for_quiet_resolves_at_exactly_anchor_plus_quiet_ms() {
         let observer = ObserverService::new();
         observer.handle_event(&created(1, 0, 7));
 
         let observation = observer
-            .wait_for_quiet(QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(5_000))
+            .wait_for_quiet(
+                QuietSpec::new()
+                    .window(WindowId(7))
+                    .quiet_ms(100)
+                    .timeout_ms(5_000),
+            )
             .await
             .expect("known window");
 
@@ -1560,7 +1622,10 @@ mod tests {
 
         let mut wait = Box::pin(
             observer.wait_for_quiet(
-                QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(5_000),
+                QuietSpec::new()
+                    .window(WindowId(7))
+                    .quiet_ms(100)
+                    .timeout_ms(5_000),
             ),
         );
         tokio::select! {
@@ -1626,7 +1691,10 @@ mod tests {
             assert_eq!(observation.elapsed_ms, 40);
         }
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             None,
             "all guards released"
         );
@@ -1640,7 +1708,10 @@ mod tests {
 
         let mut wait = Box::pin(
             observer.wait_for_quiet(
-                QuietSpec::new().window(WindowId(7)).quiet_ms(50).timeout_ms(5_000),
+                QuietSpec::new()
+                    .window(WindowId(7))
+                    .quiet_ms(50)
+                    .timeout_ms(5_000),
             ),
         );
         tokio::select! {
@@ -1660,7 +1731,10 @@ mod tests {
         drop(wait);
 
         assert_eq!(
-            observer.window_state(WindowId(7)).unwrap().pending_observation,
+            observer
+                .window_state(WindowId(7))
+                .unwrap()
+                .pending_observation,
             None
         );
         assert!(lock_state(&observer.inner).pending.is_empty());

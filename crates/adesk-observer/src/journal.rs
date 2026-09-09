@@ -13,13 +13,6 @@
 //! aggregates), only filter-relative counts degrade, and the per-window
 //! `state_uncertain` flag marks the degradation.
 
-// Phase 1 architecture skeleton: the *consumers* of this journal (`waiter.rs`,
-// `service.rs`) are still `todo!()`, so most `CountedKind` payload fields are
-// written here but never read yet and the `dead_code` lint fires without this
-// allow. Remove it together with the last `todo!()` in `waiter.rs`/`service.rs`
-// (see `CONTEXT.md` → Status).
-#![allow(dead_code)]
-
 use std::collections::VecDeque;
 
 use adesk_core::{Region, RuntimeEvent, WindowId};
@@ -234,6 +227,8 @@ impl EventJournal {
     }
 
     /// Oldest retained sequence, if any.
+    // Test-only accessor: the eviction tests assert the oldest retained sequence.
+    #[allow(dead_code)]
     pub(crate) fn oldest_seq(&self) -> Option<u64> {
         self.buf.front().map(|event| event.seq)
     }

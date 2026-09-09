@@ -1,8 +1,8 @@
 //! Public API smoke test: the surface is constructible and documented.
 //!
-//! Unlike the behaviour tests (which are `#[ignore]`d until Phase 2), this test
-//! runs today: it pins the public API shape — spec builders, enum mappings,
-//! snapshot structs — and keeps `cargo check --all-targets` honest.
+//! The sibling behaviour tests exercise the runtime semantics; this test pins the
+//! public API shape — spec builders, enum mappings, snapshot structs — and keeps
+//! `cargo check --all-targets` honest.
 
 mod common;
 
@@ -62,10 +62,7 @@ fn observe_spec_builders_and_conditions() {
 
     assert_eq!(Condition::Change.quiet_threshold_ms(), DEFAULT_QUIET_MS);
     assert_eq!(Condition::Timeout.quiet_threshold_ms(), DEFAULT_QUIET_MS);
-    assert_eq!(
-        Condition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(),
-        33
-    );
+    assert_eq!(Condition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(), 33);
 }
 
 #[test]
@@ -82,8 +79,8 @@ fn action_kind_vocabulary_matches_agp() {
 
 #[test]
 fn registry_and_snapshot_types_are_constructible() {
-    // Construction only: method bodies are `todo!()` until Phase 2, so this test
-    // must not call them (behaviour lives in the `#[ignore]`d test files).
+    // Construction only: this test pins the types' shape; behaviour is exercised
+    // by the sibling behaviour test files.
     let _registry = ActionRegistry::new();
     let _registry_clone = _registry.clone();
 
@@ -136,7 +133,7 @@ fn registry_and_snapshot_types_are_constructible() {
     let config = ObserverConfig::default();
     assert_eq!(config.journal_capacity, DEFAULT_JOURNAL_CAPACITY);
     assert_eq!(config.default_quiet_ms, DEFAULT_QUIET_MS);
-    // Reference the constructors without invoking the `todo!()` bodies.
+    // Reference the constructors without running a service.
     let _constructors: [fn() -> ObserverService; 1] = [ObserverService::new];
     let _with_config: fn(ObserverConfig) -> ObserverService = ObserverService::with_config;
 }

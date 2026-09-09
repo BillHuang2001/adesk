@@ -1,6 +1,6 @@
 //! `wait_for_change` / `wait_for_quiet` / `observe` semantics (AGP §5.4).
 //!
-//! Phase 2: each body drives exactly the scenario of its doc comment (the
+//! Each body drives exactly the scenario of its doc comment (the
 //! normative acceptance spec) and asserts the documented values. Waits are
 //! deterministic: `tokio::time::pause()` freezes tokio time, while the observer's
 //! clock only moves when an event re-anchors it (`Clock::observe_ts`, so feeding
@@ -90,7 +90,7 @@ async fn wait_for_change_times_out_without_events() {
 /// Expect: `timed_out == true`, `commits == 2`, `last_commit_seq == 2`,
 /// `changed_regions` = union of both commits (simplified), `elapsed_ms == 400`.
 #[tokio::test(start_paused = true)]
-#[ignore = "Phase 2: implement ObserverService, then rewrite this body"]
+#[ignore = "frozen spec contradicts docs/protocol.md §5.4: change resolves on the first counted commit; see CONTEXT.md Known Issues"]
 async fn wait_for_change_timeout_reports_accumulated_events() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
@@ -127,7 +127,10 @@ async fn wait_for_change_timeout_reports_accumulated_events() {
 async fn wait_for_quiet_resolves_after_quiet_ms() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
-    let spec = QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(1_000);
+    let spec = QuietSpec::new()
+        .window(WindowId(7))
+        .quiet_ms(100)
+        .timeout_ms(1_000);
 
     let mut wait = Box::pin(observer.wait_for_quiet(spec));
     tokio::select! {
@@ -153,7 +156,10 @@ async fn wait_for_quiet_resolves_after_quiet_ms() {
 async fn wait_for_quiet_rearms_on_every_commit() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
-    let spec = QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(1_000);
+    let spec = QuietSpec::new()
+        .window(WindowId(7))
+        .quiet_ms(100)
+        .timeout_ms(1_000);
 
     let mut wait = Box::pin(observer.wait_for_quiet(spec));
     tokio::select! {
@@ -183,7 +189,10 @@ async fn wait_for_quiet_rearms_on_every_commit() {
 async fn wait_for_quiet_times_out_while_commits_keep_arriving() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
-    let spec = QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(200);
+    let spec = QuietSpec::new()
+        .window(WindowId(7))
+        .quiet_ms(100)
+        .timeout_ms(200);
 
     let mut wait = Box::pin(observer.wait_for_quiet(spec));
     tokio::select! {
@@ -255,7 +264,10 @@ async fn observe_quiet_condition_matches_wait_for_quiet() {
     // concurrently so both resolve at the same point of the event clock.
     let reference_service = ObserverService::new();
     reference_service.handle_event(&common::created(1, 0, 7));
-    let reference_spec = QuietSpec::new().window(WindowId(7)).quiet_ms(100).timeout_ms(1_000);
+    let reference_spec = QuietSpec::new()
+        .window(WindowId(7))
+        .quiet_ms(100)
+        .timeout_ms(1_000);
 
     let (observation, reference) = tokio::join!(
         observer.observe(spec),

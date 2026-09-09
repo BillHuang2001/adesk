@@ -11,13 +11,6 @@
 //! The service owns the waiting loop (`service.rs`); everything here is
 //! synchronous and unit-testable without tokio.
 
-// This file is Phase-2 complete, but its only production consumer
-// (`service.rs`) is still a Phase-1 skeleton in this worktree, so `Filters::counts`,
-// `WaitPlan`, `Accumulator` and `condition_met` have no production call site yet and
-// the `dead_code` lint fires on them. Remove this allow once `service.rs` is
-// implemented (see `CONTEXT.md` → Status).
-#![allow(dead_code)]
-
 use adesk_core::{ActionId, Observation, Region, WindowId};
 
 use crate::journal::{CountedEvent, CountedKind};
