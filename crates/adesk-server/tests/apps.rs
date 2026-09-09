@@ -17,7 +17,8 @@
 //! `list_apps_includes_a_valid_entry_without_exec` pins separately. The broken
 //! entry therefore omits `Type`, the entry error `scan()` really skips.
 //!
-//! `launch_app` is covered by `launch.rs`; this suite only reads the registry.
+//! `launch_app` — which spawns a process — is out of scope here; this suite only
+//! reads the registry.
 
 mod common;
 
