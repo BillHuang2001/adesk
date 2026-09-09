@@ -48,7 +48,7 @@ async fn resync_synthesizes_missed_commits_for_waiters() {
         }],
     };
     let _report = observer.resync(snapshot);
-    let _ = observer.wait_for_change(WaitSpec::new().window(WindowId(7)).timeout_ms(10));
+    std::mem::drop(observer.wait_for_change(WaitSpec::new().window(WindowId(7)).timeout_ms(10)));
     todo!("Phase 2: assert the synthesized commit resolves an in-flight wait")
 }
 
