@@ -17,7 +17,7 @@ use tracing::Instrument;
 use adesk_proto::{Frame, NdjsonCodec};
 
 use crate::context::ServerContext;
-use crate::dispatch::Dispatcher;
+use crate::dispatch::{forget_session_sink, register_session_sink, Dispatcher};
 use crate::error::{Result, ServerError};
 use crate::session::Session;
 
@@ -65,9 +65,12 @@ impl Connection {
 
         let (read_half, write_half) = stream.into_split();
         let (frames_tx, frames_rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
-        let writer = ConnectionWriter::new(frames_tx);
+        let writer = ConnectionWriter::new(frames_tx.clone());
         let writer_task =
             tokio::spawn(write_loop(write_half, frames_rx, NdjsonCodec).instrument(span.clone()));
+        // Subscription handlers (§5.6/§5.7) push frames from outside this task,
+        // so the writer queue is published under the session id.
+        register_session_sink(session_id, frames_tx);
 
         let result = read_loop(read_half, &context, &session, &writer)
             .instrument(span.clone())
@@ -77,6 +80,7 @@ impl Connection {
         // the writer task finishes; the peer then observes a clean EOF.
         context.subscriptions.remove_connection(session_id);
         context.inspect_subscriptions.remove_connection(session_id);
+        forget_session_sink(session_id);
         drop(writer);
         let _ = writer_task.await;
         result

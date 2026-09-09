@@ -11,13 +11,12 @@
 //! `RuntimeCommand` channel and the `RuntimeEvent` broadcast, both owned by
 //! `adesk-compositor`.
 //!
-//! Phase 1 status: the public API and module map are pinned and compile;
-//! behaviour lives behind `todo!()` and is implemented in Phase 2. The
-//! crate-level `allow(dead_code, unused_variables)` exists only because stub
-//! bodies do not read their arguments or fields yet — **remove it in Phase 2**.
+//! [`crate::dispatch`] routes one arm per AGP method and answers every request
+//! with exactly one response; [`crate::event_pump`] feeds the observer, the
+//! subscription fan-out and the inspection cache from the compositor's event
+//! broadcast.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-#![allow(dead_code, unused_variables)] // Phase-1 skeleton only.
 
 /// Server configuration and CLI value parsing.
 pub mod config;
