@@ -77,7 +77,6 @@ Status: Phase-1 architecture skeleton — the public API and its documentation a
 
 - `crates/adesk-server/` is not landed, so the root workspace (`members = ["crates/*"]`) does not load and `cargo check -p adesk-testkit` fails before compiling anything. Use `bash crates/adesk-testkit/check-standalone.sh`; delete it once every sibling has a manifest.
 - Sibling-API mismatches found while building the harness (report, do not patch in-tree): `adesk-client` does not compile against landed `adesk-proto` (`src/wire.rs` imports `adesk_proto::{Request, Response}` and calls `Codec::new()`, while proto exposes `RequestFrame`/`ResponseFrame` and `Codec` as a trait); `adesk-compositor` is stale against landed `adesk-wm` (`WindowManager::new` now takes `PolicyConfig`, `resolve_position` takes `Position` by value and returns `Option<Point>`).
-- `src/wait.rs::timeout_error` is unused until Phase 2 implements the waiters (dead-code warning).
 - `adesk_app_registry::{desktop_file_id, is_desktop_file}` and `FillPattern::{to_cli_arg, from_cli_arg}` are still `todo!()` siblings; fixture ids and the helper CLI therefore have documented Phase-2 dependencies.
 
 ## Notes for Agents
