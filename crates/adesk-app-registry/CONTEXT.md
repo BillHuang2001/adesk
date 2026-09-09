@@ -135,5 +135,5 @@ Architecture-only phase: every behavior body is `todo!("stub: implementation pha
 
 ## Status
 
-- Architecture landed: manifest, 12 modules, compiling public API with `todo!()` bodies, CONTEXT.md; validated with `cargo check --all-targets` via a standalone temp package (workspace glob still blocked by sibling manifests).
+- Architecture landed: manifest, crate root + 11 modules, compiling public API with `todo!()` bodies, CONTEXT.md; validated with `cargo check --all-targets`, `cargo clippy --all-targets` and `cargo doc` clean via a standalone temp package (workspace glob still blocked by sibling manifests).
 - No behavior implemented yet — implementation phase fills the `todo!()` bodies per Test Strategy and then removes the stub attributes.
