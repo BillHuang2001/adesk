@@ -175,9 +175,8 @@ Integration tests (defined, NOT implemented — `tests/integration_plan.md`; add
 - Ground rules: real compositor thread in-process, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap assertions instead of sleeps; GL-only tests gated behind `ADESK_TEST_GL=1`.
 - Smoke tests (`tests/compositor_smoke.rs`) spawn a real runtime and stay `#[ignore]`d until Phase 2.
 
-Validation recipe (used for Phase 1, repeat until `adesk-wm`/`adesk-render` land):
-- The workspace glob `members = ["crates/*"]` requires every member to have a manifest, so `cargo check -p adesk-compositor` cannot run while `adesk-wm`/`adesk-render` are unlanded.
-- Copy `src/` + `tests/` into a temp crate with inlined dependency versions, real `adesk-core` and stub `adesk-wm`/`adesk-render` honouring the `WmBridge` contract, then run `cargo check --all-targets`, `cargo test` and `cargo clippy --all-targets` through `scripts/dev.sh`.
+Validation recipe (all workspace members now have manifests, so the crate builds in-tree):
+- `./scripts/dev.sh cargo check -p adesk-compositor --all-targets`, `./scripts/dev.sh cargo test -p adesk-compositor` and `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (verified clean; clippy emits only the expected warnings below).
 - Expected clippy output today: dead-code warnings for Phase-2 stubs plus one `large_enum_variant` on `RuntimeCommand` (boxing is a Phase-2 option).
 
 ## Dependencies
