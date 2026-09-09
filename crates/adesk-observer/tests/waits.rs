@@ -86,11 +86,14 @@ async fn wait_for_change_times_out_without_events() {
     assert_eq!(observation.seq, 1, "the only event's watermark");
 }
 
-/// Commits at 50 ms and 120 ms, then silence until the 400 ms timeout.
-/// Expect: `timed_out == true`, `commits == 2`, `last_commit_seq == 2`,
-/// `changed_regions` = union of both commits (simplified), `elapsed_ms == 400`.
+/// Commits at 50 ms and 120 ms while the wait is parked; `timeout_ms = 400`.
+/// Expect: resolution on the first counted commit (`timed_out == false`), with
+/// every event absorbed before the waiter ran reported: `commits == 2`,
+/// `last_commit_seq == 2`, `changed_regions` = union of both commits
+/// (simplified), `quiet == false`, `elapsed_ms == 120`.
+///
+/// Per docs/protocol.md §5.4, wait_for_change resolves on the first counted surface commit; this spec was corrected to match the normative protocol.
 #[tokio::test(start_paused = true)]
-#[ignore = "frozen spec contradicts docs/protocol.md §5.4: change resolves on the first counted commit; see CONTEXT.md Known Issues"]
 async fn wait_for_change_timeout_reports_accumulated_events() {
     let observer = ObserverService::new();
     observer.handle_event(&common::created(1, 0, 7));
@@ -107,8 +110,8 @@ async fn wait_for_change_timeout_reports_accumulated_events() {
     let observation: Observation = wait.await.expect("known window");
 
     assert!(
-        observation.timed_out,
-        "the wait must expire after accumulating both commits: {observation:?}"
+        !observation.timed_out,
+        "the first counted surface commit resolves the wait: {observation:?}"
     );
     assert_eq!(observation.commits, 2);
     assert_eq!(observation.last_commit_seq, 2);
@@ -117,7 +120,14 @@ async fn wait_for_change_timeout_reports_accumulated_events() {
         vec![common::rect(0, 0, 4, 4), common::rect(10, 10, 2, 2)],
         "union of both commit damages, simplified"
     );
-    assert_eq!(observation.elapsed_ms, 400);
+    assert!(
+        !observation.quiet,
+        "0 ms since the last commit < the 250 ms evidence threshold"
+    );
+    assert_eq!(
+        observation.elapsed_ms, 120,
+        "resolved at the second commit's timestamp"
+    );
 }
 
 /// `quiet_ms = 100`, one commit at 30 ms, silence after.
