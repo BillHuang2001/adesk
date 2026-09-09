@@ -161,6 +161,20 @@ Event loop:
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
 - Two field-level `#[allow(dead_code)]` sites are deliberate: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals). No crate-level allow attributes remain.
 
+### AGP command semantics (verified against the code)
+
+- `RenderWindow` resolves `window_id` through `WmBridge::windows()` and then `surface_of`; either miss is `CompositorError::UnknownWindow` (`unknown_window`).
+- The render source is `Rect::from_size(geometry.size())`, so `region` is window-relative and must be non-empty and **strictly contained** in the window rect; an out-of-bounds crop is `invalid_request`, never clipped.
+- Crop is applied first, then `max_dimension` downscales the cropped image.
+- `max_dimension` bounds the **longest edge**; each axis is `clamp(round_half_up(value * M / longest), 1, value)` with one shared scale, so aspect ratio is approximately preserved; `Some(0)` disables scaling and nothing ever upscales.
+- `RenderedFrame.commit_seq` is the window's `last_commit_seq` for `RenderWindow` and `0` for `RenderOutput`; `damage` stays in full window coordinates even when the image is cropped/downscaled.
+- Pipeline images are tightly packed `Rgba8` (row-major, top-down, straight alpha, stride == width*4); `ImageBuffer::stride` is a public field that may be padded in general, so read pixels via `pixel(x, y)`.
+- `StateSnapshot.windows` is creation order, exactly one record is `Active`, every record has `mapped == true`, and popups appear only as `popup_count`, never as entries.
+- `StateSnapshot.keyboard_focus` always equals `active_window_id` in v1 because `WmBridge::keyboard_focus()` returns `manager.active_window()`.
+- Snapshot `seq` is the event watermark and snapshot `ts_ms` is monotonic ms from `State::start`; event `ts_ms` uses `EventSink::start` (a distinct but equally monotonic origin).
+- Input commands carry no window id: `PointerMove` is a window-relative `Position` resolved and clamped against the focused-or-active window, while `PointerButton`/`PointerAxis` act at the current pointer location; with no window the reply is `invalid_request`.
+- `WmBridge::resolve_position` reports an unknown id as `WindowManagement` (→ `internal`), but the command paths resolve the surface first and answer `unknown_window`; normalized `1.0` resolves to the last pixel (`w-1`), never outside the window.
+
 ## Test Strategy
 
 Unit tests (colocated `#[cfg(test)]`; 82 tests pass today):
