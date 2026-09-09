@@ -72,7 +72,9 @@ mod error;
 pub use error::{Result, TestkitError};
 
 // --- ergonomic re-exports (never forks of the domain types) ---
-pub use adesk_core::{AppId, ImageBuffer, Point, Rect, Region, RuntimeEvent, Size, WindowId};
+pub use adesk_core::{
+    AppId, EventKind, ImageBuffer, Point, Rect, Region, RuntimeEvent, Size, WindowId,
+};
 pub use adesk_proto;
 
 pub use assert::{EventAssert, Expected, ImageAssert};

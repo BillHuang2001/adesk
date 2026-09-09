@@ -66,6 +66,12 @@ pub enum TestkitError {
         /// Details of the mismatch (coordinates, expected and actual values).
         message: String,
     },
+    /// An event or condition that the test asserted must not happen, happened.
+    #[error("unexpected: {message}")]
+    Unexpected {
+        /// What was unexpected.
+        message: String,
+    },
     /// The helper binary could not be located next to the running test executable.
     #[error("helper binary `{name}` not found (searched from {searched_from}); build it with `cargo build -p adesk-testkit`")]
     HelperNotFound {
