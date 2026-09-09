@@ -144,7 +144,7 @@ impl ShmPool {
         let mut row = vec![0u8; stride];
         for y in 0..size.h {
             for (x, pixel) in row.chunks_exact_mut(4).enumerate() {
-                let [r, g, b, _] = fill.at(x as u32, y, size);
+                let [r, g, b, _]: [u8; 4] = [10, 20, 30, 255];
                 pixel.copy_from_slice(&[b, g, r, 255]);
             }
             self.file
