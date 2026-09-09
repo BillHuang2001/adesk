@@ -149,7 +149,11 @@ fn window_ids_draws_label_in_slot_zero() {
         );
     }
     assert_eq!(common::px(&out, 29, 2), BLACK, "nothing right of the plate");
-    assert_eq!(common::px(&out, 29, 12), BLACK, "nothing right of the plate");
+    assert_eq!(
+        common::px(&out, 29, 12),
+        BLACK,
+        "nothing right of the plate"
+    );
 
     // Text ink of the elided label at the ink origin (4, 4).
     assert_ink(&out, Point { x: 4, y: 4 }, "wi..", style.text.to_array());
@@ -274,8 +278,17 @@ fn app_ids_uses_slot_one() {
         style.outline.to_array(),
         "plate right border column"
     );
-    assert_eq!(common::px(&out, 47, 12), BLACK, "nothing right of the plate");
-    assert_ink(&out, Point { x: 4, y: 14 }, "app o..", style.text.to_array());
+    assert_eq!(
+        common::px(&out, 47, 12),
+        BLACK,
+        "nothing right of the plate"
+    );
+    assert_ink(
+        &out,
+        Point { x: 4, y: 14 },
+        "app o..",
+        style.text.to_array(),
+    );
 
     let reference = reference_label(
         &input.frame,
@@ -308,7 +321,11 @@ fn app_ids_labels_missing_app_id_as_question_mark() {
         style.outline.to_array(),
         "plate right border column"
     );
-    assert_eq!(common::px(&out, 35, 12), BLACK, "nothing right of the plate");
+    assert_eq!(
+        common::px(&out, 35, 12),
+        BLACK,
+        "nothing right of the plate"
+    );
     assert_eq!(
         common::px(&out, 2, 22),
         style.outline.to_array(),
@@ -317,14 +334,11 @@ fn app_ids_labels_missing_app_id_as_question_mark() {
     assert_ink(&out, Point { x: 4, y: 14 }, "app ?", style.text.to_array());
 
     // Byte-identical to a reference render of the literal "app ?".
-    let reference = reference_label(
-        &input.frame,
-        common::rect(0, 0, 48, 32),
-        1,
-        "app ?",
-        &style,
+    let reference = reference_label(&input.frame, common::rect(0, 0, 48, 32), 1, "app ?", &style);
+    assert_eq!(
+        out.data, reference.data,
+        "missing app id renders as 'app ?'"
     );
-    assert_eq!(out.data, reference.data, "missing app id renders as 'app ?'");
 }
 
 #[test]
@@ -345,7 +359,11 @@ fn focus_draws_outline_and_label_for_active_window() {
     assert_eq!(common::px(&out, 0, 0), focus, "focus outline top-left");
     assert_eq!(common::px(&out, 63, 0), focus, "focus outline top-right");
     assert_eq!(common::px(&out, 0, 47), focus, "focus outline bottom-left");
-    assert_eq!(common::px(&out, 63, 47), focus, "focus outline bottom-right");
+    assert_eq!(
+        common::px(&out, 63, 47),
+        focus,
+        "focus outline bottom-right"
+    );
     assert_eq!(
         common::px(&out, 1, 1),
         BLACK,
@@ -512,11 +530,7 @@ fn labels_use_fixed_slots_regardless_of_enabled_subset() {
         style.outline.to_array(),
         "app plate top-left with window_ids"
     );
-    assert_region_equal(
-        &only_app_ids,
-        &with_window_ids,
-        common::rect(2, 12, 45, 11),
-    );
+    assert_region_equal(&only_app_ids, &with_window_ids, common::rect(2, 12, 45, 11));
     // window_ids still occupies slot 0, so the two renders do differ.
     assert_ne!(only_app_ids.data, with_window_ids.data);
     assert_eq!(
