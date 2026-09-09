@@ -53,5 +53,12 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
   (`src/dispatch/inspect.rs`) may deliver at most ONE frame already in flight when the unsubscribe lands.
   `inspector.rs` therefore asserts ≤1 stray frame in a 500 ms grace window, then zero for 1.5 s.
   Do not tighten this back to "zero strays after the response" — that flakes on a correct server.
-- Window-creating E2E (tiling/focus/input delivery/launch correlation) belongs to the next wave and needs
+- Window-creating E2E (tiling/focus/input delivery) belongs to the next wave and needs
   `adesk-testkit`; it is not covered here.
+- Launch correlation IS covered here without a Wayland client:
+  `subscriptions.rs::window_created_event_carries_the_correlated_launch_id` records a launch via
+  `launch_app` (fixture `Exec=true`, so no `/bin/true` on the Nix dev shell) and injects a synthetic
+  `WindowCreated { launch_id: None, pid }` through `ServerContext::compositor.events()`, then asserts the
+  fanned-out frame carries `Some(launch_id)` while a direct tap on the same broadcast still sees `None`.
+  The `None` half is the compositor-side gap (no `RuntimeCommand` feeds `WmBridge::note_launch`), not a
+  server bug — do not "fix" it by re-emitting events.
