@@ -94,8 +94,8 @@ Code rules:
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
 - `../adesk-core/` — domain types and `RuntimeEvent` (landed, implemented).
-- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (designed in parallel; unlanded).
-- `../adesk-render/` — crop/downscale/readback/encoding (designed in parallel; unlanded; dependency declared for Phase 2).
+- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (landed; consumed by `WmBridge`).
+- `../adesk-render/` — crop/downscale/readback/encoding (landed; dependency declared but unused in Phase 1).
 - `../adesk-testkit/` — integration harness the test plan depends on.
 
 ## Design Decisions
