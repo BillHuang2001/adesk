@@ -31,7 +31,7 @@ use adesk_proto::ImagePayload;
 use serde::{Deserialize, Serialize};
 
 use crate::decision::ActionKind;
-use crate::error::Error;
+use crate::error::{Error, ProviderError};
 
 /// Why the loop stopped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -60,6 +60,14 @@ pub struct LatencyStats {
     pub p95_ms: u64,
 }
 
+/// Number of 512-pixel tiles one image edge spans (never zero).
+///
+/// A degenerate edge (0 px) still occupies a tile, which keeps
+/// [`estimate_visual_tokens`] non-zero and monotonic for any real image.
+fn tiles(edge: u32) -> u64 {
+    u64::from(edge).div_ceil(512).max(1)
+}
+
 /// Estimate visual tokens for an image of the given pixel size.
 ///
 /// Provider-agnostic heuristic matching the common 28px-patch / 512px-tile
@@ -67,19 +75,33 @@ pub struct LatencyStats {
 /// (1 tile when both edges are ≤ 512). Good enough for cost tracking; it is an
 /// *estimate*, never billed truth.
 pub fn estimate_visual_tokens(width: u32, height: u32) -> u64 {
-    let _ = (width, height);
-    todo!("phase 2: 85 + 170 * tiles heuristic")
+    85 + 170 * tiles(width) * tiles(height)
 }
 
 /// Compute min/mean/p95 from raw samples (p95 by nearest rank, empty → zeros).
+///
+/// The nearest-rank percentile is the `ceil(0.95 * n)`-th smallest sample
+/// (1-based), so for ten samples it is the largest one and it never
+/// interpolates between samples.
 pub fn latency_stats(samples: &[u64]) -> LatencyStats {
-    let _ = samples;
-    todo!("phase 2: sort, min/mean/p95 nearest-rank")
+    if samples.is_empty() {
+        return LatencyStats::default();
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_unstable();
+    let count = sorted.len();
+    let sum: u128 = sorted.iter().map(|&sample| u128::from(sample)).sum();
+    let rank = (95 * count).div_ceil(100).clamp(1, count);
+    LatencyStats {
+        count: count as u64,
+        min_ms: sorted[0],
+        mean_ms: sum as f64 / count as f64,
+        p95_ms: sorted[rank - 1],
+    }
 }
 
 /// Mutable recorder owned by the loop; [`Metrics::report`] snapshots it.
 #[derive(Debug)]
-#[allow(dead_code)] // counters are read by `report` in phase 2
 pub struct Metrics {
     started: Instant,
     steps: u32,
@@ -130,39 +152,71 @@ impl Metrics {
 
     /// Record the start of a loop step.
     pub fn record_step(&mut self) {
-        todo!("phase 2: steps += 1")
+        self.steps += 1;
     }
 
     /// Record a provider decision (kind + decision latency).
     pub fn record_decision(&mut self, kind: ActionKind, latency_ms: u64) {
-        let _ = (kind, latency_ms);
-        todo!("phase 2: decisions/latency counters")
+        tracing::trace!(kind = ?kind, latency_ms, "provider decision recorded");
+        self.decisions += 1;
+        self.latencies_ms.push(latency_ms);
     }
 
     /// Record one executed action.
     ///
     /// `readback` marks operations that returned an image; `image` contributes to
     /// `images_sent`/`visual_tokens` when the loop embedded it in a context.
-    pub fn record_action(&mut self, kind: ActionKind, readback: bool, image: Option<&ImagePayload>) {
-        let _ = (kind, readback, image);
-        todo!("phase 2: action/kind/runtime-vs-input/readback counters")
+    /// [`ActionKind::Finish`] is a completion marker, not an action, and is
+    /// ignored.
+    pub fn record_action(
+        &mut self,
+        kind: ActionKind,
+        readback: bool,
+        image: Option<&ImagePayload>,
+    ) {
+        if kind == ActionKind::Finish {
+            return;
+        }
+        self.actions += 1;
+        *self.actions_by_kind.entry(kind).or_insert(0) += 1;
+        if is_input_kind(kind) {
+            self.input_actions += 1;
+        } else {
+            self.runtime_ops += 1;
+        }
+        if readback {
+            self.gpu_readbacks += 1;
+        }
+        if let Some(image) = image {
+            self.record_image_sent(image);
+        }
     }
 
     /// Record that `image` was embedded in a provider context.
     pub fn record_image_sent(&mut self, image: &ImagePayload) {
-        let _ = image;
-        todo!("phase 2: images_sent += 1, visual_tokens += estimate")
+        self.images_sent += 1;
+        self.visual_tokens += estimate_visual_tokens(image.width, image.height);
     }
 
     /// Record a failed step and its error.
     pub fn record_failure(&mut self, kind: ActionKind, error: &Error) {
-        let _ = (kind, error);
-        todo!("phase 2: failure counters + consecutive tracking")
+        tracing::debug!(action = ?kind, error = %error, "step failed");
+        self.failures += 1;
+        self.consecutive_failures += 1;
+        self.last_step_failed = true;
+        *self
+            .failures_by_kind
+            .entry(failure_kind_key(error))
+            .or_insert(0) += 1;
     }
 
     /// Record a successful step (used to derive `recoveries`).
     pub fn record_success(&mut self) {
-        todo!("phase 2: transition failure -> success increments recoveries")
+        if self.last_step_failed {
+            self.recoveries += 1;
+        }
+        self.consecutive_failures = 0;
+        self.last_step_failed = false;
     }
 
     /// Consecutive failures recorded so far (the loop's failure budget).
@@ -172,8 +226,78 @@ impl Metrics {
 
     /// Snapshot the run into a serializable report.
     pub fn report(&self, task: &str, success: bool, stop_reason: StopReason) -> MetricsReport {
-        let _ = (task, success, stop_reason);
-        todo!("phase 2: snapshot counters + latency_stats(latencies)")
+        let steps = self.steps;
+        let failures = self.failures;
+        MetricsReport {
+            task: task.to_string(),
+            success,
+            stop_reason,
+            steps,
+            decisions: self.decisions,
+            actions: self.actions,
+            actions_by_kind: self.actions_by_kind.clone(),
+            runtime_ops: self.runtime_ops,
+            input_actions: self.input_actions,
+            gpu_readbacks: self.gpu_readbacks,
+            images_sent: self.images_sent,
+            visual_tokens: self.visual_tokens,
+            decision_latency: latency_stats(&self.latencies_ms),
+            failures,
+            failures_by_kind: self.failures_by_kind.clone(),
+            recoveries: self.recoveries,
+            failure_rate: if steps == 0 {
+                0.0
+            } else {
+                f64::from(failures) / f64::from(steps)
+            },
+            recovery_rate: if failures == 0 {
+                0.0
+            } else {
+                f64::from(self.recoveries) / f64::from(failures)
+            },
+            elapsed_ms: u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }
+    }
+}
+
+/// True for action kinds delivered through the Wayland seat (application input).
+///
+/// Every other kind (including [`ActionKind::Finish`], which
+/// [`Metrics::record_action`] ignores) is runtime-native.
+fn is_input_kind(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::Click | ActionKind::TypeText | ActionKind::Keypress | ActionKind::Scroll
+    )
+}
+
+/// Stable key for [`MetricsReport::failures_by_kind`].
+///
+/// Mirrors the documented keys of `Error::kind_key` (`"unknown_window"`,
+/// `"transport"`, `"provider_timeout"`, ...), which is owned by `src/error.rs`;
+/// the two must stay in sync until that method is implemented, at which point
+/// this helper can delegate to it (or be deleted).
+pub(crate) fn failure_kind_key(error: &Error) -> String {
+    match error {
+        Error::Client(error) => error.code.as_str().to_string(),
+        Error::Provider(error) => match error {
+            ProviderError::MissingApiKey => "provider_missing_api_key".to_string(),
+            ProviderError::Transport(_) => "provider_transport".to_string(),
+            ProviderError::Status { .. } => "provider_status".to_string(),
+            ProviderError::Timeout(_) => "provider_timeout".to_string(),
+            ProviderError::InvalidResponse(_) => "provider_invalid_response".to_string(),
+            ProviderError::Unsupported(_) => "provider_unsupported".to_string(),
+        },
+        Error::Transport(_) => "transport".to_string(),
+        Error::ProtocolVersion { .. } => "protocol_version".to_string(),
+        Error::StepBudgetExhausted(_) => "step_budget_exhausted".to_string(),
+        Error::FailureBudgetExhausted(_) => "failure_budget_exhausted".to_string(),
+        Error::StepTimeout { .. } => "step_timeout".to_string(),
+        Error::NoActiveWindow => "no_active_window".to_string(),
+        Error::InvalidDecision(_) => "invalid_decision".to_string(),
+        Error::Config(_) => "config".to_string(),
+        Error::Io(_) => "io".to_string(),
+        Error::Json(_) => "json".to_string(),
     }
 }
 
