@@ -227,43 +227,303 @@ impl State {
     }
 
     /// Press/release a key (or tap a chord) on the focused window.
-    pub(crate) fn inject_key(&mut self, _key: &KeyCode, _state: KeyState) -> Result<()> {
-        todo!("Phase 2: resolve keysym, press Shift if needed, deliver through the seat")
+    ///
+    /// The protocol key names are resolved to physical keys through the compiled
+    /// keymap; a keysym that lives on a shifted level is delivered with its level
+    /// modifier held around it (level 1 → `Shift_L`, level 2 → `ISO_Level3_Shift`,
+    /// level 3 and above → both, the standard four-level xkb scheme). Chords are
+    /// taps — pressed in order, released in reverse (`docs/architecture.md` §8) —
+    /// and a released chord is an invalid request. Nothing reaches the seat when
+    /// the request is rejected.
+    pub(crate) fn inject_key(&mut self, key: &KeyCode, state: KeyState) -> Result<()> {
+        /// The xkb level modifiers for shift `level` (`0` = none).
+        ///
+        /// Levels follow the standard four-level layout: `1` is `Shift`, `2` is
+        /// the level-three modifier (`ISO_Level3_Shift`, AltGr) and `3` is both.
+        /// A keymap has at most four levels, so anything higher is treated as
+        /// level `3`.
+        fn level_modifiers(level: usize) -> &'static [&'static str] {
+            match level {
+                0 => &[],
+                1 => &["Shift_L"],
+                2 => &["ISO_Level3_Shift"],
+                _ => &["Shift_L", "ISO_Level3_Shift"],
+            }
+        }
+
+        // A chord is a tap: an empty chord and a released chord are rejected
+        // before any key reaches the seat.
+        let sequence = crate::input::chord_sequence(key, state)
+            .map_err(|error| crate::error::CompositorError::InvalidRequest(error.message))?;
+
+        // Resolve the whole sequence first: a key the keymap cannot produce must
+        // not deliver a partially applied chord.
+        let keymap = self.input.keymap();
+        let mut plan: Vec<(u32, smithay::backend::input::KeyState)> = Vec::new();
+        for (keysym, key_state) in &sequence {
+            let resolved = keymap.resolve(keysym.value()).ok_or_else(|| {
+                crate::error::CompositorError::InvalidRequest(format!(
+                    "key {:?} cannot be produced by the compositor keymap",
+                    keysym.name()
+                ))
+            })?;
+
+            let mut modifiers = Vec::new();
+            for name in level_modifiers(resolved.level) {
+                let modifier = crate::input::Keysym::parse(name).map_err(|error| {
+                    crate::error::CompositorError::InvalidRequest(error.message)
+                })?;
+                let modifier = keymap.resolve(modifier.value()).ok_or_else(|| {
+                    crate::error::CompositorError::InvalidRequest(format!(
+                        "level modifier {name} cannot be produced by the compositor keymap"
+                    ))
+                })?;
+                modifiers.push(modifier.keycode);
+            }
+
+            // Press modifier → press key, release key → release modifier: the
+            // modifier brackets the key on both sides, so single keys and chords
+            // stay balanced (`docs/architecture.md` §8).
+            match key_state {
+                KeyState::Pressed => {
+                    plan.extend(
+                        modifiers
+                            .iter()
+                            .map(|keycode| (*keycode, smithay::backend::input::KeyState::Pressed)),
+                    );
+                    plan.push((resolved.keycode, smithay::backend::input::KeyState::Pressed));
+                }
+                KeyState::Released => {
+                    plan.push((
+                        resolved.keycode,
+                        smithay::backend::input::KeyState::Released,
+                    ));
+                    plan.extend(
+                        modifiers
+                            .iter()
+                            .rev()
+                            .map(|keycode| (*keycode, smithay::backend::input::KeyState::Released)),
+                    );
+                }
+            }
+        }
+
+        // Keyboard input needs a focus target: the focused window (or the active
+        // one, before focus has moved) must exist and still own a surface.
+        let window_id = self
+            .wm
+            .keyboard_focus()
+            .or_else(|| self.wm.active_window())
+            .ok_or_else(|| {
+                crate::error::CompositorError::InvalidRequest(
+                    "no window has keyboard focus".to_owned(),
+                )
+            })?;
+        if self.wm.surface_of(window_id).is_none() {
+            return Err(crate::error::CompositorError::UnknownWindow(window_id));
+        }
+
+        let keyboard = self.seat.get_keyboard().ok_or_else(|| {
+            crate::error::CompositorError::Internal("the seat has no keyboard".to_owned())
+        })?;
+        let time = self.uptime_ms() as u32;
+        for (keycode, key_state) in plan {
+            // `FilterResult::Forward` means "no compositor binding consumed it":
+            // the event goes to the focused client and Smithay returns `None`.
+            let _forwarded: Option<()> = keyboard.input(
+                self,
+                smithay::input::keyboard::Keycode::new(keycode),
+                key_state,
+                smithay::utils::SERIAL_COUNTER.next_serial(),
+                time,
+                |_, _, _| smithay::input::keyboard::FilterResult::Forward,
+            );
+        }
+        Ok(())
     }
 
     /// Move the pointer to a window-relative position.
-    pub(crate) fn inject_pointer_move(&mut self, _position: &Position) -> Result<()> {
-        todo!("Phase 2: resolve position, deliver motion through the seat")
+    ///
+    /// The target is the focused window (or the active one, before focus has
+    /// moved) and the window model — never a hard-coded origin — converts the
+    /// position to output coordinates. Without a window there is nothing to point
+    /// at: that is an invalid request.
+    pub(crate) fn inject_pointer_move(&mut self, position: &Position) -> Result<()> {
+        let window_id = self
+            .wm
+            .keyboard_focus()
+            .or_else(|| self.wm.active_window())
+            .ok_or_else(|| {
+                crate::error::CompositorError::InvalidRequest(
+                    "no window has keyboard focus".to_owned(),
+                )
+            })?;
+        let surface = self
+            .wm
+            .surface_of(window_id)
+            .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
+        let point = self.wm.resolve_position(window_id, position)?;
+
+        let pointer = self.seat.get_pointer().ok_or_else(|| {
+            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
+        })?;
+        // The single visible toplevel is tiled at the output origin, so the focus
+        // surface's origin is `(0, 0)`; Smithay subtracts it to compute the
+        // surface-local pointer position.
+        pointer.motion(
+            self,
+            Some((surface, smithay::utils::Point::from((0.0, 0.0)))),
+            &smithay::input::pointer::MotionEvent {
+                location: smithay::utils::Point::from((f64::from(point.x), f64::from(point.y))),
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: self.uptime_ms() as u32,
+            },
+        );
+        Ok(())
     }
 
     /// Press/release a pointer button at the current pointer location.
-    pub(crate) fn inject_pointer_button(&mut self, _button: Button, _state: ButtonState) -> Result<()> {
-        todo!("Phase 2: deliver button event through the seat")
+    ///
+    /// Smithay already tracks where the pointer is (set by
+    /// [`State::inject_pointer_move`]), so the button only needs a focused window
+    /// to be meaningful; without one it is an invalid request.
+    pub(crate) fn inject_pointer_button(
+        &mut self,
+        button: Button,
+        state: ButtonState,
+    ) -> Result<()> {
+        /// The Linux evdev code of an ADesk [`Button`]
+        /// (`linux/input-event-codes.h`); Smithay's pointer speaks raw codes.
+        fn evdev_button(button: Button) -> u32 {
+            match button {
+                Button::Left => 0x110,
+                Button::Right => 0x111,
+                Button::Middle => 0x112,
+                Button::Side => 0x113,
+                Button::Extra => 0x114,
+            }
+        }
+
+        let has_focus = self
+            .wm
+            .keyboard_focus()
+            .or_else(|| self.wm.active_window())
+            .is_some();
+        if !has_focus {
+            return Err(crate::error::CompositorError::InvalidRequest(
+                "no window has keyboard focus".to_owned(),
+            ));
+        }
+        let pointer = self.seat.get_pointer().ok_or_else(|| {
+            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
+        })?;
+        let button_state = match state {
+            ButtonState::Pressed => smithay::backend::input::ButtonState::Pressed,
+            ButtonState::Released => smithay::backend::input::ButtonState::Released,
+        };
+        pointer.button(
+            self,
+            &smithay::input::pointer::ButtonEvent {
+                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
+                time: self.uptime_ms() as u32,
+                button: evdev_button(button),
+                state: button_state,
+            },
+        );
+        Ok(())
     }
 
     /// Scroll by `dx`/`dy` at the current pointer location.
-    pub(crate) fn inject_pointer_axis(&mut self, _dx: f64, _dy: f64) -> Result<()> {
-        todo!("Phase 2: deliver axis frame through the seat")
+    ///
+    /// A zero delta on an axis is omitted from the frame, but the frame itself is
+    /// always terminated so clients see a complete `wl_pointer.frame`. Without a
+    /// focused window there is nothing to scroll: invalid request.
+    pub(crate) fn inject_pointer_axis(&mut self, dx: f64, dy: f64) -> Result<()> {
+        let has_focus = self
+            .wm
+            .keyboard_focus()
+            .or_else(|| self.wm.active_window())
+            .is_some();
+        if !has_focus {
+            return Err(crate::error::CompositorError::InvalidRequest(
+                "no window has keyboard focus".to_owned(),
+            ));
+        }
+        let pointer = self.seat.get_pointer().ok_or_else(|| {
+            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
+        })?;
+        let time = self.uptime_ms() as u32;
+        let mut frame = smithay::input::pointer::AxisFrame::new(time)
+            .source(smithay::backend::input::AxisSource::Wheel);
+        if dx != 0.0 {
+            frame = frame.value(smithay::backend::input::Axis::Horizontal, dx);
+        }
+        if dy != 0.0 {
+            frame = frame.value(smithay::backend::input::Axis::Vertical, dy);
+        }
+        pointer.axis(self, frame);
+        pointer.frame(self);
+        Ok(())
     }
 
     /// Render one window's surface tree into an `Rgba8` frame.
+    ///
+    /// The frame is stamped with the window's commit counter: the renderer has no
+    /// window-manager access, so this state is the authority for the per-window
+    /// counter that observations compare against. An unknown window is
+    /// [`CompositorError::UnknownWindow`](crate::error::CompositorError::UnknownWindow).
     pub(crate) fn render_window(
         &mut self,
-        _window_id: WindowId,
-        _region: Option<Rect>,
-        _max_dimension: Option<u32>,
+        window_id: WindowId,
+        region: Option<Rect>,
+        max_dimension: Option<u32>,
     ) -> Result<RenderedFrame> {
-        todo!("Phase 2: build elements, render offscreen, crop/downscale, read back")
+        let window = self
+            .wm
+            .windows()
+            .into_iter()
+            .find(|window| window.id == window_id)
+            .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
+        let surface = self
+            .wm
+            .surface_of(window_id)
+            .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
+
+        let mut frame =
+            self.renderer
+                .render_window(&surface, window.geometry, region, max_dimension)?;
+        // The renderer reports surface-tree damage, not the window model's
+        // counter; stamp the counter here so the frame travels with the causal
+        // history it belongs to.
+        frame.commit_seq = self.wm.last_commit_seq(window_id);
+        Ok(frame)
     }
 
     /// Compose the whole virtual output, optionally with debug overlays.
+    ///
+    /// Every known window with a root surface becomes an
+    /// [`OutputWindow`](crate::render::OutputWindow); an empty window list is a
+    /// valid clear frame, not an error. The output composition is not tied to a
+    /// single window, so its `commit_seq` stays `0`.
     pub(crate) fn render_output(
         &mut self,
-        _overlays: &[OverlayKind],
-        _region: Option<Rect>,
-        _max_dimension: Option<u32>,
+        overlays: &[OverlayKind],
+        region: Option<Rect>,
+        max_dimension: Option<u32>,
     ) -> Result<RenderedFrame> {
-        todo!("Phase 2: compose output, apply overlays, crop/downscale, read back")
+        let active = self.wm.active_window();
+        let mut windows = Vec::new();
+        for window in self.wm.windows() {
+            if let Some(surface) = self.wm.surface_of(window.id) {
+                windows.push(crate::render::OutputWindow {
+                    geometry: window.geometry,
+                    surface,
+                    active: active == Some(window.id),
+                });
+            }
+        }
+        self.renderer
+            .render_output(&windows, overlays, region, max_dimension)
     }
 
     /// Point-in-time window/focus/sequence snapshot for `QueryState`.
@@ -306,3 +566,56 @@ const _: fn() = || {
     fn assert_wayland_focus<T: WaylandFocus>() {}
     assert_wayland_focus::<smithay::reexports::wayland_server::protocol::wl_surface::WlSurface>();
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adesk_core::ErrorCode;
+
+    /// A compositor state on a private `Display`: no socket, no GPU, pixman only.
+    ///
+    /// The `Display` is returned alongside the state because the protocol state
+    /// borrows from it; dropping it first would tear the globals down.
+    fn test_state() -> (smithay::reexports::wayland_server::Display<State>, State) {
+        let display = smithay::reexports::wayland_server::Display::<State>::new()
+            .expect("a wayland display can be created headless");
+        let config = CompositorConfig::default().with_renderer(crate::config::RendererKind::Pixman);
+        let (events, _subscriber) = broadcast::channel(64);
+        let state = State::new(
+            &config,
+            &display.handle(),
+            "wayland-test".to_owned(),
+            events,
+        )
+        .expect("pixman and the `us` keymap must initialise headless");
+        (display, state)
+    }
+
+    /// `docs/architecture.md` §8: a chord is a tap, so releasing one is invalid —
+    /// and the rejection happens before any key reaches the seat.
+    #[test]
+    fn released_chord_is_an_invalid_request() {
+        let (_display, mut state) = test_state();
+        let chord = KeyCode::parse_chord(["CTRL", "L"]).expect("a parseable chord");
+
+        let error = state
+            .inject_key(&chord, KeyState::Released)
+            .expect_err("a released chord must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    }
+
+    /// A keysym the configured keymap cannot produce is a client error, never a
+    /// panic and never a partial delivery.
+    #[test]
+    fn unresolvable_keysym_is_an_invalid_request() {
+        let (_display, mut state) = test_state();
+        let key = KeyCode::Single(
+            crate::input::Keysym::parse("Hyper_R").expect("`Hyper_R` is a valid keysym name"),
+        );
+
+        let error = state
+            .inject_key(&key, KeyState::Pressed)
+            .expect_err("a keysym outside the keymap must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    }
+}

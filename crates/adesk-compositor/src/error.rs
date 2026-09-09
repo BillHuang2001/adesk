@@ -43,6 +43,10 @@ pub enum CompositorError {
     /// The requested window is not known to the window manager.
     #[error("window {0} is not known")]
     UnknownWindow(WindowId),
+    /// The request itself is malformed for the current state (an unresolvable
+    /// key name, a released chord, or input without a focused window).
+    #[error("invalid request: {0}")]
+    InvalidRequest(String),
     /// The window manager rejected or failed an operation.
     #[error("window management error: {0}")]
     WindowManagement(String),
@@ -62,6 +66,7 @@ impl CompositorError {
     pub fn code(&self) -> ErrorCode {
         match self {
             CompositorError::UnknownWindow(_) => ErrorCode::UnknownWindow,
+            CompositorError::InvalidRequest(_) => ErrorCode::InvalidRequest,
             CompositorError::Render(_) => ErrorCode::RenderFailed,
             CompositorError::NotReady
             | CompositorError::StartupAborted
@@ -100,6 +105,15 @@ mod tests {
     #[test]
     fn render_failure_maps_to_render_failed() {
         assert_eq!(CompositorError::Render("boom".into()).code(), ErrorCode::RenderFailed);
+    }
+
+    #[test]
+    fn invalid_requests_map_to_invalid_request_code() {
+        let error = CompositorError::InvalidRequest("unknown key name".into());
+        assert_eq!(error.code(), ErrorCode::InvalidRequest);
+        let core: CoreError = error.into();
+        assert_eq!(core.code, ErrorCode::InvalidRequest);
+        assert!(core.message.contains("unknown key name"));
     }
 
     #[test]
