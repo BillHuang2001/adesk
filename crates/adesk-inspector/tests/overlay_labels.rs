@@ -7,6 +7,14 @@ use adesk_core::{OverlayKind, WindowId};
 use adesk_inspector::Inspector;
 
 #[test]
+fn labels_draw_nothing_without_windows() {
+    let input = common::input(common::frame(64, 48)).build();
+    let inspector = Inspector::new(vec![OverlayKind::WindowIds, OverlayKind::AppIds]);
+    let _out = inspector.render(&input);
+    todo!("assert the output frame is byte-identical to the input frame");
+}
+
+#[test]
 fn window_ids_draws_label_in_slot_zero() {
     let input = common::input(common::frame(64, 48))
         .windows(vec![common::window(7, common::rect(0, 0, 32, 24))])
