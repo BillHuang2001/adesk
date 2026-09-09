@@ -1,0 +1,26 @@
+# adesk-observer — temporal observation engine for the ADesk runtime.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift. No Smithay, no compositor state, no I/O: the observer is a pure
+# consumer of `adesk_core::RuntimeEvent` plus tokio timers/notifications.
+[package]
+name = "adesk-observer"
+description = "ADesk temporal observation engine: per-window commit/damage history, quiet detection, action correlation and waiters."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+tokio.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+# `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused = true)]`,
+# which the deterministic waiter tests require. Feature-only addition: the version
+# still comes from the root manifest.
+tokio = { workspace = true, features = ["test-util"] }

@@ -1,0 +1,22 @@
+# adesk-wm — window model and single-visible-toplevel tiling policy for ADesk.
+#
+# Pure logic: no Smithay, no async, no I/O. The compositor owns the Smithay
+# objects; this crate owns the window records and the policy decisions, which
+# are returned as `WmAction`s for the compositor to apply.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift.
+[package]
+name = "adesk-wm"
+description = "ADesk window model and single-visible-toplevel tiling policy (pure logic, no Smithay)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

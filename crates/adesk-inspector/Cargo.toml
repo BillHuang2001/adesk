@@ -1,0 +1,21 @@
+# adesk-inspector — human inspection projection for the ADesk runtime.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift. Keep this crate pure and synchronous: no I/O, no async, no
+# Smithay, no tokio. The runtime side is connected through the
+# `InspectionSource` trait, which `adesk-server` implements.
+[package]
+name = "adesk-inspector"
+description = "ADesk human inspection: full-output debug overlays and inspection frames (AGP inspect_capture)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+adesk-render.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,24 @@
+# adesk-render — offscreen render pipeline for the ADesk runtime.
+#
+# All dependency versions come from the workspace root [workspace.dependencies];
+# smithay features are selected here (renderer backends + wayland frontend).
+[package]
+name = "adesk-render"
+description = "Offscreen render pipeline: scene description, target readback, damage coalescing, image post-processing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+smithay = { workspace = true, features = [
+    "wayland_frontend",
+    "desktop",
+    "renderer_pixman",
+    "renderer_glow",
+] }
+image.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

@@ -1,0 +1,99 @@
+# adesk-proto — AGP v1 wire types, typed methods and NDJSON codec
+
+## Intent
+
+`adesk-proto` is the single implementation of `docs/protocol.md` (normative Agent GUI Protocol v1).
+It defines the frames, the typed method vocabulary (§5.1–§5.7), the event subscription kinds (§5.6), the image payload (§4) and the NDJSON codec (§1).
+It is pure serialization: no I/O, no async, no tokio, no Smithay.
+`adesk-server` serves these frames, `adesk-client`/`adesk-agent` consume them and `adesk-testkit` drives the server through them, so every wire detail lives here and nowhere else.
+Phase 1 (this scaffold) defines the complete public API with `todo!()` bodies; Phase 2 implements the 29 stubs (see Status).
+
+## API Surface
+
+Crate root (`src/lib.rs`):
+- `PROTOCOL_VERSION: u32 = 1`, `is_compatible_version(u32) -> bool` (const), `check_version(u32) -> Result<()>`; re-exports every public type below and `pub mod methods`.
+
+Frames (`src/frame.rs`):
+- `Frame::{Request, Response, Event}` with `From<RequestFrame|ResponseFrame|EventFrame>` and manual `Serialize`/`Deserialize` that discriminate by keys (`method` → request, `id` + exactly one of `result`/`error` → response, `event` → event).
+- `RequestFrame { id: u64, method: Method }` (`new`).
+- `ResponseFrame { id, outcome: ResponseOutcome }` with `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, accessors `result_payload`/`error_payload`/`is_error`, constructors `ResponseFrame::result::<R>(id, &R)` and `::error(id, ErrorPayload)`.
+- `ResultPayload(serde_json::Value)` with `new::<R>(&R)`, `decode::<R>()`, `as_value()`.
+- `ErrorPayload { code: ErrorCode, message: String, data: Option<Value> }` with `new`, `with_data`.
+- `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }` with `new`, `from_runtime(&RuntimeEvent)`, `to_runtime() -> Option<RuntimeEvent>`.
+
+Methods (`src/methods.rs` + `src/methods/*.rs`):
+- `Method` — 29 variants, one per spec method — plus `method_name()`, `from_parts(name, params)`, `params_value()`, manual map serde.
+- `ActionResult { action_id: ActionId }` (result of pointer/key actions).
+- `runtime::PingParams/PingResult`; `apps::ListAppsParams/Result`, `GetAppParams/Result`, `LaunchAppParams/Result`; `windows::ListWindowsParams/Result`, `GetWindowParams/Result`, `ActivateWindowParams`, `CloseWindowParams`, `GetFocusParams/Result`; `capture::CaptureWindowParams`, `CaptureRegionParams`, `CaptureResult`, `ObserveParams`, `ObserveResult`, `WaitForChangeParams`, `WaitForQuietParams`; `input::` params for all 11 input methods plus `TypeTextResult`; `subscription::SubscribeEventsParams/Result`, `UnsubscribeEventsParams/Result`; `inspector::InspectCaptureParams/Result`, `InspectSubscribeParams/Result`.
+
+Events (`src/event.rs`):
+- `EventKind` — 12 snake_case variants (`window_created` … `inspect_frame`) — with `SUBSCRIBABLE: [EventKind; 11]` (the §5.6 set), `is_subscribable()`, `matches(&RuntimeEvent)`.
+- `EventPayload` — 11 typed variants — with `kind()`, `from_runtime`, `to_runtime(seq, ts_ms)`, `from_data(kind, Value)`, `to_data()`.
+- Data structs: `WindowCreatedEvent`, `WindowDestroyedEvent`, `WindowActivatedEvent`, `TitleChangedEvent`, `SurfaceCommitEvent`, `FocusChangedEvent`, `PopupAppearedEvent`, `PopupDisappearedEvent`, `AppLaunchedEvent`, `QuietEvent`, `InspectFrameEvent`.
+
+Images (`src/image.rs`): `ImagePayload { width, height, format, stride: Option<u32>, data: String (base64), scale: f64 }` with `from_rgba8`, `from_png`, `decode_data`, `to_rgba8_buffer`.
+
+Vocabulary (`src/types.rs`): `ImageFormat::{Png, Rgba8}`, `RendererKind::{Gl, Pixman}`, `Condition::{Quiet{quiet_ms}, Change, Timeout}` (tagged by `type`), `KeySpec::{Single(String), Chord(Vec<String>)}` (untagged) with `keys()` and `From` impls.
+
+Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, decode(&[u8]) -> Result<Frame> }`, `NdjsonCodec` with `encode_str`/`decode_str`, free `encode_frame(&Frame) -> Result<String>` and `decode_frame(&str) -> Result<Frame>`.
+
+Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidParams`, `InvalidEventData`, `UnknownEventKind`, `InvalidResult`, `VersionMismatch`, `Json`, `Base64`), `error_code()`, `From<ProtoError> for adesk_core::Error`, `pub type Result<T>`.
+
+## Constraints
+
+- `docs/protocol.md` is normative: never invent methods, fields or error codes; additive changes only (§7).
+- Pure serialization only — no tokio, no async, no I/O, no Smithay in this crate.
+- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; every public item is documented.
+- Dependencies come only from root `[workspace.dependencies]` (`adesk-core`, `serde`, `serde_json`, `base64`, `thiserror`); never add inline versions.
+- Decoding must ignore unknown fields (forward compatibility, §1) and must never panic on request/event paths; malformed input returns `ProtoError`.
+- `adesk_core` owns the domain vocabulary (`WindowInfo`, `Observation`, `RuntimeEvent`, `ErrorCode`, `Region`, `Position`, `AppInfo`, `OverlayKind`); depend on it, never fork it.
+- `ImageBuffer` is not wire-facing; `ImagePayload` is the wire form.
+- `PROTOCOL_VERSION` is bumped only for breaking changes; a mismatch is a hard error (§5.1).
+
+## Routing Table
+
+| Area | File |
+|---|---|
+| Crate root, version helpers, re-exports | `src/lib.rs` |
+| Frame kinds, request/response/event frames, `ResultPayload`, `ErrorPayload` | `src/frame.rs` |
+| `Method` enum, `ActionResult`, per-group params/results | `src/methods.rs`, `src/methods/*.rs` |
+| `EventKind` filter, `EventPayload`, event data structs | `src/event.rs` |
+| `ImagePayload` and base64/RGBA conversions | `src/image.rs` |
+| `Codec` trait, `NdjsonCodec`, `encode_frame`/`decode_frame` | `src/codec.rs` |
+| `ProtoError`, `Result`, AGP error-code mapping | `src/error.rs` |
+| Spec defaults used by `#[serde(default = ...)]` | `src/defaults.rs` (crate-private) |
+| Protocol vocabulary types | `src/types.rs` |
+| Type-level + golden-JSON tests (run now) | `tests/wire.rs` |
+| Phase-2 codec acceptance spec (`#[ignore]`d) | `tests/codec.rs` |
+
+## Design Decisions
+
+- `ObserveResult` resolves the §4-vs-§5.4 ambiguity: `image` lives INSIDE the `observation` object (per §4), so the wire shape is `{"observation": {<core Observation fields>, "image": <ImagePayload|null>}}`; `image` is always present (`null` when absent) and is split out of the core `Observation` on deserialize.
+- `EventFrame` hoists `seq`/`ts_ms` out of the core `RuntimeEvent` into frame-level fields; `data` carries the variant fields minus those two.
+- `EventKind::SurfaceDamage` is a filter alias, never an emitted kind: durable commits are `surface_commit` (which carries `damage`), and `matches` returns true only for commits with non-empty damage.
+- `EventKind::InspectFrame` is a 12th, non-subscribable kind so `inspect_subscribe` pushes are typed; the §5.6 eleven filterable kinds are exactly `SUBSCRIBABLE`.
+- `QuietEvent` and `InspectFrameEvent` are additive data structs for the two spec-unnamed kinds (§7 allows additions).
+- Response results are untyped at frame level (`ResultPayload(serde_json::Value)`): a codec cannot correlate an `id` to a method, so server/client decode with the method's typed result via `ResultPayload::decode::<R>()`.
+- `Method` implements `Serialize`/`Deserialize` manually, emitting/reading a JSON map (`method` + `params`), so `#[serde(flatten)]` in `RequestFrame` works and unknown request fields are ignored.
+- `Codec` is payload-oriented (bytes, no terminator) so a future binary framing (§7) needs no method-definition changes; NDJSON adds the string helpers.
+- `ProtoError::error_code()` maps `UnknownMethod` → `ErrorCode::UnknownMethod`, `VersionMismatch` → `ProtocolVersionMismatch` and everything else → `InvalidRequest`.
+- `CaptureResult` and `InspectCaptureResult` derive `PartialEq` but not `Eq` because `ImagePayload::scale` is `f64`.
+- Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+
+## Test Strategy
+
+- `tests/wire.rs` (24 tests) runs today and pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
+- `tests/codec.rs` (19 tests) is the frozen Phase-2 acceptance spec: every test is `#[ignore]`d with reason `"phase 2: codec bodies are todo!() stubs"`; implement the bodies, then remove each `#[ignore]` — the assertions must not be edited.
+- Coverage targets: round-trip every frame kind and every method's params/result, golden frames from `docs/protocol.md`, error frames, unknown-field tolerance, version mismatch, unknown method and unknown event kind.
+- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (see Known Issues for the workspace-load workaround).
+
+## Known Issues
+
+- Root `Cargo.toml` declares `members = ["crates/*"]` while most sibling crates still have no manifest, so `cargo check -p adesk-proto` fails at workspace load with `failed to load manifest for workspace member .../crates/adesk-agent`; that is a root-owned staging issue, not a defect in this crate.
+- Until the siblings exist, validate standalone: copy `crates/adesk-core` and `crates/adesk-proto` into a temp dir with a mirror workspace manifest (`[workspace.dependencies]` copied from the root) and run `./scripts/dev.sh cargo check --manifest-path <tmp>/Cargo.toml -p adesk-proto --all-targets`.
+- The 29 `todo!()` stubs emit ~33 `unused_variable` warnings; they disappear as Phase 2 implements the bodies — do not silence them crate-wide.
+
+## Status
+
+- Phase 1 complete: manifest, full public API with `todo!()` bodies, both test files; `cargo check --all-targets` green, `tests/wire.rs` 24/24 green, `tests/codec.rs` 19 ignored.
+- Phase 2 must fill in bodies only (no API changes) in `codec.rs` (4), `event.rs` (5: `matches`, `from_runtime`, `to_runtime`, `from_data`, `to_data`), `frame.rs` (10), `image.rs` (4), `methods/capture.rs` (2: `ObserveResult` serde) and `methods.rs` (4: `from_parts`, `params_value`, `Serialize`, `Deserialize`).

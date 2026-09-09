@@ -1,0 +1,34 @@
+# adesk-compositor — Smithay-based headless Wayland compositor.
+#
+# All dependency versions come from the workspace manifest; never add inline
+# versions here. smithay is pulled with `default-features = false` plus exactly
+# the features this crate needs (wayland frontend protocols, desktop helpers,
+# and the two headless-capable renderers).
+[package]
+name = "adesk-compositor"
+description = "ADesk headless Smithay compositor: Wayland protocols, seat/input injection, virtual output"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+adesk-render.workspace = true
+adesk-wm.workspace = true
+calloop.workspace = true
+libc.workspace = true
+smithay = { workspace = true, features = [
+    "wayland_frontend",
+    "desktop",
+    "renderer_pixman",
+    "renderer_glow",
+] }
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wayland-server.workspace = true
+
+[dev-dependencies]
+tokio.workspace = true
