@@ -16,9 +16,13 @@
 //!
 //! Required `adesk-proto` surface (see `CONTEXT.md` → "Required adesk-proto
 //! surface"):
-//! `PROTOCOL_VERSION`, `Codec::{new, encode, decode}`, `Frame`,
-//! `Request { id, method, params }`, `Response::{Result{id,result},
-//! Error{id,error}}`, `EventFrame { event, seq, ts_ms, data }`, and
+//! `PROTOCOL_VERSION`, `Frame::{Request, Response, Event}`,
+//! `RequestFrame { id, method }` + `RequestFrame::new` and
+//! `Method::from_parts(name, params)`,
+//! `ResponseFrame { id, outcome }` + `ResponseOutcome::{Result(ResultPayload),
+//! Error(ErrorPayload)}` + `ResultPayload::as_value`,
+//! `EventFrame { event, seq, ts_ms, data }`, `EventKind` (snake_case serde),
+//! `EventPayload::to_data`, `NdjsonCodec` + the `Codec` trait, and
 //! `ImagePayload`.
 
 // Skeleton phase: every item below is consumed by the transport, whose bodies
@@ -26,7 +30,10 @@
 #![allow(dead_code)]
 
 use adesk_core::ErrorCode;
-use adesk_proto::{Codec, EventFrame, Frame, Request, Response};
+use adesk_proto::methods::Method;
+use adesk_proto::{
+    Codec, EventFrame, EventKind, Frame, NdjsonCodec, RequestFrame, ResponseFrame, ResponseOutcome,
+};
 use serde_json::Value;
 
 use crate::{ClientError, Result};
@@ -81,16 +88,37 @@ pub(crate) struct ServerError {
     pub(crate) message: String,
 }
 
+/// The wire name of an event kind (`snake_case`, protocol §5.6).
+///
+/// [`EventKind`] exposes no `as_str()`, so the name is read back from its serde
+/// representation (the same encoding the frame's `event` field uses).
+fn event_name(kind: EventKind) -> Result<String> {
+    match serde_json::to_value(kind).map_err(|error| ClientError::Protocol {
+        message: format!("failed to encode event name: {error}"),
+    })? {
+        Value::String(name) => Ok(name),
+        other => Err(ClientError::Protocol {
+            message: format!("event name is not a string: {other}"),
+        }),
+    }
+}
+
 /// Encode one request frame as a complete NDJSON line (trailing `\n` included).
 ///
 /// `params` must already be the method's params object; the caller owns the
 /// request id. Encoding failure is a client-side bug or an oversized frame and
 /// surfaces as [`ClientError::Protocol`].
 pub(crate) fn encode_request(id: u64, method: &str, params: Value) -> Result<Vec<u8>> {
-    let frame = Frame::Request(Request { id, method: method.to_owned(), params });
-    Codec::new().encode(&frame).map_err(|error| ClientError::Protocol {
+    let typed = Method::from_parts(method, params).map_err(|error| ClientError::Protocol {
         message: format!("failed to encode request {id} ({method}): {error}"),
-    })
+    })?;
+    let frame = Frame::Request(RequestFrame::new(id, typed));
+    // The codec payload has no terminator; the NDJSON line adds it.
+    let mut line = NdjsonCodec.encode(&frame).map_err(|error| ClientError::Protocol {
+        message: format!("failed to encode request {id} ({method}): {error}"),
+    })?;
+    line.push(b'\n');
+    Ok(line)
 }
 
 /// Decode one inbound NDJSON line (without the trailing `\n`).
@@ -98,19 +126,25 @@ pub(crate) fn encode_request(id: u64, method: &str, params: Value) -> Result<Vec
 /// A request frame arriving from the server is a protocol violation: AGP is
 /// full-duplex but only the client sends requests.
 pub(crate) fn decode_line(line: &[u8]) -> Result<Inbound> {
-    let frame = Codec::new().decode(line).map_err(|error| ClientError::Protocol {
+    let frame = NdjsonCodec.decode(line).map_err(|error| ClientError::Protocol {
         message: format!("malformed inbound frame: {error}"),
     })?;
     match frame {
-        Frame::Response(Response::Result { id, result }) => {
-            Ok(Inbound::Response { id, result: Ok(result) })
-        }
-        Frame::Response(Response::Error { id, error }) => Ok(Inbound::Response {
-            id,
-            result: Err(ServerError { code: error.code, message: error.message }),
-        }),
+        Frame::Response(ResponseFrame { id, outcome }) => match outcome {
+            ResponseOutcome::Result(payload) => {
+                Ok(Inbound::Response { id, result: Ok(payload.as_value().clone()) })
+            }
+            ResponseOutcome::Error(error) => Ok(Inbound::Response {
+                id,
+                result: Err(ServerError { code: error.code, message: error.message }),
+            }),
+        },
         Frame::Event(EventFrame { event, seq, ts_ms, data }) => {
-            Ok(Inbound::Event(RawEvent { name: event, seq, ts_ms, data }))
+            let name = event_name(event)?;
+            let data = data.to_data().map_err(|error| ClientError::Protocol {
+                message: format!("malformed event payload: {error}"),
+            })?;
+            Ok(Inbound::Event(RawEvent { name, seq, ts_ms, data }))
         }
         Frame::Request(_) => Err(ClientError::Protocol {
             message: "server sent a request frame".to_owned(),

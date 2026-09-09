@@ -94,8 +94,8 @@ Code rules:
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
 - `../adesk-core/` — domain types and `RuntimeEvent` (landed, implemented).
-- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (designed in parallel; unlanded).
-- `../adesk-render/` — crop/downscale/readback/encoding (designed in parallel; unlanded; dependency declared for Phase 2).
+- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (landed; consumed by `WmBridge`).
+- `../adesk-render/` — crop/downscale/readback/encoding (landed; dependency declared but unused in Phase 1).
 - `../adesk-testkit/` — integration harness the test plan depends on.
 
 ## Design Decisions
@@ -145,7 +145,7 @@ Event loop:
 Crate-local decisions:
 - `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding. The `adesk-render` dependency is declared but unused in Phase 1.
-- `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model; the assumed `adesk-wm` surface is documented at the top of that file: `WindowManager::new(Size)`, `resolve_position(&self, WindowId, &Position) -> Result<Point, adesk_wm::Error: Display>`, `WmAction` opaque. Reconcile in Phase 2 if the landed API differs.
+- `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model; the landed `adesk-wm` surface it is written against is documented at the top of that file: `WindowManager::new(PolicyConfig)`, `PolicyConfig::new(Size)`, `resolve_position(&self, WindowId, Position) -> Option<Point>` (unknown window → `CompositorError::WindowManagement`), `WmAction` opaque.
 - Popups are tracked manually (`PopupAppeared`/`PopupDisappeared` with owner `window_id` + `popup_id`) because Smithay's element walker skips them.
 - `src/dispatch.rs` is declared from `src/run.rs` with `#[path = "dispatch.rs"] pub(crate) mod dispatch;` (module path `crate::run::dispatch`).
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
@@ -175,14 +175,13 @@ Integration tests (defined, NOT implemented — `tests/integration_plan.md`; add
 - Ground rules: real compositor thread in-process, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap assertions instead of sleeps; GL-only tests gated behind `ADESK_TEST_GL=1`.
 - Smoke tests (`tests/compositor_smoke.rs`) spawn a real runtime and stay `#[ignore]`d until Phase 2.
 
-Validation recipe (used for Phase 1, repeat until `adesk-wm`/`adesk-render` land):
-- The workspace glob `members = ["crates/*"]` requires every member to have a manifest, so `cargo check -p adesk-compositor` cannot run while `adesk-wm`/`adesk-render` are unlanded.
-- Copy `src/` + `tests/` into a temp crate with inlined dependency versions, real `adesk-core` and stub `adesk-wm`/`adesk-render` honouring the `WmBridge` contract, then run `cargo check --all-targets`, `cargo test` and `cargo clippy --all-targets` through `scripts/dev.sh`.
+Validation recipe (all workspace members now have manifests, so the crate builds in-tree):
+- `./scripts/dev.sh cargo check -p adesk-compositor --all-targets`, `./scripts/dev.sh cargo test -p adesk-compositor` and `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (verified clean; clippy emits only the expected warnings below).
 - Expected clippy output today: dead-code warnings for Phase-2 stubs plus one `large_enum_variant` on `RuntimeCommand` (boxing is a Phase-2 option).
 
 ## Dependencies
 
-- Internal: `adesk-core` (landed, implemented — domain types only), `adesk-wm` (unlanded; contract above), `adesk-render` (unlanded; declared for Phase 2, unused in Phase 1).
+- Internal: `adesk-core` (landed, implemented — domain types only), `adesk-wm` (landed; API consumed by `WmBridge`), `adesk-render` (landed; declared but unused in Phase 1).
 - External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `wayland-server 0.31`; `calloop 0.14`; `tokio 1` (sync/rt/time/net); `thiserror 2`; `tracing 0.1`; `libc 0.2`.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.
@@ -204,7 +203,7 @@ Hazards:
 - Never log pixel payloads or clipboard bytes.
 
 Open risks for Phase 2:
-- `adesk-wm`/`adesk-render` interfaces may differ from the assumptions above; reconcile `WmBridge`, `HeadlessRenderer` and the element walker when they land.
+- The `adesk-wm` interface is reconciled in `WmBridge`; `adesk-render`'s landed API vs. the `HeadlessRenderer`/element-walker assumptions is still unverified.
 - `RenderedFrame`/`StateSnapshot` field shapes are the `RenderWindow`/`QueryState` reply payloads and must be confirmed with the server/AGP owner.
 - pixman `Image` may need a root workspace dependency.
 - `RuntimeCommand` has a clippy `large_enum_variant` warning; boxing reply-bearing variants is a Phase-2 option.

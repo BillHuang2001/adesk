@@ -5,11 +5,12 @@
 //! crop/downscale implementation agent-facing `capture_*` uses, so both paths
 //! scale identically.
 //!
-//! Expected `adesk-render` surface (cross-crate contract, see `CONTEXT.md`):
+//! `adesk-render` surface used here (cross-crate contract, see `CONTEXT.md`);
+//! reconciled with the landed API — both operations are infallible:
 //!
 //! ```ignore
-//! adesk_render::crop(&ImageBuffer, Rect) -> adesk_render::Result<ImageBuffer>
-//! adesk_render::downscale(&ImageBuffer, u32) -> adesk_render::Result<ImageBuffer>
+//! adesk_render::crop(&ImageBuffer, Rect) -> ImageBuffer
+//! adesk_render::downscale(&ImageBuffer, u32) -> ImageBuffer
 //! ```
 
 use adesk_core::ImageBuffer;
@@ -33,7 +34,7 @@ pub(crate) fn apply(frame: ImageBuffer, request: &InspectionRequest) -> Result<I
                 frame.width, frame.height
             ))
         })?;
-        frame = adesk_render::crop(&frame, clipped)?;
+        frame = adesk_render::crop(&frame, clipped);
     }
 
     if let Some(max_dimension) = request.max_dimension {
@@ -42,7 +43,7 @@ pub(crate) fn apply(frame: ImageBuffer, request: &InspectionRequest) -> Result<I
                 "max_dimension must be greater than zero".to_string(),
             ));
         }
-        frame = adesk_render::downscale(&frame, max_dimension)?;
+        frame = adesk_render::downscale(&frame, max_dimension);
     }
 
     tracing::debug!(

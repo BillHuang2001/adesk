@@ -13,12 +13,12 @@
 //! Phase 1 status: construction and coordinate resolution are real; the query and
 //! mutation helpers are stubs that Phase 2 fills in once protocol handlers exist.
 
-// Assumed adesk-wm surface (reconciliation contract; adesk-wm is designed in parallel):
-//   adesk_wm::WindowManager::new(output_size: adesk_core::Size) -> WindowManager
-//   WindowManager::resolve_position(&self, window_id: WindowId, position: &Position)
-//       -> Result<adesk_core::Point, adesk_wm::Error>   (Error: std::fmt::Display)
+// Landed adesk-wm surface this bridge is written against:
+//   adesk_wm::PolicyConfig::new(output_size: adesk_core::Size) -> PolicyConfig
+//   adesk_wm::WindowManager::new(config: PolicyConfig) -> WindowManager
+//   WindowManager::resolve_position(&self, window_id: WindowId, position: Position)
+//       -> Option<adesk_core::Point>   (None = unknown window)
 //   adesk_wm::WmAction — opaque here; Phase 2 applies actions returned by the WM.
-// If the landed adesk-wm API differs, reconcile in Phase 2 and update this block.
 
 #![allow(dead_code)] // Phase 1: the query/mutation helpers are wired up in Phase 2.
 
@@ -47,7 +47,7 @@ impl WmBridge {
     /// this area (`docs/architecture.md` §4).
     pub(crate) fn new(output_size: Size) -> WmBridge {
         WmBridge {
-            manager: adesk_wm::WindowManager::new(output_size),
+            manager: adesk_wm::WindowManager::new(adesk_wm::PolicyConfig::new(output_size)),
         }
     }
 
@@ -99,9 +99,23 @@ impl WmBridge {
     ///
     /// The window model — never a hard-coded constant — is the authority for
     /// geometry, so `(0,0)` output origin assumptions stay out of this crate.
+    /// An unknown window surfaces as [`CompositorError::WindowManagement`].
     pub(crate) fn resolve_position(&self, id: WindowId, position: &Position) -> Result<Point> {
         self.manager
-            .resolve_position(id, position)
-            .map_err(|error| CompositorError::WindowManagement(error.to_string()))
+            .resolve_position(id, *position)
+            .ok_or_else(|| CompositorError::WindowManagement(format!("unknown window {id}")))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bridge must build the window manager with the output size as its tiling
+    /// policy configuration (`PolicyConfig::new`), not as a bare size.
+    #[test]
+    fn new_wires_the_output_size_into_the_policy_config() {
+        let bridge = WmBridge::new(Size::new(1280, 800));
+        assert_eq!(bridge.manager.config().output_size, Size::new(1280, 800));
     }
 }
