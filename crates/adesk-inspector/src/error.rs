@@ -16,7 +16,7 @@ pub enum Error {
     InvalidRequest(String),
     /// A post-processing step delegated to `adesk-render` failed.
     #[error(transparent)]
-    Render(#[from] adesk_render::Error),
+    Render(#[from] adesk_render::RenderError),
 }
 
 /// Crate-local result alias.
