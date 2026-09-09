@@ -1,0 +1,39 @@
+# adesk-testkit — dev-only test harness for the ADesk runtime.
+#
+# This crate is the only supported way to test ADesk end to end without a desktop:
+# it starts a real compositor + server in-process on temp paths, drives the real
+# Wayland protocol path with a purpose-built client, writes `.desktop` fixtures,
+# launches a helper process and asserts over images and events.
+#
+# It must NEVER be a runtime dependency of any crate (`[dev-dependencies]` only).
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them.
+[package]
+name = "adesk-testkit"
+description = "Dev-only ADesk test harness: in-process runtime, Wayland test client, fixtures, assertions."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "adesk-test-app"
+path = "src/bin/adesk-test-app.rs"
+
+[dependencies]
+adesk-app-registry.workspace = true
+adesk-client.workspace = true
+adesk-compositor.workspace = true
+adesk-core.workspace = true
+adesk-observer.workspace = true
+adesk-proto.workspace = true
+adesk-server.workspace = true
+adesk-wm.workspace = true
+image.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+wayland-client.workspace = true
+wayland-protocols.workspace = true
