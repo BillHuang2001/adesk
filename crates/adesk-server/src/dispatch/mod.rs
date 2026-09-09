@@ -16,7 +16,7 @@
 //! name can only arise while decoding: `Method::from_parts` returns
 //! `ProtoError::UnknownMethod`, which [`crate::error`] maps to the
 //! `unknown_method` AGP code before a request ever reaches this router. The
-//! match in [`route`] therefore needs no catch-all arm.
+//! match in `route` therefore needs no catch-all arm.
 
 /// §5.1 runtime methods (`ping`).
 pub mod runtime;
@@ -248,7 +248,6 @@ fn session_sinks() -> &'static Mutex<HashMap<SessionId, EventSink>> {
 }
 
 /// Publishes the outbound sink of a connection (called by `Connection::run`).
-#[allow(dead_code)] // wired by the connection layer (parallel-owned module).
 pub(crate) fn register_session_sink(session: SessionId, sink: EventSink) {
     session_sinks()
         .lock()
@@ -257,7 +256,6 @@ pub(crate) fn register_session_sink(session: SessionId, sink: EventSink) {
 }
 
 /// Drops the sink of a connection (called on disconnect).
-#[allow(dead_code)] // wired by the connection layer (parallel-owned module).
 pub(crate) fn forget_session_sink(session: SessionId) {
     session_sinks()
         .lock()

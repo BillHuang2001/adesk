@@ -13,7 +13,7 @@ Router (`mod.rs`):
 - `RequestContext<'a> { server: &'a ServerContext, session: &'a Session }` — the only handle handlers receive.
 - `Dispatcher::new(ServerContext)` / `context()` / `async dispatch(&Session, RequestFrame) -> ResponseFrame` — total over `adesk_proto::Method`; every `Err` becomes `error_response` and the connection stays open.
 - `error_response(id, &ServerError) -> ResponseFrame` = `ResponseFrame::error(id, error.payload())`.
-- Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)` (see Known Issues).
+- Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)`; `Connection::run` publishes the writer queue on connect and forgets it on disconnect.
 
 Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>Params) -> Result<<Proto>Result>`:
 - `runtime::ping`.
@@ -57,12 +57,10 @@ Shared internal helpers (not public API):
 
 ## Known Issues
 
-- **The outbound-sink seam is not wired yet.** `Session`/`ServerContext` do not carry the connection's writer queue, so `mod.rs` keeps a process-global `OnceLock<Mutex<HashMap<SessionId, EventSink>>>`; `Connection::run` must call `register_session_sink(session_id, sink)` once the writer queue exists and `forget_session_sink(id)` on disconnect. Until then `subscribe_events` and `inspect_subscribe` answer `internal`.
 - `type_text` classifies a character as unmappable by matching the compositor's `CompositorError::InvalidRequest` message for the substring `"keymap"`; a typed compositor error variant would be more robust (rewording the message surfaces `invalid_request` instead of a `skipped` entry — visible, not silent).
 - `apps.rs` stamps `AppLaunched.seq` from a server-private `AtomicU64` raised above the observed `QueryState` watermark because the compositor exposes no sequence allocator; a compositor-side allocator would remove the chance of a duplicate seq with the compositor's own next event.
 - `double_click`'s interval (100 ms, 50 ms gap) and `drag`'s post-move sleep are local server policy — protocol §5.5 specifies no interval.
 - `inspect_subscribe` with `min_interval_ms == 0` re-renders continuously (yielding between iterations); it is client-controlled and protocol-legal but CPU-hungry.
-- The unit test `dispatch::tests::error_response_carries_the_request_id_and_payload_code` fails while the parallel-owned `src/error.rs::ServerError::payload()` is `todo!()`; it passes as soon as that module lands.
 
 ## Test Strategy
 

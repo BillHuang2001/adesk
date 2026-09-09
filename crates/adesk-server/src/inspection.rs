@@ -1,10 +1,11 @@
-//! Server-side [`InspectionSource`]: cached inspection state plus the async
-//! refresh that renders the full output and queries window state.
+//! Server-side [`adesk_inspector::InspectionSource`]: cached inspection state
+//! plus the async refresh that renders the full output and queries window state.
 //!
 //! `adesk-inspector` is pure and synchronous: its trait must not block the
-//! compositor, so the server keeps an [`InspectionSnapshot`] in
-//! [`InspectionCache`] and refreshes it asynchronously ([`refresh`]) before each
-//! `inspect_capture` / `inspect_subscribe` frame.
+//! compositor, so the server keeps an [`crate::inspection::InspectionSnapshot`]
+//! in [`crate::inspection::InspectionCache`] and refreshes it asynchronously
+//! ([`crate::inspection::refresh`]) before each `inspect_capture` /
+//! `inspect_subscribe` frame.
 
 use std::sync::{Arc, RwLock};
 
