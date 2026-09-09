@@ -117,7 +117,7 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 
 ## Status
 
-- Phase 1 (architecture) complete: manifest, module skeleton, public API signatures, pure modules implemented, tests passing, `cargo check --all-targets` clean.
+- Phase 1 (architecture) complete: manifest, module skeleton, public API signatures, pure modules implemented, 29 tests passing, `cargo check --all-targets` and `cargo clippy --all-targets -- -D warnings` clean (verified standalone; see Notes for Agents).
 - Not implemented (Phase 2, Manager): `create_target`, `render_scene`, `import_buffer` — `todo!()` stubs with documented step lists. The renderer-backed test file is planned only.
 
 ## Notes for Agents
