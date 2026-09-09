@@ -192,7 +192,9 @@ pub(crate) fn lock_window(slot: &WindowSlot) -> MutexGuard<'_, WindowState> {
 
 /// Locks the client state, ignoring poisoning (see [`lock_window`]).
 pub(crate) fn lock_client(state: &Mutex<ClientState>) -> MutexGuard<'_, ClientState> {
-    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Locks a window's SHM pool, ignoring poisoning (see [`lock_window`]).
@@ -241,7 +243,6 @@ impl Dispatch<wl_shm::WlShm, ()> for ClientState {
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = state;
         // `Format { format: WEnum<wl_shm::Format> }`.
         //
         // Only known formats are recorded so `supports_argb8888` reflects the runtime
@@ -332,14 +333,13 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for ClientState {
 
 impl Dispatch<wl_surface::WlSurface, WindowSlot> for ClientState {
     fn event(
-        state: &mut ClientState,
+        _state: &mut ClientState,
         _proxy: &wl_surface::WlSurface,
         event: wl_surface::Event,
         data: &WindowSlot,
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = (state, data);
         match event {
             // `Enter { output: WlOutput }` / `Leave { output: WlOutput }`.
             //
@@ -387,7 +387,6 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for ClientState {
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = proxy;
         // `Ping { serial: u32 }`.
         //
         // The compositor disconnects unresponsive clients, so the test client answers
@@ -402,14 +401,13 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for ClientState {
 
 impl Dispatch<xdg_surface::XdgSurface, WindowSlot> for ClientState {
     fn event(
-        state: &mut ClientState,
+        _state: &mut ClientState,
         _proxy: &xdg_surface::XdgSurface,
         event: xdg_surface::Event,
         data: &WindowSlot,
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = (state, data);
         // `Configure { serial: u32 }`.
         //
         // Completes the configure sequence: the role event stored by
@@ -432,14 +430,13 @@ impl Dispatch<xdg_surface::XdgSurface, WindowSlot> for ClientState {
 
 impl Dispatch<xdg_toplevel::XdgToplevel, WindowSlot> for ClientState {
     fn event(
-        state: &mut ClientState,
+        _state: &mut ClientState,
         _proxy: &xdg_toplevel::XdgToplevel,
         event: xdg_toplevel::Event,
         data: &WindowSlot,
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = (state, data);
         match event {
             // `Configure { width: i32, height: i32, states: Vec<u8> }` (`states` is an
             // array of native-endian `u32` state codes; `width`/`height` of `0` means
@@ -505,14 +502,13 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for ClientState {
 
 impl Dispatch<xdg_popup::XdgPopup, WindowSlot> for ClientState {
     fn event(
-        state: &mut ClientState,
+        _state: &mut ClientState,
         _proxy: &xdg_popup::XdgPopup,
         event: xdg_popup::Event,
         data: &WindowSlot,
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = (state, data);
         match event {
             // `Configure { x: i32, y: i32, width: i32, height: i32 }` (the position is
             // relative to the parent's window geometry; there is no `states` array).

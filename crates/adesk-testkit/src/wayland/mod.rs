@@ -182,8 +182,7 @@ impl WaylandTestClient {
     pub fn connect(display_name: &str) -> Result<WaylandTestClient> {
         let runtime_dir = std::env::var_os("XDG_RUNTIME_DIR").ok_or_else(|| {
             TestkitError::WaylandConnect(
-                "XDG_RUNTIME_DIR is not set, so the wayland socket cannot be resolved"
-                    .to_string(),
+                "XDG_RUNTIME_DIR is not set, so the wayland socket cannot be resolved".to_string(),
             )
         })?;
         let runtime_dir = PathBuf::from(runtime_dir);
@@ -240,8 +239,8 @@ impl WaylandTestClient {
                 path.display()
             ))
         })?;
-        let (globals_list, mut event_queue) = registry_queue_init::<ClientState>(&conn)
-            .map_err(|err| {
+        let (globals_list, mut event_queue) =
+            registry_queue_init::<ClientState>(&conn).map_err(|err| {
                 TestkitError::WaylandConnect(format!("wayland registry init failed: {err}"))
             })?;
         let globals_snapshot = globals_list.contents().clone_list();
@@ -341,11 +340,10 @@ impl WaylandTestClient {
             .globals
             .compositor()
             .create_surface(&self.qhandle, Arc::clone(&slot));
-        let xdg_surface = self.globals.xdg_wm_base().get_xdg_surface(
-            &surface,
-            &self.qhandle,
-            Arc::clone(&slot),
-        );
+        let xdg_surface =
+            self.globals
+                .xdg_wm_base()
+                .get_xdg_surface(&surface, &self.qhandle, Arc::clone(&slot));
         let toplevel = xdg_surface.get_toplevel(&self.qhandle, Arc::clone(&slot));
         toplevel.set_app_id(spec.app_id.clone());
         toplevel.set_title(spec.title.clone());
@@ -384,7 +382,8 @@ impl WaylandTestClient {
     /// 2. `globals.compositor().create_surface(&qhandle, slot.clone())` and
     ///    `globals.xdg_wm_base().get_xdg_surface(&surface, &qhandle, slot.clone())`.
     /// 3. `xdg_surface.get_popup(Some(parent.surface()), &positioner, &qhandle,
-    ///    slot.clone())`, then `positioner.destroy()` (the compositor copied the rules).    /// 4. Register the slot in `ClientState::windows`, `surface.commit()` and
+    ///    slot.clone())`, then `positioner.destroy()` (the compositor copied the rules).
+    /// 4. Register the slot in `ClientState::windows`, `surface.commit()` and
     ///    `conn.flush()`.
     pub fn create_popup(&self, parent: &TestWindow, spec: PopupSpec) -> Result<TestPopup> {
         let (configure_tx, configure_rx) = std::sync::mpsc::channel();
@@ -411,11 +410,10 @@ impl WaylandTestClient {
             .globals
             .compositor()
             .create_surface(&self.qhandle, Arc::clone(&slot));
-        let xdg_surface = self.globals.xdg_wm_base().get_xdg_surface(
-            &surface,
-            &self.qhandle,
-            Arc::clone(&slot),
-        );
+        let xdg_surface =
+            self.globals
+                .xdg_wm_base()
+                .get_xdg_surface(&surface, &self.qhandle, Arc::clone(&slot));
         let popup = xdg_surface.get_popup(
             Some(parent.xdg_surface()),
             &positioner,
@@ -572,9 +570,11 @@ impl WaylandTestClient {
             let _ = socket.shutdown(std::net::Shutdown::Both);
         }
         if let Some(reader) = self.reader.take() {
-            let joined =
-                tokio::time::timeout(CLOSE_TIMEOUT, tokio::task::spawn_blocking(move || reader.join()))
-                    .await;
+            let joined = tokio::time::timeout(
+                CLOSE_TIMEOUT,
+                tokio::task::spawn_blocking(move || reader.join()),
+            )
+            .await;
             match joined {
                 Err(_expired) => {
                     return Err(TestkitError::Timeout {

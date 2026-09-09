@@ -20,8 +20,9 @@
 //!
 //! The pool is a bump allocator with a free list: `alloc` first fits into the free list
 //! (best effort, first fit), then bumps `next_offset`; `free` returns the range to the free
-//! list (coalescing is optional in Phase 2). `wl_buffer.release` is what calls `free`, so a
-//! test that commits frames in a loop reuses one allocation instead of growing the pool.
+//! list and coalesces it with every touching neighbour. `wl_buffer.release` is what calls
+//! `free`, so a test that commits frames in a loop reuses one allocation instead of growing
+//! the pool.
 
 use std::collections::HashSet;
 use std::fs::File;
@@ -71,11 +72,12 @@ pub(crate) struct ShmBuffer {
 impl ShmPool {
     /// Creates a pool of `capacity` bytes and its `wl_shm_pool`.
     ///
-    /// Phase 2 steps: `tempfile::tempfile()?` → `file.set_len(capacity as u64)?` →
-    /// `shm.create_pool(file.as_fd(), capacity as i32, qhandle, ())`. `capacity` is rounded
-    /// up to a multiple of 4096 by the caller so every allocation is page aligned. The
-    /// file descriptor stays owned by the pool for the pool's whole life; `wl_shm` keeps
-    /// its own reference.
+    /// The backing file is a `tempfile::tempfile()` grown with `set_len`, and the pool is
+    /// created with `shm.create_pool(file.as_fd(), capacity as i32, qhandle, ())`. The
+    /// caller rounds `capacity` up to a multiple of 4096, so every allocation is page
+    /// aligned; a zero capacity or one that does not fit the protocol's `i32` size is
+    /// [`TestkitError::Unsupported`]. The file descriptor stays owned by the pool for the
+    /// pool's whole life; `wl_shm` keeps its own reference.
     pub(crate) fn new(
         shm: &wl_shm::WlShm,
         qhandle: &QueueHandle<ClientState>,
@@ -106,18 +108,17 @@ impl ShmPool {
 
     /// Allocates a buffer of `size` filled with `fill`.
     ///
-    /// Phase 2 steps:
-    ///
-    /// 1. `len = size.w * 4 * size.h`, rounded up to a 64-byte multiple; `TestkitError`
-    ///    (not a panic) when the pool is exhausted.
-    /// 2. Take the first free range that fits, else bump `next_offset`.
-    /// 3. Write the pixels row by row with `FileExt::write_all_at`: for every `(x, y)`
-    ///    evaluate `fill.at(x, y, size)` and store the little-endian ARGB8888 byte order
-    ///    `[b, g, r, 255]` (see the module docs). `fill.require_opaque()?` is checked
-    ///    first, so a translucent pattern fails here rather than producing pixels that
-    ///    depend on compositing.
-    /// 4. `pool.create_buffer(offset as i32, w as i32, h as i32, (w * 4) as i32,
-    ///    wl_shm::Format::Argb8888, &self.qhandle, ())`.
+    /// 1. `len = size.w * 4 * size.h`, rounded up to a 64-byte multiple; a zero-sized or
+    ///    overflowing request, and a pool that cannot satisfy it, are
+    ///    [`TestkitError`] (not a panic).
+    /// 2. The first free range that fits is taken, else `next_offset` is bumped.
+    /// 3. Pixels are written row by row with `FileExt::write_all_at`: for every `(x, y)`
+    ///    `fill.at(x, y, size)` is evaluated and stored in the little-endian ARGB8888 byte
+    ///    order `[b, g, r, 255]` (see the module docs). `fill.require_opaque()?` runs first,
+    ///    so a translucent pattern fails here rather than producing pixels that depend on
+    ///    compositing.
+    /// 4. The buffer is created with `pool.create_buffer(offset as i32, w as i32, h as i32,
+    ///    (w * 4) as i32, wl_shm::Format::Argb8888, &self.qhandle, ())`.
     pub(crate) fn alloc(&mut self, size: Size, fill: FillPattern) -> Result<ShmBuffer> {
         fill.require_opaque()?;
         if size.w == 0 || size.h == 0 {
@@ -171,9 +172,10 @@ impl ShmPool {
 
     /// Returns a previously allocated range to the free list.
     ///
-    /// Phase 2: push `(offset, len)` and coalesce with an adjacent free range when
-    /// possible. Ranges not handed out by [`alloc`](ShmPool::alloc) are ignored (they
-    /// would indicate a bug in the caller, not in the pool).
+    /// `(offset, len)` is pushed and coalesced with every touching neighbour (one merge can
+    /// make the next one adjacent). A range that [`alloc`](ShmPool::alloc) never handed
+    /// out — `len == 0`, past the pool, past the bump pointer, or overlapping an already
+    /// free range — is ignored: it indicates a bug in the caller, not in the pool.
     pub(crate) fn free(&mut self, offset: usize, len: usize) {
         if len == 0 {
             return;

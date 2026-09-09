@@ -102,22 +102,19 @@ impl Globals {
 
 /// Binds the required globals on `qhandle` and negotiates versions.
 ///
-/// Phase 2 steps:
-///
 /// 1. `list.bind::<wl_compositor::WlCompositor, ClientState, ()>(qhandle,
 ///    REQUIRED_COMPOSITOR_VERSION..=MAX_COMPOSITOR_VERSION, ())`, likewise `wl_shm`
 ///    (`1..=3`) and `xdg_wm_base` (`1..=7`). `GlobalList::bind` returns the lower of the
 ///    advertised version and the requested maximum, which is the negotiation rule.
-/// 2. Map `BindError::NotPresent` to
+/// 2. `BindError::NotPresent` maps to
 ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported)("compositor does not advertise `<interface>`") and
 ///    `BindError::UnsupportedVersion` to `Unsupported`("`<interface>` vN is too old;
 ///    need vM"), so a misconfigured runtime fails with a named capability, never a panic.
-/// 3. Collect the SHM formats: `wl_shm.format` events arrive on the event queue, so the
-///    caller must dispatch at least one reader cycle before reading them; `bind_globals`
-///    records what it has seen and the caller re-checks `supports_argb8888()` after the
-///    first roundtrip. (`wl_shm` always advertises `ARGB8888` and `XRGB8888` in practice;
-///    the check exists so a broken runtime cannot silently corrupt every pixel
-///    assertion.)
+/// 3. The returned [`Globals`] seeds its formats from [`supported_formats`], because
+///    `wl_shm.format` events only arrive on the event queue: the caller must complete a
+///    reader cycle before `supports_argb8888()` means anything, then re-read the real
+///    formats. (`wl_shm` always advertises `ARGB8888` and `XRGB8888` in practice; the
+///    check exists so a broken runtime cannot silently corrupt every pixel assertion.)
 pub(crate) fn bind_globals(
     list: &GlobalList,
     qhandle: &QueueHandle<ClientState>,
