@@ -25,20 +25,20 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use adesk_core::Size;
+use adesk_core::{Point, Rect, Size};
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::{Global, GlobalListContents};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{
     xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
 };
 
 use crate::fill::FillPattern;
 
-use super::shm::ShmBuffer;
+use super::shm::{ShmBuffer, ShmPool};
 use super::window::ConfiguredSize;
 
 /// A window's state, shared between its handle and the dispatch impls.
@@ -59,6 +59,13 @@ pub(crate) struct ClientState {
     pub(crate) shm_formats: HashSet<wl_shm::Format>,
     /// Set when the reader thread reported EOF or a fatal protocol error.
     pub(crate) closed: bool,
+    /// Number of `wl_display.sync` callbacks the compositor answered.
+    ///
+    /// Recorded by [`Dispatch<wl_callback::WlCallback, ()>`]; a test that needs a
+    /// *specific* server roundtrip can compare it before and after a request, which is
+    /// what [`roundtrip`](super::WaylandTestClient::roundtrip) documents as out of scope
+    /// for its own "one reader cycle" contract.
+    pub(crate) sync_watermark: u64,
 }
 
 impl ClientState {
@@ -69,6 +76,7 @@ impl ClientState {
             windows: HashMap::new(),
             shm_formats,
             closed: false,
+            sync_watermark: 0,
         }
     }
 }
@@ -105,6 +113,31 @@ pub(crate) struct WindowState {
     pub(crate) pending_buffer: Option<ShmBuffer>,
     /// Buffer currently attached to the surface.
     pub(crate) attached_buffer: Option<ShmBuffer>,
+    /// Buffers whose bytes were already returned to [`Self::pool`] by `wl_buffer.release`.
+    ///
+    /// A buffer that is re-attached by
+    /// [`commit_pending`](super::TestWindow::commit_pending) is released again by the
+    /// compositor; the set keeps the second release from handing the same range out
+    /// twice (see [`ShmPool::free`]).
+    pub(crate) released_buffers: HashSet<ObjectId>,
+    /// The SHM pool this window allocates from (one pool per client).
+    pub(crate) pool: Arc<Mutex<ShmPool>>,
+    /// Damage the last commit reported, or `None` before the first commit.
+    pub(crate) last_damage: Option<Rect>,
+    /// Outputs the surface entered and has not left, by object id.
+    pub(crate) outputs: HashSet<ObjectId>,
+    /// `wl_surface.preferred_buffer_scale` (`1` until the compositor says otherwise).
+    pub(crate) preferred_buffer_scale: i32,
+    /// `wl_surface.preferred_buffer_transform`, when the compositor sent one.
+    pub(crate) preferred_buffer_transform: Option<wl_output::Transform>,
+    /// `xdg_toplevel.configure_bounds`, when the compositor sent one.
+    pub(crate) configure_bounds: Option<Size>,
+    /// Raw `xdg_toplevel.wm_capabilities` entries (native-endian `u32` codes).
+    pub(crate) wm_capabilities: Vec<u8>,
+    /// Offset the compositor placed the popup at (parent-window coordinates).
+    pub(crate) popup_offset: Point,
+    /// Last `xdg_popup.repositioned` token, when the compositor sent one.
+    pub(crate) popup_reposition_token: Option<u32>,
     /// Notifies [`TestWindow::wait_for_configure`](super::TestWindow::wait_for_configure).
     pub(crate) configure_tx: Sender<ConfiguredSize>,
 }
@@ -117,6 +150,7 @@ impl WindowState {
         app_id: String,
         title: String,
         configure_tx: Sender<ConfiguredSize>,
+        pool: Arc<Mutex<ShmPool>>,
     ) -> WindowState {
         WindowState {
             pending_configure: None,
@@ -132,6 +166,16 @@ impl WindowState {
             close_requested: false,
             pending_buffer: None,
             attached_buffer: None,
+            released_buffers: HashSet::new(),
+            pool,
+            last_damage: None,
+            outputs: HashSet::new(),
+            preferred_buffer_scale: 1,
+            preferred_buffer_transform: None,
+            configure_bounds: None,
+            wm_capabilities: Vec::new(),
+            popup_offset: Point::ORIGIN,
+            popup_reposition_token: None,
             configure_tx,
         }
     }
@@ -151,6 +195,11 @@ pub(crate) fn lock_client(state: &Mutex<ClientState>) -> MutexGuard<'_, ClientSt
     state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Locks a window's SHM pool, ignoring poisoning (see [`lock_window`]).
+pub(crate) fn lock_pool(pool: &Mutex<ShmPool>) -> MutexGuard<'_, ShmPool> {
+    pool.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 // --- Dispatch implementations -------------------------------------------------------
 //
 // Phase 1: every body is `todo!()` with the exact Phase-2 semantics in comments. Event
@@ -166,15 +215,15 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ClientState {
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = (state, data);
         match event {
             // `Global { name: u32, interface: String, version: u32 }` /
             // `GlobalRemove { name: u32 }`.
             //
-            // Phase 2: `state.globals = data.clone_list()` — the framework's
-            // `GlobalListContents` is already up to date when the event is dispatched.
+            // The framework's `GlobalListContents` is already up to date when the event is
+            // dispatched (its object data updates it before forwarding the message), so the
+            // snapshot is simply re-read.
             wl_registry::Event::Global { .. } | wl_registry::Event::GlobalRemove { .. } => {
-                todo!("Phase 2: refresh the globals snapshot from GlobalListContents")
+                state.globals = data.clone_list();
             }
             // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
             // versions are ignored rather than rejected.
@@ -195,11 +244,12 @@ impl Dispatch<wl_shm::WlShm, ()> for ClientState {
         let _ = state;
         // `Format { format: WEnum<wl_shm::Format> }`.
         //
-        // Phase 2: record known formats in `state.shm_formats` (`WEnum::Value` only;
-        // unknown numeric codes are ignored) so `supports_argb8888` reflects the
-        // runtime instead of an assumption.
-        if let wl_shm::Event::Format { .. } = event {
-            todo!("Phase 2: record the advertised SHM format in state.shm_formats")
+        // Only known formats are recorded so `supports_argb8888` reflects the runtime
+        // instead of an assumption; unknown numeric codes are ignored.
+        if let wl_shm::Event::Format { format } = event {
+            if let WEnum::Value(format) = format {
+                state.shm_formats.insert(format);
+            }
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.
@@ -223,21 +273,42 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for ClientState {
 impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
     fn event(
         state: &mut ClientState,
-        _proxy: &wl_buffer::WlBuffer,
+        proxy: &wl_buffer::WlBuffer,
         event: wl_buffer::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = state;
         // `Release`.
         //
-        // Phase 2: the compositor is done reading the buffer. Return its bytes to the
-        // owning pool's free list (`ShmPool::free`) so repeated frames reuse one
-        // allocation instead of growing the pool. The pool is found through the
-        // window slot that holds the buffer.
+        // The compositor is done reading the buffer. Return its bytes to the owning pool's
+        // free list (`ShmPool::free`) so repeated frames reuse one allocation instead of
+        // growing the pool. `wl_buffer` carries no user data, so the owner is the slot
+        // that still holds this object id.
         if let wl_buffer::Event::Release = event {
-            todo!("Phase 2: return the released buffer to its pool's free list")
+            let id = proxy.id();
+            for slot in state.windows.values() {
+                let mut window = lock_window(slot);
+                let found = window
+                    .pending_buffer
+                    .iter()
+                    .chain(window.attached_buffer.iter())
+                    .find(|buffer| buffer.buffer().id() == id)
+                    .map(|buffer| (buffer.offset, buffer.len, Arc::clone(&window.pool)));
+                let Some((offset, len, pool)) = found else {
+                    continue;
+                };
+                // A second release of the same buffer (it was re-attached by
+                // `commit_pending`) must not return the range again: the pool may have
+                // handed it to a newer buffer meanwhile. The buffer itself stays in the
+                // slot, so `commit_pending` can still re-attach it.
+                if !window.released_buffers.insert(id) {
+                    break;
+                }
+                drop(window);
+                lock_pool(&pool).free(offset, len);
+                break;
+            }
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.
@@ -271,25 +342,33 @@ impl Dispatch<wl_surface::WlSurface, WindowSlot> for ClientState {
         match event {
             // `Enter { output: WlOutput }` / `Leave { output: WlOutput }`.
             //
-            // Phase 2: record which outputs the surface is on (the virtual output always
-            // enters immediately) so tests can assert the surface was actually mapped.
-            wl_surface::Event::Enter { .. } | wl_surface::Event::Leave { .. } => {
-                todo!("Phase 2: track output enter/leave on the window slot")
+            // Record which outputs the surface is on (the virtual output always enters
+            // immediately) so a failure can tell "the surface was never mapped" from
+            // "the surface was mapped but the compositor sent nothing".
+            wl_surface::Event::Enter { output } => {
+                lock_window(data).outputs.insert(output.id());
+            }
+            wl_surface::Event::Leave { output } => {
+                lock_window(data).outputs.remove(&output.id());
             }
             // `PreferredBufferScale { factor: i32 }` (since v6).
             //
-            // Phase 2: the test client always commits unscaled buffers; record the
-            // preference so a mismatch is visible in failures instead of silently
-            // blurring pixel assertions.
-            wl_surface::Event::PreferredBufferScale { .. } => {
-                todo!("Phase 2: record the preferred buffer scale")
+            // The test client always commits unscaled buffers; record the preference so
+            // a mismatch is visible in a failure instead of silently blurring pixel
+            // assertions.
+            wl_surface::Event::PreferredBufferScale { factor } => {
+                lock_window(data).preferred_buffer_scale = factor;
             }
             // `PreferredBufferTransform { transform: WEnum<wl_output::Transform> }` (v6).
             //
-            // Phase 2: record and assert it is `Normal`; a transform would invalidate
-            // exact pixel comparisons.
-            wl_surface::Event::PreferredBufferTransform { .. } => {
-                todo!("Phase 2: record the preferred buffer transform")
+            // Recorded (and expected to be `Normal`): a transform would invalidate exact
+            // pixel comparisons.
+            wl_surface::Event::PreferredBufferTransform { transform } => {
+                let transform = match transform {
+                    WEnum::Value(transform) => Some(transform),
+                    WEnum::Unknown(_) => None,
+                };
+                lock_window(data).preferred_buffer_transform = transform;
             }
             // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
             // versions are ignored rather than rejected.
@@ -310,10 +389,10 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for ClientState {
         let _ = proxy;
         // `Ping { serial: u32 }`.
         //
-        // Phase 2: `proxy.pong(serial)` — the compositor disconnects unresponsive
-        // clients, so the test client must answer immediately.
-        if let xdg_wm_base::Event::Ping { .. } = event {
-            todo!("Phase 2: proxy.pong(serial)")
+        // The compositor disconnects unresponsive clients, so the test client answers
+        // immediately.
+        if let xdg_wm_base::Event::Ping { serial } = event {
+            proxy.pong(serial);
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.
@@ -332,12 +411,18 @@ impl Dispatch<xdg_surface::XdgSurface, WindowSlot> for ClientState {
         let _ = (state, data);
         // `Configure { serial: u32 }`.
         //
-        // Phase 2: complete the configure sequence — take the role event stored by
-        // `xdg_toplevel.configure`/`xdg_popup.configure`, set its `serial`, move it to
-        // `last_configure`, set `pending_serial = Some(serial)` and send a copy on
-        // `configure_tx` (ignore `SendError`: the window was dropped).
-        if let xdg_surface::Event::Configure { .. } = event {
-            todo!("Phase 2: complete the pending configure with this serial and notify the window")
+        // Completes the configure sequence: the role event stored by
+        // `xdg_toplevel.configure`/`xdg_popup.configure` gets its serial, moves to
+        // `last_configure`, leaves `pending_serial` for `ack_configure` and is forwarded to
+        // the waiting window (a `SendError` only means the handle was dropped).
+        if let xdg_surface::Event::Configure { serial } = event {
+            let mut window = lock_window(data);
+            if let Some(mut configure) = window.pending_configure.take() {
+                configure.serial = serial;
+                window.pending_serial = Some(serial);
+                window.last_configure = Some(configure.clone());
+                let _ = window.configure_tx.send(configure);
+            }
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.
@@ -359,30 +444,42 @@ impl Dispatch<xdg_toplevel::XdgToplevel, WindowSlot> for ClientState {
             // array of native-endian `u32` state codes; `width`/`height` of `0` means
             // "client chooses").
             //
-            // Phase 2: store `ConfiguredSize { width: width.max(0) as u32, ...,
-            // states, serial: 0 }` in `pending_configure` (the serial arrives with the
-            // following `xdg_surface.configure`), and update `size` when both dimensions
-            // are non-zero.
-            xdg_toplevel::Event::Configure { .. } => {
-                todo!("Phase 2: store the pending toplevel configure (width/height/states)")
+            // The serial arrives with the following `xdg_surface.configure`, so it stays
+            // `0` here; `size` only follows a configure that actually picked a size.
+            xdg_toplevel::Event::Configure {
+                width,
+                height,
+                states,
+            } => {
+                let mut window = lock_window(data);
+                let configure = ConfiguredSize {
+                    width: width.max(0) as u32,
+                    height: height.max(0) as u32,
+                    states,
+                    serial: 0,
+                };
+                if configure.width > 0 && configure.height > 0 {
+                    window.size = configure.size();
+                }
+                window.pending_configure = Some(configure);
             }
             // `Close`.
             //
-            // Phase 2: set `close_requested = true`; the client keeps the surface alive
-            // so tests can observe the request before `destroy`.
-            xdg_toplevel::Event::Close => todo!("Phase 2: set close_requested"),
+            // The client keeps the surface alive so a test can observe the request before
+            // `destroy`.
+            xdg_toplevel::Event::Close => lock_window(data).close_requested = true,
             // `ConfigureBounds { width: i32, height: i32 }` (v4+).
             //
-            // Phase 2: record the recommended bounds; they do not change the surface size.
-            xdg_toplevel::Event::ConfigureBounds { .. } => {
-                todo!("Phase 2: record the recommended geometry bounds")
+            // Recorded; they do not change the surface size.
+            xdg_toplevel::Event::ConfigureBounds { width, height } => {
+                lock_window(data).configure_bounds =
+                    Some(Size::new(width.max(0) as u32, height.max(0) as u32));
             }
             // `WmCapabilities { capabilities: Vec<u8> }` (v5+).
             //
-            // Phase 2: record the capability set so tests can skip capabilities the
-            // runtime does not implement.
-            xdg_toplevel::Event::WmCapabilities { .. } => {
-                todo!("Phase 2: record the advertised WM capabilities")
+            // Recorded so a test can skip capabilities the runtime does not implement.
+            xdg_toplevel::Event::WmCapabilities { capabilities } => {
+                lock_window(data).wm_capabilities = capabilities;
             }
             // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
             // versions are ignored rather than rejected.
@@ -419,24 +516,33 @@ impl Dispatch<xdg_popup::XdgPopup, WindowSlot> for ClientState {
             // `Configure { x: i32, y: i32, width: i32, height: i32 }` (the position is
             // relative to the parent's window geometry; there is no `states` array).
             //
-            // Phase 2: store `ConfiguredSize { width: width.max(0) as u32, height:
-            // height.max(0) as u32, states: Vec::new(), serial: 0 }` plus the placed
-            // offset in `pending_configure`; the following `xdg_surface.configure`
-            // completes it.
-            xdg_popup::Event::Configure { .. } => {
-                todo!("Phase 2: store the pending popup configure (x/y/width/height)")
+            // The placed offset goes to `popup_offset`; the size is part of the pending
+            // configure, which the following `xdg_surface.configure` completes.
+            xdg_popup::Event::Configure {
+                x,
+                y,
+                width,
+                height,
+            } => {
+                let mut window = lock_window(data);
+                window.popup_offset = Point::new(x, y);
+                window.pending_configure = Some(ConfiguredSize {
+                    width: width.max(0) as u32,
+                    height: height.max(0) as u32,
+                    states: Vec::new(),
+                    serial: 0,
+                });
             }
             // `PopupDone`.
             //
-            // Phase 2: set `close_requested = true`; the popup is dismissed and must be
-            // destroyed by the client.
-            xdg_popup::Event::PopupDone => todo!("Phase 2: set close_requested"),
+            // The popup is dismissed and must be destroyed by the client.
+            xdg_popup::Event::PopupDone => lock_window(data).close_requested = true,
             // `Repositioned { token: u32 }` (v3+).
             //
-            // Phase 2: match `token` against the last `xdg_popup.reposition` token so a
-            // reposition wait can complete; a configure follows immediately.
-            xdg_popup::Event::Repositioned { .. } => {
-                todo!("Phase 2: match the reposition token")
+            // Recorded so a reposition wait can match the token; a configure follows
+            // immediately.
+            xdg_popup::Event::Repositioned { token } => {
+                lock_window(data).popup_reposition_token = Some(token);
             }
             // Generated event enums are `#[non_exhaustive]`; unknown future events are
             // ignored.
@@ -454,14 +560,13 @@ impl Dispatch<wl_callback::WlCallback, ()> for ClientState {
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        let _ = state;
         // `Done { callback_data: u32 }` (the object is a destructor).
         //
-        // Phase 2: mark the matching `wl_display.sync` as complete so
-        // `roundtrip` can wait for a *specific* server roundtrip rather than for the
-        // next arbitrary reader cycle, and record the callback watermark.
+        // Bumps the sync watermark so a test can tell which server roundtrip a `Done`
+        // belongs to. `roundtrip` deliberately waits for the next reader cycle instead of
+        // this watermark (see its method docs).
         if let wl_callback::Event::Done { .. } = event {
-            todo!("Phase 2: mark the sync callback complete")
+            state.sync_watermark = state.sync_watermark.wrapping_add(1);
         }
         // Generated event enums are `#[non_exhaustive]`; unknown future events fall
         // through and are ignored.

@@ -12,18 +12,153 @@
 //! [`WindowState`](super::state::WindowState)) without mutating the immutable spec, so the
 //! `&str` accessors never return a reference into a lock.
 
-use std::sync::mpsc;
-use std::sync::Mutex;
+use std::sync::mpsc::{self, RecvTimeoutError, TryRecvError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use adesk_core::{Point, Rect, Size};
 use wayland_client::protocol::wl_surface::WlSurface;
+use wayland_client::{Connection, Proxy};
 use wayland_protocols::xdg::shell::client::{xdg_popup, xdg_surface, xdg_toplevel};
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
 
-use super::state::{lock_window, WindowSlot};
+use super::state::{lock_client, lock_pool, lock_window, ClientState, WindowSlot};
+
+/// Flushes `conn` so the requests just queued reach the runtime.
+///
+/// `wayland-client` buffers requests and only writes them out when the buffer fills or
+/// the caller flushes, so every method that changes protocol state has to flush before it
+/// returns; otherwise a test that never pumps would wait for an event the runtime never
+/// saw a request for.
+fn flush(conn: &Connection) -> Result<()> {
+    conn.flush().map_err(|err| super::map_wayland_error(&err))
+}
+
+/// Allocates a fresh buffer of `fill` at the surface's current size, attaches it, damages
+/// the whole surface and commits one frame.
+///
+/// Shared by [`TestWindow::commit_frame`] and [`TestPopup::commit_frame`]. A commit before
+/// the first `ack_configure` is a protocol error, and a commit after
+/// [`destroy`](TestWindow::destroy) cannot reach the runtime at all; both are reported
+/// instead of being sent.
+fn commit_buffer(
+    surface: &WlSurface,
+    state: &WindowSlot,
+    conn: &Connection,
+    fill: FillPattern,
+) -> Result<()> {
+    let mut window = lock_window(state);
+    if window.destroyed {
+        return Err(TestkitError::SurfaceDestroyed);
+    }
+    if window.applied_serial.is_none() {
+        return Err(TestkitError::NoPendingConfigure);
+    }
+    let size = window.size;
+    let buffer = lock_pool(&window.pool).alloc(size, fill)?;
+    surface.attach(Some(buffer.buffer()), 0, 0);
+    surface.damage(0, 0, size.w as i32, size.h as i32);
+    surface.commit();
+    window.attached_buffer = Some(buffer);
+    window.commits = window.commits.saturating_add(1);
+    window.fill = fill;
+    window.last_damage = Some(Rect::from_size(size));
+    drop(window);
+    flush(conn)
+}
+
+/// Re-attaches the buffer of the last commit and commits it again without damaging
+/// anything.
+///
+/// Shared by [`TestWindow::commit_pending`] and [`TestPopup::commit_pending`] users (a
+/// resize re-commits the pixels already on screen, so the damage hint is empty).
+fn recommit_buffer(surface: &WlSurface, state: &WindowSlot, conn: &Connection) -> Result<()> {
+    let mut window = lock_window(state);
+    if window.destroyed {
+        return Err(TestkitError::SurfaceDestroyed);
+    }
+    let buffer = match window.attached_buffer.as_ref() {
+        Some(buffer) => buffer.buffer().clone(),
+        None => return Err(TestkitError::NoPendingConfigure),
+    };
+    surface.attach(Some(&buffer), 0, 0);
+    surface.commit();
+    window.commits = window.commits.saturating_add(1);
+    // Nothing new was drawn: the second commit of identical pixels damages nothing.
+    window.last_damage = Some(Rect::EMPTY);
+    drop(window);
+    flush(conn)
+}
+
+/// Waits for the next complete configure on `configure_rx` (see
+/// [`TestWindow::wait_for_configure`]).
+fn await_configure(
+    configure_rx: &Mutex<mpsc::Receiver<ConfiguredSize>>,
+    timeout: Duration,
+) -> Result<ConfiguredSize> {
+    let receiver = configure_rx
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match receiver.try_recv() {
+        Ok(configure) => Ok(configure),
+        // A configure that already arrived must never be hidden behind the timeout.
+        Err(TryRecvError::Empty) => {
+            receiver
+                .recv_timeout(timeout)
+                .map_err(|err| match err {
+                    RecvTimeoutError::Timeout => TestkitError::Timeout {
+                        what: "xdg configure",
+                        timeout,
+                    },
+                    RecvTimeoutError::Disconnected => TestkitError::ConnectionClosed,
+                })
+        }
+        // The handle outlives the sender only if the surface was destroyed with the slot
+        // still registered, which cannot happen; report it instead of blocking.
+        Err(TryRecvError::Disconnected) => Err(TestkitError::ConnectionClosed),
+    }
+}
+
+/// Acknowledges the pending configure and clears it (see
+/// [`TestWindow::apply_configure`]).
+fn ack_pending_configure(
+    xdg_surface: &xdg_surface::XdgSurface,
+    state: &WindowSlot,
+    conn: &Connection,
+) -> Result<()> {
+    let mut window = lock_window(state);
+    let Some(serial) = window.pending_serial.take() else {
+        return Err(TestkitError::NoPendingConfigure);
+    };
+    xdg_surface.ack_configure(serial);
+    window.applied_serial = Some(serial);
+    // The configured size only replaces the requested one when the compositor picked a
+    // size (`0` means "client chooses"); the role event already stored it, but a popup's
+    // `size` is only known here.
+    if let Some(configure) = window
+        .last_configure
+        .as_ref()
+        .filter(|configure| configure.serial == serial)
+    {
+        if configure.width > 0 && configure.height > 0 {
+            window.size = configure.size();
+        }
+    }
+    // A completed configure leaves no role event behind: `xdg_surface.configure` consumed
+    // it. A role event still carrying `serial == 0` belongs to the *next* sequence and
+    // must survive.
+    if window
+        .pending_configure
+        .as_ref()
+        .is_some_and(|configure| configure.serial != 0)
+    {
+        window.pending_configure = None;
+    }
+    drop(window);
+    flush(conn)
+}
 
 /// Description of a toplevel to create.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,10 +246,17 @@ pub struct TestWindow {
     configure_rx: Mutex<mpsc::Receiver<ConfiguredSize>>,
     /// The immutable description this window was created from.
     spec: ToplevelSpec,
+    /// Client state shared with the reader thread; used to deregister the slot on
+    /// [`destroy`](TestWindow::destroy).
+    client: Arc<Mutex<ClientState>>,
+    /// The request-side connection, so every mutation reaches the runtime even when the
+    /// caller never pumps (see [`flush`]).
+    conn: Connection,
 }
 
 impl TestWindow {
     /// Wires a new handle to its protocol objects (client-internal).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         surface: WlSurface,
         xdg_surface: xdg_surface::XdgSurface,
@@ -122,6 +264,8 @@ impl TestWindow {
         state: WindowSlot,
         configure_rx: mpsc::Receiver<ConfiguredSize>,
         spec: ToplevelSpec,
+        client: Arc<Mutex<ClientState>>,
+        conn: Connection,
     ) -> TestWindow {
         TestWindow {
             surface,
@@ -130,6 +274,8 @@ impl TestWindow {
             state,
             configure_rx: Mutex::new(configure_rx),
             spec,
+            client,
+            conn,
         }
     }
 
@@ -176,8 +322,7 @@ impl TestWindow {
     /// before the first `apply_configure` is a protocol error and fails here with
     /// [`TestkitError::NoPendingConfigure`](crate::TestkitError::NoPendingConfigure).
     pub fn commit_frame(&self, fill: FillPattern) -> Result<()> {
-        let _ = fill;
-        todo!("Phase 2: alloc buffer, attach + damage + commit")
+        commit_buffer(&self.surface, &self.state, &self.conn, fill)
     }
 
     /// Re-commits the currently attached buffer without allocating.
@@ -188,7 +333,7 @@ impl TestWindow {
     /// Used by [`resize`](TestWindow::resize) and by tests that need a second commit of
     /// identical pixels (damage must be empty for the second one).
     pub fn commit_pending(&self) -> Result<()> {
-        todo!("Phase 2: re-commit the attached buffer")
+        recommit_buffer(&self.surface, &self.state, &self.conn)
     }
 
     /// Waits for the next complete xdg configure (role event + serial).
@@ -198,8 +343,7 @@ impl TestWindow {
     /// Expiry is [`TestkitError::Timeout`](crate::TestkitError::Timeout) with `what = "xdg configure"`, a disconnected
     /// sender (surface destroyed / connection closed) is [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed).
     pub fn wait_for_configure(&self, timeout: Duration) -> Result<ConfiguredSize> {
-        let _ = timeout;
-        todo!("Phase 2: pending check, then recv_timeout; Timeout{{what: \"xdg configure\", timeout}}")
+        await_configure(&self.configure_rx, timeout)
     }
 
     /// Acknowledges the pending configure and clears it.
@@ -210,7 +354,7 @@ impl TestWindow {
     /// expected to commit a buffer of that size next (that is what makes the surface
     /// mapped).
     pub fn apply_configure(&self) -> Result<()> {
-        todo!("Phase 2: ack the pending serial on xdg_surface and clear pending state")
+        ack_pending_configure(&self.xdg_surface, &self.state, &self.conn)
     }
 
     /// The damage region of the most recent commit, or `None` before the first commit.
@@ -219,7 +363,7 @@ impl TestWindow {
     /// [`commit_frame`](TestWindow::commit_frame) damages the whole surface, so the hint is
     /// the full buffer and tests can assert the compositor observed exactly that.
     pub fn damage_hint(&self) -> Option<Rect> {
-        todo!("Phase 2: full-buffer rect for the last commit, None before the first commit")
+        lock_window(&self.state).last_damage
     }
 
     /// Changes the requested size and re-commits the current buffer.
@@ -229,8 +373,16 @@ impl TestWindow {
     /// the new size is legal. [`TestkitError::SurfaceDestroyed`](crate::TestkitError::SurfaceDestroyed) after
     /// [`destroy`](TestWindow::destroy).
     pub fn resize(&self, size: Size) -> Result<()> {
-        let _ = size;
-        todo!("Phase 2: update the desired size and commit_pending")
+        {
+            let mut window = lock_window(&self.state);
+            if window.destroyed {
+                return Err(TestkitError::SurfaceDestroyed);
+            }
+            window.size = size;
+        }
+        // The compositor answers the re-commit with a fresh configure; a buffer of the new
+        // size is only legal after that configure was applied.
+        self.commit_pending()
     }
 
     /// Sends `xdg_toplevel.set_title`.
@@ -238,8 +390,14 @@ impl TestWindow {
     /// Phase 2: `toplevel.set_title(title.to_string())` and mirror it into the window
     /// state; [`TestkitError::SurfaceDestroyed`](crate::TestkitError::SurfaceDestroyed) after [`destroy`](TestWindow::destroy).
     pub fn set_title(&self, title: &str) -> Result<()> {
-        let _ = title;
-        todo!("Phase 2: xdg_toplevel.set_title + mirror into window state")
+        let mut window = lock_window(&self.state);
+        if window.destroyed {
+            return Err(TestkitError::SurfaceDestroyed);
+        }
+        self.toplevel.set_title(title.to_string());
+        window.title = title.to_string();
+        drop(window);
+        flush(&self.conn)
     }
 
     /// Sends `xdg_toplevel.set_app_id`.
@@ -247,8 +405,14 @@ impl TestWindow {
     /// Phase 2: `toplevel.set_app_id(app_id.to_string())` and mirror it into the window
     /// state; [`TestkitError::SurfaceDestroyed`](crate::TestkitError::SurfaceDestroyed) after [`destroy`](TestWindow::destroy).
     pub fn set_app_id(&self, app_id: &str) -> Result<()> {
-        let _ = app_id;
-        todo!("Phase 2: xdg_toplevel.set_app_id + mirror into window state")
+        let mut window = lock_window(&self.state);
+        if window.destroyed {
+            return Err(TestkitError::SurfaceDestroyed);
+        }
+        self.toplevel.set_app_id(app_id.to_string());
+        window.app_id = app_id.to_string();
+        drop(window);
+        flush(&self.conn)
     }
 
     /// Destroys the toplevel, its xdg surface and its `wl_surface`.
@@ -259,7 +423,22 @@ impl TestWindow {
     /// later calls return [`TestkitError::SurfaceDestroyed`](crate::TestkitError::SurfaceDestroyed). Any buffer still attached is
     /// released with the surface.
     pub fn destroy(&self) -> Result<()> {
-        todo!("Phase 2: destroy role/surface objects, mark destroyed, deregister the slot")
+        // Capture the key before the proxies are gone: the slot is registered under it.
+        let surface_id = self.surface.id();
+        {
+            let mut window = lock_window(&self.state);
+            if window.destroyed {
+                return Err(TestkitError::SurfaceDestroyed);
+            }
+            window.destroyed = true;
+        }
+        // Role object first, then the xdg wrapper, then the surface itself; any buffer
+        // still attached is released by the compositor with the surface.
+        self.toplevel.destroy();
+        self.xdg_surface.destroy();
+        self.surface.destroy();
+        lock_client(&self.client).windows.remove(&surface_id);
+        flush(&self.conn)
     }
 
     /// Whether [`destroy`](TestWindow::destroy) already ran for this window.
@@ -318,10 +497,17 @@ pub struct TestPopup {
     configure_rx: Mutex<mpsc::Receiver<ConfiguredSize>>,
     /// The immutable description this popup was created from.
     spec: PopupSpec,
+    /// Client state shared with the reader thread; used to deregister the slot on
+    /// [`destroy`](TestPopup::destroy).
+    client: Arc<Mutex<ClientState>>,
+    /// The request-side connection, so every mutation reaches the runtime even when the
+    /// caller never pumps (see [`flush`]).
+    conn: Connection,
 }
 
 impl TestPopup {
     /// Wires a new popup handle to its protocol objects (client-internal).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         surface: WlSurface,
         xdg_surface: xdg_surface::XdgSurface,
@@ -329,6 +515,8 @@ impl TestPopup {
         state: WindowSlot,
         configure_rx: mpsc::Receiver<ConfiguredSize>,
         spec: PopupSpec,
+        client: Arc<Mutex<ClientState>>,
+        conn: Connection,
     ) -> TestPopup {
         TestPopup {
             surface,
@@ -337,6 +525,8 @@ impl TestPopup {
             state,
             configure_rx: Mutex::new(configure_rx),
             spec,
+            client,
+            conn,
         }
     }
 
@@ -354,8 +544,7 @@ impl TestPopup {
     /// commits one frame (same rules as [`TestWindow::commit_frame`], but popups have no
     /// toplevel states).
     pub fn commit_frame(&self, fill: FillPattern) -> Result<()> {
-        let _ = fill;
-        todo!("Phase 2: alloc buffer, attach + damage + commit")
+        commit_buffer(&self.surface, &self.state, &self.conn, fill)
     }
 
     /// Waits for the next complete xdg configure of this popup.
@@ -363,8 +552,7 @@ impl TestPopup {
     /// Phase 2: like [`TestWindow::wait_for_configure`], with
     /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) `what = "xdg configure"`.
     pub fn wait_for_configure(&self, timeout: Duration) -> Result<ConfiguredSize> {
-        let _ = timeout;
-        todo!("Phase 2: pending check, then recv_timeout")
+        await_configure(&self.configure_rx, timeout)
     }
 
     /// Acknowledges the pending popup configure.
@@ -372,12 +560,26 @@ impl TestPopup {
     /// Phase 2: `xdg_surface.ack_configure(pending_serial)`, clear pending state,
     /// [`TestkitError::NoPendingConfigure`](crate::TestkitError::NoPendingConfigure) when nothing is pending.
     pub fn apply_configure(&self) -> Result<()> {
-        todo!("Phase 2: ack the pending serial on xdg_surface")
+        ack_pending_configure(&self.xdg_surface, &self.state, &self.conn)
     }
 
     /// Destroys the popup, its xdg surface and its `wl_surface`; idempotent, like
     /// [`TestWindow::destroy`].
     pub fn destroy(&self) -> Result<()> {
-        todo!("Phase 2: destroy role/surface objects and mark destroyed")
+        let surface_id = self.surface.id();
+        {
+            let mut window = lock_window(&self.state);
+            if window.destroyed {
+                return Err(TestkitError::SurfaceDestroyed);
+            }
+            window.destroyed = true;
+        }
+        // Role object first, then the xdg wrapper, then the surface itself (see
+        // [`TestWindow::destroy`]).
+        self.popup.destroy();
+        self.xdg_surface.destroy();
+        self.surface.destroy();
+        lock_client(&self.client).windows.remove(&surface_id);
+        flush(&self.conn)
     }
 }
