@@ -113,7 +113,22 @@ pub fn default_socket_path() -> PathBuf {
 /// Returns a human-readable message when the value is not `WxH` with
 /// non-zero dimensions.
 pub fn parse_size(value: &str) -> std::result::Result<Size, String> {
-    todo!()
+    let trimmed = value.trim();
+    let (width, height) = trimmed
+        .split_once(['x', 'X'])
+        .ok_or_else(|| format!("invalid size `{value}`: expected WxH (e.g. 1280x800)"))?;
+    let width = width
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("invalid size `{value}`: `{}` is not a width", width.trim()))?;
+    let height = height
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("invalid size `{value}`: `{}` is not a height", height.trim()))?;
+    if width == 0 || height == 0 {
+        return Err(format!("invalid size `{value}`: dimensions must be non-zero"));
+    }
+    Ok(Size::new(width, height))
 }
 
 /// Parses a `--renderer` value: `auto`, `gl` or `pixman` (case-insensitive).
@@ -122,5 +137,147 @@ pub fn parse_size(value: &str) -> std::result::Result<Size, String> {
 ///
 /// Returns a human-readable message for any other value.
 pub fn parse_renderer(value: &str) -> std::result::Result<RendererKind, String> {
-    todo!()
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(RendererKind::Auto),
+        "gl" => Ok(RendererKind::Gl),
+        "pixman" => Ok(RendererKind::Pixman),
+        other => Err(format!(
+            "invalid renderer `{other}`: expected `auto`, `gl` or `pixman`"
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::sync::Mutex;
+
+    /// Serializes the environment-mutating tests below (the process environment
+    /// is global, so parallel tests would otherwise race).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Sets the given environment variables and restores them on drop.
+    struct EnvGuard(Vec<(String, Option<OsString>)>);
+
+    impl EnvGuard {
+        fn set(vars: &[(&str, Option<&str>)]) -> EnvGuard {
+            let saved = vars
+                .iter()
+                .map(|(key, _)| ((*key).to_owned(), std::env::var_os(key)))
+                .collect();
+            for (key, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+            EnvGuard(saved)
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (key, value) in &self.0 {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_size_accepts_wxh() {
+        assert_eq!(parse_size("1280x800"), Ok(Size::new(1280, 800)));
+        assert_eq!(parse_size("640X480"), Ok(Size::new(640, 480)));
+        assert_eq!(parse_size(" 1920 x 1080 "), Ok(Size::new(1920, 1080)));
+        assert_eq!(parse_size("1x1"), Ok(Size::new(1, 1)));
+    }
+
+    #[test]
+    fn parse_size_rejects_malformed_values() {
+        for value in [
+            "",
+            "1280",
+            "1280x",
+            "x800",
+            "1280x800x600",
+            "1280xabc",
+            "abcx800",
+        ] {
+            let error = parse_size(value).expect_err(value);
+            assert!(!error.is_empty(), "`{value}` should explain the failure");
+        }
+    }
+
+    #[test]
+    fn parse_size_rejects_zero_dimensions() {
+        assert!(parse_size("0x800").is_err());
+        assert!(parse_size("1280x0").is_err());
+        assert!(parse_size("0x0").is_err());
+    }
+
+    #[test]
+    fn parse_renderer_is_case_insensitive() {
+        assert_eq!(parse_renderer("auto"), Ok(RendererKind::Auto));
+        assert_eq!(parse_renderer("AUTO"), Ok(RendererKind::Auto));
+        assert_eq!(parse_renderer("Gl"), Ok(RendererKind::Gl));
+        assert_eq!(parse_renderer(" pixman "), Ok(RendererKind::Pixman));
+    }
+
+    #[test]
+    fn parse_renderer_rejects_unknown_kinds() {
+        for value in ["", "vulkan", "softwar"] {
+            let error = parse_renderer(value).expect_err(value);
+            assert!(
+                error.contains("auto"),
+                "`{error}` should list the accepted kinds"
+            );
+        }
+    }
+
+    #[test]
+    fn default_socket_path_prefers_adesk_socket() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env = EnvGuard::set(&[
+            ("ADESK_SOCKET", Some("/tmp/custom.sock")),
+            ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+        ]);
+        assert_eq!(default_socket_path(), PathBuf::from("/tmp/custom.sock"));
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_xdg_runtime_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env = EnvGuard::set(&[
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+        ]);
+        assert_eq!(
+            default_socket_path(),
+            PathBuf::from("/run/user/1000").join("adesk.sock")
+        );
+    }
+
+    #[test]
+    fn default_socket_path_falls_back_to_temp_dir() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+        let _env = EnvGuard::set(&[("ADESK_SOCKET", None), ("XDG_RUNTIME_DIR", None)]);
+        assert_eq!(default_socket_path(), std::env::temp_dir().join("adesk.sock"));
+    }
+
+    #[test]
+    fn config_builders_override_fields() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_output_size(Size::new(800, 600))
+            .with_renderer(RendererKind::Pixman)
+            .with_app_dirs(vec![PathBuf::from("/opt/apps")]);
+        assert_eq!(config.socket_path(), Path::new("/tmp/test.sock"));
+        assert_eq!(config.compositor.output_size, Size::new(800, 600));
+        assert_eq!(config.app_dirs, Some(vec![PathBuf::from("/opt/apps")]));
+
+        let replaced = config.with_socket_path("/tmp/other.sock");
+        assert_eq!(replaced.socket_path(), Path::new("/tmp/other.sock"));
+    }
 }

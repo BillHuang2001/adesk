@@ -1,16 +1,20 @@
 //! [`Server::start`] and the [`RunningServer`] handle.
 
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use adesk_app_registry::AppRegistry;
+use tokio::sync::watch;
+
+use adesk_app_registry::{AppRegistry, Clock, Correlator, MonotonicClock, RegistryOptions};
 use adesk_compositor::CompositorHandle;
 use adesk_observer::ObserverService;
 
 use crate::config::ServerConfig;
+use crate::connection::Connection;
 use crate::context::ServerContext;
 use crate::error::{Result, ServerError};
 use crate::shutdown::ShutdownHandle;
+use crate::socket::SocketListener;
 
 /// Runtime entry point.
 pub struct Server;
@@ -32,8 +36,115 @@ impl Server {
     /// [`ServerError::Io`] if the socket cannot be bound and
     /// [`ServerError::Registry`] if the registry cannot be built.
     pub async fn start(config: ServerConfig) -> Result<RunningServer, ServerError> {
-        todo!()
+        let config = Arc::new(config);
+
+        // 1. Compositor thread (sync spawn) + readiness.
+        let compositor = adesk_compositor::spawn(config.compositor.clone())?;
+        let ready = compositor.wait_ready().await?;
+        tracing::info!(
+            display = %ready.display_name,
+            renderer = ready.renderer.as_str(),
+            width = ready.output_size.w,
+            height = ready.output_size.h,
+            "compositor ready"
+        );
+
+        // 2. Application registry and correlator over one shared clock.
+        let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new());
+        let options = match config.app_dirs.as_ref() {
+            Some(dirs) => RegistryOptions::with_search_dirs(dirs.clone()),
+            None => RegistryOptions::xdg(),
+        }
+        .with_clock(Arc::clone(&clock));
+        let registry = Arc::new(AppRegistry::with_options(options));
+        let scan_registry = Arc::clone(&registry);
+        let report = tokio::task::spawn_blocking(move || scan_registry.scan()).await??;
+        tracing::info!(
+            apps = report.apps,
+            dirs = report.dirs_scanned,
+            skipped = report.skipped,
+            "application registry scanned"
+        );
+        let correlator = Arc::new(Mutex::new(Correlator::new(clock)));
+
+        // 3. Bind the AGP socket (stale file replaced, live socket refused).
+        let listener = SocketListener::bind(&config.socket_path).await?;
+        tracing::info!(socket = %listener.path().display(), "AGP socket bound");
+
+        // 4. Shared context + event pump (observer, fan-out, resync).
+        let observer = ObserverService::new();
+        let context = ServerContext::new(
+            Arc::clone(&config),
+            compositor.clone(),
+            observer.clone(),
+            Arc::clone(&registry),
+            Arc::clone(&correlator),
+        );
+        let _pump = crate::event_pump::spawn(context.clone());
+
+        // 5. Signal handlers + accept loop.
+        crate::shutdown::install_signal_handlers(context.shutdown.clone()).await?;
+        let (done_tx, done_rx) = watch::channel(false);
+        spawn_accept_loop(listener, context.clone(), done_tx);
+        tracing::info!("adesk-server serving");
+
+        let shutdown = context.shutdown.clone();
+        Ok(RunningServer {
+            inner: Arc::new(RunningInner {
+                config,
+                compositor,
+                observer,
+                registry,
+                shutdown,
+                done: done_rx,
+                context,
+            }),
+        })
     }
+}
+
+/// Accepts connections until shutdown, then runs the ordered teardown.
+///
+/// This task owns the listener and is the only place that runs
+/// [`crate::shutdown::run`]: it is woken both by [`ShutdownHandle::initiate`]
+/// (signal handlers or [`RunningServer::shutdown`]) and by accept failures. The
+/// `done` watch resolves only after the teardown completed, so
+/// [`RunningServer::wait`] never returns while the socket file still exists.
+fn spawn_accept_loop(
+    listener: SocketListener,
+    context: ServerContext,
+    done: watch::Sender<bool>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                () = context.shutdown.cancelled() => break,
+                accepted = listener.accept() => match accepted {
+                    Ok(stream) => {
+                        let connection = Connection::new(stream, context.clone());
+                        tokio::spawn(async move {
+                            if let Err(error) = connection.run().await {
+                                tracing::debug!(%error, "connection ended with an error");
+                            }
+                        });
+                    }
+                    Err(error) => {
+                        if context.shutdown.is_shutting_down() {
+                            break;
+                        }
+                        tracing::warn!(%error, "accept failed");
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                },
+            }
+        }
+        tracing::debug!("accept loop stopped; running ordered shutdown");
+        if let Err(error) = crate::shutdown::run(&context).await {
+            tracing::error!(%error, "ordered shutdown failed");
+        }
+        let _ = done.send(true);
+    })
 }
 
 /// Handle to a running runtime; cheap to clone.
@@ -103,7 +214,13 @@ impl RunningServer {
     /// Returns `Ok(())` after a clean shutdown and [`ServerError::Internal`] if
     /// a background task failed.
     pub async fn wait(&self) -> Result<(), ServerError> {
-        todo!()
+        let mut done = self.inner.done.clone();
+        while !*done.borrow_and_update() {
+            done.changed().await.map_err(|_| {
+                ServerError::Internal("runtime stopped before shutdown completed".to_owned())
+            })?;
+        }
+        Ok(())
     }
 
     /// Initiates and awaits a clean shutdown; idempotent.
@@ -111,6 +228,7 @@ impl RunningServer {
     /// Stops accepting, fails in-flight requests with `shutting_down`, drops the
     /// Wayland display, removes the socket file.
     pub async fn shutdown(&self) -> Result<(), ServerError> {
-        todo!()
+        self.inner.shutdown.initiate();
+        self.wait().await
     }
 }
