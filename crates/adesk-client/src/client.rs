@@ -24,8 +24,12 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Resolve the default socket path the runtime listens on.
 ///
 /// Order: `$ADESK_SOCKET`, then `$XDG_RUNTIME_DIR/adesk.sock`, then
-/// `/tmp/adesk.sock` (matches the server's `--socket` / `ADESK_SOCKET` rules,
-/// protocol §1).
+/// `<system temp directory>/adesk.sock` (protocol §1).
+///
+/// The final fallback is `std::env::temp_dir().join("adesk.sock")`, which
+/// honours `$TMPDIR`; it is the exact expression
+/// `adesk_server::default_socket_path()` uses, so a default-configured client
+/// and a default-configured server meet under any `TMPDIR`.
 pub fn default_socket_path() -> PathBuf {
     if let Some(path) = std::env::var_os("ADESK_SOCKET") {
         return PathBuf::from(path);
@@ -33,7 +37,7 @@ pub fn default_socket_path() -> PathBuf {
     if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
         return PathBuf::from(dir).join("adesk.sock");
     }
-    PathBuf::from("/tmp/adesk.sock")
+    std::env::temp_dir().join("adesk.sock")
 }
 
 /// Options for [`Client::connect_with`].

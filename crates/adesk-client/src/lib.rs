@@ -31,7 +31,7 @@
 //! use adesk_core::WindowId;
 //!
 //! # async fn demo() -> Result<(), adesk_client::ClientError> {
-//! // $ADESK_SOCKET, else $XDG_RUNTIME_DIR/adesk.sock
+//! // $ADESK_SOCKET, else $XDG_RUNTIME_DIR/adesk.sock, else <system temp dir>/adesk.sock
 //! let client = Client::connect_default().await?;
 //!
 //! let info = client.ping().await?;

@@ -82,7 +82,7 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 | §5.6 subscribe/unsubscribe methods | `./src/api/subscribe.rs` |
 | §5.7 inspector methods, inspect request types | `./src/api/inspect.rs` |
 | Mock AGP server harness (tests only) | `./tests/common/mod.rs` |
-| Integration tests (api, concurrency, errors, events, framing, version, images) | `./tests/` |
+| Integration tests (api, concurrency, errors, events, framing, socket_path, version, images) | `./tests/` |
 
 ## Design Decisions
 
@@ -111,6 +111,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/framing.rs` — malformed JSON → `Protocol`; a line above `max_frame_len` → `Protocol`; EOF with requests in flight → `Closed`.
 - `tests/version.rs` — `ping` with a mismatched `protocol_version` → `VersionMismatch`; `connect` fails by default, `verify_version(false)` connects.
 - `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format rejected at the wire boundary, truncated PNG) and client-owned extras for length/stride/dimension mismatches.
+- `tests/socket_path.rs` — `default_socket_path()` resolution order. The fallback branch is reachable only with `$ADESK_SOCKET` and `$XDG_RUNTIME_DIR` unset, which the ambient environment does not guarantee, so each case asserts in a **child** process of the test binary with a controlled environment (`Command::env`/`env_remove` affect the child only); the suite never mutates its own process environment. The fallback case pins `$TMPDIR` to a private dir, so a hard-coded path fails.
 - Determinism: no sleeps longer than needed, deadlines explicit, `tokio::time::pause()` only if `test-util` is enabled in dev-deps, otherwise real time with generous margins (`docs/architecture.md` §10).
 
 ## Dependencies
@@ -147,7 +148,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 ## Status
 
 Implementation-complete: zero `todo!()`, no skeleton-phase `allow` attributes (the only one left is the harness's `#![allow(dead_code)]`, explained above).
-`bash scripts/dev.sh cargo test -p adesk-client` is green: 58 integration tests (api 30, events 7, images 10, errors 3, framing 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
+`bash scripts/dev.sh cargo test -p adesk-client` is green: 61 integration tests (api 30, events 7, images 10, errors 3, framing 3, socket_path 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
 `adesk-agent` and `adesk-testkit` may build on this surface.
 
 ## See Also
