@@ -10,9 +10,9 @@
 //!
 //! - a real `tokio::net::UnixListener` bound to `<tempdir>/adesk.sock`; the
 //!   [`TempDir`] owns the path and removes it when the server drops,
-//! - NDJSON framing through `adesk_proto::{Codec, Frame, Request, Response,
-//!   EventFrame, ErrorPayload}` — exactly the proto surface required by
-//!   `crates/adesk-client/CONTEXT.md` → "Dependencies",
+//! - NDJSON framing through `adesk_proto::{NdjsonCodec, Frame, RequestFrame,
+//!   ResponseFrame, EventFrame, ErrorPayload}` — exactly the proto surface
+//!   required by `crates/adesk-client/CONTEXT.md` → "Dependencies",
 //! - exactly one accepted client connection, split into read/write halves,
 //! - a scriptable peer: the test reads requests and chooses what to write back
 //!   (result frames, error frames, raw lines, event frames, or a close).
@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use adesk_core::ErrorCode;
-use adesk_proto::{Codec, ErrorPayload, EventFrame, Frame, Request, Response};
+use adesk_proto::{ErrorPayload, EventFrame, Frame, NdjsonCodec, RequestFrame, ResponseFrame};
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -52,7 +52,7 @@ pub struct MockServer {
     /// Write half of the accepted connection (responses, events, raw lines).
     writer: Option<OwnedWriteHalf>,
     /// NDJSON codec — the same `adesk-proto` codec the runtime uses.
-    codec: Codec,
+    codec: NdjsonCodec,
 }
 
 impl MockServer {
@@ -76,19 +76,19 @@ impl MockServer {
     /// Panics if the client sends anything that is not a well-formed NDJSON
     /// `Frame::Request` (that is a client bug, not a server behaviour to model).
     pub async fn next_request(&mut self) -> (u64, String, Value) {
-        todo!("read one newline-terminated line, Codec::decode it, and destructure Frame::Request into (id, method, params)")
+        todo!("read one newline-terminated line, NdjsonCodec::decode it, and destructure Frame::Request into (id, method, params)")
     }
 
-    /// Answer request `id` with `result` (a `Response::Result` frame).
+    /// Answer request `id` with `result` (a `ResponseOutcome::Result` frame).
     pub async fn respond(&mut self, id: u64, result: Value) {
-        todo!("write the encoded Response::Result frame for id and flush")
+        todo!("write the encoded ResponseFrame with ResponseOutcome::Result for id and flush")
     }
 
     /// Answer request `id` with an AGP error frame (protocol §6).
     ///
     /// The wire `data` object is omitted; the client drops it anyway.
     pub async fn respond_error(&mut self, id: u64, code: ErrorCode, message: &str) {
-        todo!("build ErrorPayload with code + message, wrap it as Response::Error for id, write and flush")
+        todo!("build ErrorPayload with code + message, wrap it as ResponseOutcome::Error for id, write and flush")
     }
 
     /// Write `line` verbatim plus a trailing newline (malformed/oversized tests).
@@ -111,18 +111,18 @@ impl MockServer {
 ///
 /// Shared by every sender above so the harness writes exactly the bytes the
 /// runtime would (protocol §1). A codec error is a harness bug: panic.
-fn encode_frame(codec: &Codec, frame: &Frame) -> Vec<u8> {
-    todo!("Codec::encode(frame); a failure is a test-harness bug and may panic")
+fn encode_frame(codec: &NdjsonCodec, frame: &Frame) -> Vec<u8> {
+    todo!("NdjsonCodec::encode(frame); a failure is a test-harness bug and may panic")
 }
 
-/// Build the `Response::Result` frame for `id`.
-fn result_response(id: u64, result: Value) -> Response {
-    todo!("Response::Result with the given id and result value")
+/// Build the success `ResponseFrame` for `id`.
+fn result_response(id: u64, result: Value) -> ResponseFrame {
+    todo!("ResponseFrame with ResponseOutcome::Result for the given id and result value")
 }
 
-/// Build the `Response::Error` frame for `id` from an AGP error object.
-fn error_response(id: u64, error: ErrorPayload) -> Response {
-    todo!("Response::Error with the given id and ErrorPayload")
+/// Build the error `ResponseFrame` for `id` from an AGP error object.
+fn error_response(id: u64, error: ErrorPayload) -> ResponseFrame {
+    todo!("ResponseFrame with ResponseOutcome::Error for the given id and ErrorPayload")
 }
 
 /// Build the `EventFrame` for one pushed event (protocol §5.6).
@@ -130,7 +130,7 @@ fn event_frame(name: &str, seq: u64, ts_ms: u64, data: Value) -> EventFrame {
     todo!("EventFrame with event = name, seq, ts_ms, data")
 }
 
-/// Split a decoded `Request` frame into `(id, method, params)`.
-fn request_parts(request: Request) -> (u64, String, Value) {
-    todo!("destructure Request into id, method and params")
+/// Split a decoded `RequestFrame` into `(id, method, params)`.
+fn request_parts(request: RequestFrame) -> (u64, String, Value) {
+    todo!("destructure RequestFrame into id, method name and params")
 }

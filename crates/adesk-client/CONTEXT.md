@@ -117,12 +117,12 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `adesk-core` (ids, geometry, `WindowInfo`/`AppInfo`, `Observation`, `RuntimeEvent`, `ErrorCode`, `ImageBuffer`), `adesk-proto` (wire frames/payloads), `tokio` (net/sync/io-util/rt), `futures` (`Stream`), `serde`/`serde_json`, `base64`, `image` (PNG decode), `thiserror`, `tracing`; dev: `tempfile`.
 - **Required `adesk-proto` surface** (the client's entire coupling — reconcile here first if proto's API differs):
   - `PROTOCOL_VERSION: u32`
-  - `Codec::new()`, `Codec::encode(&Frame) -> Result<Vec<u8>, _>` (NDJSON line with `\n`), `Codec::decode(&[u8]) -> Result<Frame, _>` (one line, no `\n`)
-  - `Frame::{Request(Request), Response(Response), Event(EventFrame)}`
-  - `Request { id: u64, method: String, params: serde_json::Value }`
-  - `Response::{Result{id: u64, result: Value}, Error{id: u64, error: ErrorPayload}}`
-  - `EventFrame { event: String, seq: u64, ts_ms: u64, data: Value }`
-  - `ErrorPayload { code: adesk_core::ErrorCode, message: String, .. }`
+  - `Codec` trait (`encode(&Frame) -> Result<Vec<u8>, _>`, `decode(&[u8]) -> Result<Frame, _>`, both terminator-free) implemented by the unit struct `NdjsonCodec`
+  - `Frame::{Request(RequestFrame), Response(ResponseFrame), Event(EventFrame)}`
+  - `RequestFrame { id: u64, method: Method }` + `RequestFrame::new`, and `Method::from_parts(name: &str, params: Value) -> Result<Method>` (the typed method vocabulary)
+  - `ResponseFrame { id: u64, outcome: ResponseOutcome }`, `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, `ResultPayload::as_value() -> &Value`
+  - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }`; `EventKind` serialises as a snake_case string; `EventPayload::to_data() -> Result<Value>`
+  - `ErrorPayload { code: adesk_core::ErrorCode, message: String, data: Option<Value> }` (`data` deliberately dropped by the client)
   - `ImagePayload { width, height, format, stride, data, scale }` with a `Png`/`Rgba8` format enum and base64 `data`
 
 ## Known Issues
