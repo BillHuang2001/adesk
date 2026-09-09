@@ -95,7 +95,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - Command: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` — 80 tests: 44 lib unit, 10 `tests/agent_loop.rs`, 7 `tests/context_budget.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`.
 - Default features run 60 (loop/scenario suites are `#![cfg(feature = "test-support")]`); CI must pass the feature flag.
 - `./scripts/dev.sh cargo check -p adesk-agent --all-targets [--features test-support,e2e]` and `clippy -D warnings` are clean; `cargo run -p adesk-agent -- --help` documents the CLI and a missing target exits 2.
-- `tests/e2e_runtime.rs` — feature-gated plan with no test bodies until `adesk-testkit` lands; it will drive `AgpClient` against a real in-process runtime with the pixman renderer (Phase 3/4 integration).
+- `tests/e2e_runtime.rs` — feature-gated plan with no test bodies yet; it will drive `AgpClient` against a real in-process runtime via `adesk-testkit` (pixman).
 - No test needs a display, GPU, network or installed application; the OpenAI HTTP path is untested by design — its pure `build_chat_request`/`parse_decision` helpers carry the coverage.
 
 ## Notes for Agents
