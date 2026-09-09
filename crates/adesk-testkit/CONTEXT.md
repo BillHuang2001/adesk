@@ -65,7 +65,7 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 
 - Self-tests live in `tests/`: `runtime.rs` (start/stop, ping, renderer, drop), `wayland_client.rs` (toplevel appears in `list_windows` with the tiling configure, commit → `SurfaceCommit`, captured pixels match the fill, popups, resize), `fixtures.rs` (`.desktop` writing, launch path, helper process), `assertions.rs` (ImageAssert/EventAssert/`wait_until` self-checks), `api_surface.rs` (signature stability), `e2e_launch_observe.rs` (capstone: launch → observe → capture → input → close round trip) and `e2e_close.rs` (cooperating-client proof that `close_window` really sends `xdg_toplevel.close`).
 - Unit tests inside `src/assert/`, `src/fixtures/` and `src/bin/adesk-test-app.rs` cover the already-implemented plumbing.
-- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; two tests fail only because of sibling crates (see Known Issues).
+- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; the full suite passes (46 tests + 3 doctests, 0 failures) and no test is `#[ignore]`d or env-gated except the GL paths (which skip cleanly without `ADESK_TEST_GL=1`).
 - No test needs a display, GPU, network or installed app; the helper binary is built by cargo (`env!("CARGO_BIN_EXE_adesk-test-app")` is available to this package's integration tests).
 - Launch tests mutate the process env; the harness serializes env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 
