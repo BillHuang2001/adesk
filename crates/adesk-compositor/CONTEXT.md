@@ -197,7 +197,6 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 
 ## Known Issues
 
-- `WmBridge::note_launch` has no AGP command feeding it; the server-side `adesk_app_registry::Correlator` is the active launch→window correlation path. The compositor-local ledger is kept and unit-tested but unreachable from the wire.
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
