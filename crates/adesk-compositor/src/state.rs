@@ -102,7 +102,9 @@ impl State {
         let xdg_shell_state = XdgShellState::new::<State>(display);
 
         let mut seat_state = SeatState::<State>::new();
-        let seat = seat_state.new_wl_seat::<State>(display, "seat-0");
+        // No turbofish: the method's generic parameter is the seat *name* type
+        // (`N: Into<String>`); the state type comes from `SeatState<State>`.
+        let seat = seat_state.new_wl_seat(display, "seat-0");
         let input = InputInjector::new(&seat, &config.xkb)?;
 
         let shm_state =
@@ -275,7 +277,9 @@ fn create_output(config: &CompositorConfig, display: &DisplayHandle) -> Output {
     let output = Output::new(
         "ADesk-1".to_owned(),
         PhysicalProperties {
-            size: config.physical_size(),
+            // `PhysicalProperties.size` is the monitor size in *millimeters*;
+            // the pixel size is advertised through `Mode` below.
+            size: config.monitor_size_mm(),
             subpixel: Subpixel::Unknown,
             make: "ADesk".to_owned(),
             model: "Virtual".to_owned(),

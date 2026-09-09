@@ -168,9 +168,19 @@ impl CompositorConfig {
         self
     }
 
-    /// The output size as a Smithay physical size.
+    /// The output size in pixels as a Smithay physical size (`wl_output` mode).
     pub(crate) fn physical_size(&self) -> smithay::utils::Size<i32, smithay::utils::Physical> {
         smithay::utils::Size::from((self.output_size.w as i32, self.output_size.h as i32))
+    }
+
+    /// The virtual monitor size in millimeters for `wl_output` geometry.
+    ///
+    /// The headless output has no real panel, so we report the size its pixels
+    /// would occupy at 96 DPI (rounded up to at least 1mm per axis). This keeps
+    /// DPI-derived client heuristics sane; the pixel size lives in `Mode`.
+    pub(crate) fn monitor_size_mm(&self) -> smithay::utils::Size<i32, smithay::utils::Raw> {
+        let to_mm = |px: u32| ((px as f64) * 25.4 / 96.0).round().max(1.0) as i32;
+        smithay::utils::Size::from((to_mm(self.output_size.w), to_mm(self.output_size.h)))
     }
 }
 
@@ -205,6 +215,16 @@ mod tests {
         assert_eq!(RendererName::Gl.as_str(), "gl");
         assert_eq!(RendererName::Pixman.as_str(), "pixman");
         assert_eq!(RendererName::Pixman.to_string(), "pixman");
+    }
+
+    #[test]
+    fn monitor_size_is_millimeters_at_96_dpi() {
+        // 1280x800 px at 96 DPI -> 339x212 mm (wl_output geometry, not pixels).
+        let config = CompositorConfig::default();
+        assert_eq!(config.monitor_size_mm(), smithay::utils::Size::from((339, 212)));
+        // Degenerate sizes still report at least 1mm per axis.
+        let tiny = CompositorConfig::new().with_output_size(Size { w: 0, h: 1 });
+        assert_eq!(tiny.monitor_size_mm(), smithay::utils::Size::from((1, 1)));
     }
 
     #[test]
