@@ -158,25 +158,55 @@ impl AgentDecision {
     /// The kind of action this decision represents (used by metrics and
     /// scenario expectations).
     pub fn kind(&self) -> ActionKind {
-        todo!("phase 2: map decision -> ActionKind")
+        match self {
+            Self::ListApps { .. } => ActionKind::ListApps,
+            Self::ListWindows => ActionKind::ListWindows,
+            Self::GetWindow { .. } => ActionKind::GetWindow,
+            Self::LaunchApp { .. } => ActionKind::LaunchApp,
+            Self::ActivateWindow { .. } => ActionKind::ActivateWindow,
+            Self::CloseWindow { .. } => ActionKind::CloseWindow,
+            Self::Capture { .. } => ActionKind::Capture,
+            Self::Observe { .. } => ActionKind::Observe,
+            Self::Wait { .. } => ActionKind::Wait,
+            Self::Click { .. } => ActionKind::Click,
+            Self::Type { .. } => ActionKind::TypeText,
+            Self::Keypress { .. } => ActionKind::Keypress,
+            Self::Scroll { .. } => ActionKind::Scroll,
+            Self::Finish { .. } => ActionKind::Finish,
+        }
     }
 
     /// True for decisions delivered through the Wayland seat (application input).
+    ///
+    /// [`Self::Finish`] is neither input nor runtime-native: it changes no
+    /// runtime state and injects no events.
     pub fn is_input(&self) -> bool {
-        todo!("phase 2: Click/Type/Keypress/Scroll")
+        matches!(
+            self,
+            Self::Click { .. } | Self::Type { .. } | Self::Keypress { .. } | Self::Scroll { .. }
+        )
     }
 
     /// True for decisions that read or mutate runtime state directly
     /// (list/launch/activate/close/capture/observe/wait).
     pub fn is_runtime(&self) -> bool {
-        todo!("phase 2: runtime-native operations")
+        matches!(
+            self,
+            Self::ListApps { .. }
+                | Self::ListWindows
+                | Self::GetWindow { .. }
+                | Self::LaunchApp { .. }
+                | Self::ActivateWindow { .. }
+                | Self::CloseWindow { .. }
+                | Self::Capture { .. }
+                | Self::Observe { .. }
+                | Self::Wait { .. }
+        )
     }
 }
 
 /// Stable classifier for decisions, used in metrics and scenario expectations.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ActionKind {
     /// `list_apps`.
@@ -211,8 +241,26 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Snake-case name, stable for reports and logs.
+    ///
+    /// These are the AGP method names the decision maps to (`capture_window`,
+    /// `type_text`, ...), so logs and metrics line up with `docs/protocol.md`.
     pub fn as_str(&self) -> &'static str {
-        todo!("phase 2: snake_case names")
+        match self {
+            Self::ListApps => "list_apps",
+            Self::ListWindows => "list_windows",
+            Self::GetWindow => "get_window",
+            Self::LaunchApp => "launch_app",
+            Self::ActivateWindow => "activate_window",
+            Self::CloseWindow => "close_window",
+            Self::Capture => "capture_window",
+            Self::Observe => "observe",
+            Self::Wait => "wait",
+            Self::Click => "click",
+            Self::TypeText => "type_text",
+            Self::Keypress => "keypress",
+            Self::Scroll => "scroll",
+            Self::Finish => "finish",
+        }
     }
 }
 
@@ -233,4 +281,232 @@ pub enum ObserveCondition {
     Change,
     /// Wait the full timeout and report what accumulated (animation sampling).
     Timeout,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn window() -> WindowId {
+        WindowId(7)
+    }
+
+    /// One decision per variant, with the kind it must report.
+    fn vocabulary() -> Vec<(AgentDecision, ActionKind)> {
+        use ActionKind as K;
+        vec![
+            (
+                AgentDecision::ListApps {
+                    query: Some("fire".into()),
+                },
+                K::ListApps,
+            ),
+            (AgentDecision::ListWindows, K::ListWindows),
+            (
+                AgentDecision::GetWindow {
+                    window_id: window(),
+                },
+                K::GetWindow,
+            ),
+            (
+                AgentDecision::LaunchApp {
+                    app_id: AppId("org.example.app".into()),
+                    args: vec!["--flag".into()],
+                },
+                K::LaunchApp,
+            ),
+            (
+                AgentDecision::ActivateWindow {
+                    window_id: window(),
+                },
+                K::ActivateWindow,
+            ),
+            (
+                AgentDecision::CloseWindow {
+                    window_id: window(),
+                },
+                K::CloseWindow,
+            ),
+            (
+                AgentDecision::Capture {
+                    window_id: window(),
+                    region: Some(Rect::new(0, 0, 10, 10)),
+                    max_dimension: Some(512),
+                },
+                K::Capture,
+            ),
+            (
+                AgentDecision::Observe {
+                    window_id: Some(window()),
+                    after_action: Some(ActionId(3)),
+                    until: ObserveCondition::Quiet { quiet_ms: 250 },
+                    timeout_ms: Some(1_000),
+                    include_image: Some(false),
+                    max_dimension: None,
+                    region: None,
+                },
+                K::Observe,
+            ),
+            (
+                AgentDecision::Wait {
+                    window_id: None,
+                    until: ObserveCondition::Change,
+                    timeout_ms: None,
+                },
+                K::Wait,
+            ),
+            (
+                AgentDecision::Click {
+                    window_id: window(),
+                    position: Position::normalized(0.5, 0.5),
+                    button: Button::Left,
+                    count: 1,
+                },
+                K::Click,
+            ),
+            (
+                AgentDecision::Type {
+                    window_id: None,
+                    text: "hello".into(),
+                },
+                K::TypeText,
+            ),
+            (
+                AgentDecision::Keypress {
+                    window_id: None,
+                    keys: vec!["CTRL".into(), "L".into()],
+                },
+                K::Keypress,
+            ),
+            (
+                AgentDecision::Scroll {
+                    window_id: window(),
+                    position: Position::pixels(10, 20),
+                    dx: 0.0,
+                    dy: -3.0,
+                },
+                K::Scroll,
+            ),
+            (
+                AgentDecision::Finish {
+                    success: true,
+                    summary: "done".into(),
+                },
+                K::Finish,
+            ),
+        ]
+    }
+
+    #[test]
+    fn kind_maps_every_variant() {
+        let vocabulary = vocabulary();
+        assert_eq!(vocabulary.len(), 14);
+        for (decision, expected) in &vocabulary {
+            assert_eq!(decision.kind(), *expected, "kind of {decision:?}");
+        }
+    }
+
+    /// Runtime-native and seat-input decisions partition everything except
+    /// `Finish`, which is neither.
+    #[test]
+    fn input_and_runtime_are_disjoint_and_leave_finish_out() {
+        for (decision, kind) in vocabulary() {
+            let input = decision.is_input();
+            let runtime = decision.is_runtime();
+            assert!(
+                !(input && runtime),
+                "{decision:?} is both input and runtime"
+            );
+            match kind {
+                ActionKind::Click
+                | ActionKind::TypeText
+                | ActionKind::Keypress
+                | ActionKind::Scroll => assert!(input, "{decision:?} should be input"),
+                ActionKind::Finish => {
+                    assert!(!input && !runtime, "Finish is neither input nor runtime")
+                }
+                _ => assert!(runtime, "{decision:?} should be runtime-native"),
+            }
+        }
+    }
+
+    /// The wire shape is one flat object tagged by `op`, with serde defaults for
+    /// the optional fields — this is the schema the LLM is prompted to emit.
+    #[test]
+    fn json_shape_is_flat_and_defaults_are_applied() {
+        assert_eq!(
+            serde_json::to_value(AgentDecision::ListWindows).unwrap(),
+            serde_json::json!({"op": "list_windows"})
+        );
+        assert_eq!(
+            serde_json::to_value(AgentDecision::ListApps { query: None }).unwrap(),
+            serde_json::json!({"op": "list_apps", "query": null})
+        );
+
+        // `until` defaults to `change` and `count` defaults to 1 when omitted.
+        let click: AgentDecision = serde_json::from_value(serde_json::json!({
+            "op": "click",
+            "window_id": 7,
+            "position": {"type": "normalized", "x": 0.5, "y": 0.25},
+        }))
+        .unwrap();
+        assert_eq!(
+            click,
+            AgentDecision::Click {
+                window_id: window(),
+                position: Position::normalized(0.5, 0.25),
+                button: Button::Left,
+                count: 1,
+            }
+        );
+
+        let wait: AgentDecision = serde_json::from_value(serde_json::json!({
+            "op": "wait",
+            "window_id": 7,
+        }))
+        .unwrap();
+        assert_eq!(
+            wait,
+            AgentDecision::Wait {
+                window_id: Some(window()),
+                until: ObserveCondition::Change,
+                timeout_ms: None,
+            }
+        );
+
+        assert_eq!(
+            serde_json::to_value(ObserveCondition::Quiet { quiet_ms: 250 }).unwrap(),
+            serde_json::json!({"type": "quiet", "quiet_ms": 250})
+        );
+        assert_eq!(ObserveCondition::default(), ObserveCondition::Change);
+        assert_eq!(
+            serde_json::to_value(ObserveCondition::Timeout).unwrap(),
+            serde_json::json!({"type": "timeout"})
+        );
+    }
+
+    /// Every kind has a distinct, stable snake-case name; the serde name is the
+    /// same vocabulary minus the `_window` suffix AGP adds to `capture`.
+    #[test]
+    fn action_kind_names_are_stable() {
+        let mut names: Vec<&str> = vocabulary()
+            .into_iter()
+            .map(|(_, kind)| kind.as_str())
+            .collect();
+        names.sort_unstable();
+        let unique = names.len();
+        names.dedup();
+        assert_eq!(names.len(), unique, "duplicate ActionKind::as_str names");
+
+        assert_eq!(ActionKind::ListApps.as_str(), "list_apps");
+        assert_eq!(ActionKind::Capture.as_str(), "capture_window");
+        assert_eq!(ActionKind::TypeText.as_str(), "type_text");
+        assert_eq!(ActionKind::Finish.as_str(), "finish");
+        for name in names {
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c == '_'),
+                "{name} is not snake_case"
+            );
+        }
+    }
 }
