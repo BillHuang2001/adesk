@@ -26,8 +26,7 @@
             libglvnd         # libEGL / libGLESv2 (dlopen'd by smithay backend_egl)
             libinput
             systemd          # libudev
-            libseat
-            seatd
+            seatd            # libseat + seatd daemon
             dbus             # reserved for future AT-SPI integration
           ];
         in
