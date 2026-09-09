@@ -1,0 +1,45 @@
+# adesk-server — the ADesk runtime binary and AGP server.
+#
+# Composes every other crate: starts the compositor thread, binds the AGP Unix
+# socket, pumps RuntimeEvents into the observer and the subscription fan-out,
+# and dispatches every AGP v1 method (docs/protocol.md §5). Dependency versions
+# are declared once in the root workspace manifest ([workspace.dependencies]);
+# this crate only references them so versions can never drift.
+[package]
+name = "adesk-server"
+description = "ADesk runtime binary and AGP server: composes the compositor, observer, app registry and inspector behind a Unix socket."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "adesk_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adesk-server"
+path = "src/main.rs"
+
+[dependencies]
+adesk-core.workspace = true
+adesk-proto.workspace = true
+adesk-compositor.workspace = true
+adesk-observer.workspace = true
+adesk-app-registry.workspace = true
+adesk-inspector.workspace = true
+adesk-render.workspace = true
+adesk-wm.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+image.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+# No dev-dependencies yet: Phase 1 has no test targets. Phase 2 adds
+# `adesk-testkit` (harness), `adesk-client` (protocol driver) and `tempfile`
+# (temp sockets) when `./tests/` suites land — see ./tests/CONTEXT.md.
