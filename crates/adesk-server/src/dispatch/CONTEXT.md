@@ -1,0 +1,78 @@
+# dispatch — AGP §5 request handlers
+
+## Intent
+
+`src/dispatch/` implements every AGP method of `docs/protocol.md` §5.1–§5.7: one handler per method, one response per request, no panic on a request path.
+`mod.rs` owns the router (`Dispatcher::dispatch`), the error→wire conversion (`error_response`) and the outbound-sink seam.
+Each group file owns one protocol section: `runtime.rs` §5.1, `apps.rs` §5.2, `windows.rs` §5.3, `capture.rs` §5.4, `input.rs` §5.5, `events.rs` §5.6, `inspect.rs` §5.7.
+Handlers are thin adapters: they translate proto params into sibling-crate calls (`adesk-compositor`, `adesk-observer`, `adesk-app-registry`, `adesk-inspector`) and never re-implement sibling logic.
+
+## API Surface
+
+Router (`mod.rs`):
+- `RequestContext<'a> { server: &'a ServerContext, session: &'a Session }` — the only handle handlers receive.
+- `Dispatcher::new(ServerContext)` / `context()` / `async dispatch(&Session, RequestFrame) -> ResponseFrame` — total over `adesk_proto::Method`; every `Err` becomes `error_response` and the connection stays open.
+- `error_response(id, &ServerError) -> ResponseFrame` = `ResponseFrame::error(id, error.payload())`.
+- Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)` (see Known Issues).
+
+Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>Params) -> Result<<Proto>Result>`:
+- `runtime::ping`.
+- `apps::{list_apps, get_app, launch_app}`.
+- `windows::{list_windows, get_window, activate_window, close_window, get_focus}`.
+- `capture::{capture_window, capture_region, observe, wait_for_change, wait_for_quiet}`.
+- `input::{pointer_move, click, double_click, mouse_down, mouse_up, scroll, drag, keypress, key_down, key_up, type_text}`.
+- `events::{subscribe_events, unsubscribe_events}`.
+- `inspect::{inspect_capture, inspect_subscribe}`.
+
+Shared internal helpers (not public API):
+- `windows.rs` is the canonical home of the compositor bridge: `pub(super) async state(ctx) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(super) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(super) unknown_window(WindowId) -> ServerError`.
+- `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale`, shared with `inspect.rs`), `source_size`, `observed_window`.
+- `apps.rs`: `next_launch_seq(watermark)` allocates the server-side sequence for `AppLaunched`.
+
+## Routing Table
+
+| Area | Owner |
+|---|---|
+| Router, `RequestContext`, `error_response`, outbound-sink seam | `./mod.rs` |
+| §5.1 `ping` | `./runtime.rs` |
+| §5.2 `list_apps`, `get_app`, `launch_app` | `./apps.rs` |
+| §5.3 `list_windows`, `get_window`, `activate_window`, `close_window`, `get_focus` + canonical bridge helpers | `./windows.rs` |
+| §5.4 `capture_window`, `capture_region`, `observe`, `wait_for_change`, `wait_for_quiet` | `./capture.rs` |
+| §5.5 `pointer_move`, `click`, `double_click`, `mouse_down`, `mouse_up`, `scroll`, `drag`, `keypress`, `key_down`, `key_up`, `type_text` | `./input.rs` |
+| §5.6 `subscribe_events`, `unsubscribe_events` | `./events.rs` |
+| §5.7 `inspect_capture`, `inspect_subscribe` | `./inspect.rs` |
+
+29 methods, 29 handlers.
+
+## Constraints
+
+- Exactly one response per request; a handler `Err` never closes the connection.
+- `adesk_proto::Method` is a total enum, so `unknown_method` can only arise at decode (`Method::from_parts` → `ProtoError::UnknownMethod`, mapped in `src/error.rs`).
+- One `tracing` span per request (`request{id method}`) applied with `tracing::Instrument` — never `span.enter()` across an `.await`; never log pixel payloads.
+- Input handlers (§5.5) call `ObserverService::record_action` BEFORE any compositor command and run inside `Session::input()` so they keep submission order per connection; keyboard methods activate a named, unfocused `window_id` first (protocol §5.5).
+- `activate_window` / `close_window` are runtime-native `RuntimeCommand`s — never synthesized input.
+- Observation methods await the observer first, render only afterwards and only when `include_image` is set; timeouts are observations with `timed_out: true`, never errors.
+- Errors map through `crate::error::ServerError` per `crates/adesk-server/CONTEXT.md`; do not invent AGP methods or fields.
+- Files ≤ ~1000 lines; no new dependencies; no `unwrap`/`expect`/`panic!` outside `#[cfg(test)]`.
+
+## Known Issues
+
+- **The outbound-sink seam is not wired yet.** `Session`/`ServerContext` do not carry the connection's writer queue, so `mod.rs` keeps a process-global `OnceLock<Mutex<HashMap<SessionId, EventSink>>>`; `Connection::run` must call `register_session_sink(session_id, sink)` once the writer queue exists and `forget_session_sink(id)` on disconnect. Until then `subscribe_events` and `inspect_subscribe` answer `internal`.
+- `type_text` classifies a character as unmappable by matching the compositor's `CompositorError::InvalidRequest` message for the substring `"keymap"`; a typed compositor error variant would be more robust (rewording the message surfaces `invalid_request` instead of a `skipped` entry — visible, not silent).
+- `apps.rs` stamps `AppLaunched.seq` from a server-private `AtomicU64` raised above the observed `QueryState` watermark because the compositor exposes no sequence allocator; a compositor-side allocator would remove the chance of a duplicate seq with the compositor's own next event.
+- `double_click`'s interval (100 ms, 50 ms gap) and `drag`'s post-move sleep are local server policy — protocol §5.5 specifies no interval.
+- `inspect_subscribe` with `min_interval_ms == 0` re-renders continuously (yielding between iterations); it is client-controlled and protocol-legal but CPU-hungry.
+- The unit test `dispatch::tests::error_response_carries_the_request_id_and_payload_code` fails while the parallel-owned `src/error.rs::ServerError::payload()` is `todo!()`; it passes as soon as that module lands.
+
+## Test Strategy
+
+- In-module unit tests cover the runtime-free parts: error-response shape, sink-registry round-trip, `command_error` mapping, `scale_from`/`source_size`, pointer-position resolution, `is_unmappable_key`, overlay/scale helpers.
+- Behavioral coverage belongs to `crates/adesk-server/tests/` (E2E wave with `adesk-testkit` + `adesk-client`); no test in this directory may start the runtime.
+- Validate with `./scripts/dev.sh cargo check -p adesk-server --all-targets` and `./scripts/dev.sh cargo clippy -p adesk-server --all-targets --no-deps`.
+
+## Notes for Agents
+
+- `windows.rs` owns `state`, `command_error` and `unknown_window`; do not reintroduce copies in other files.
+- `inspect.rs`'s push loop stops when its subscription id disappears from `InspectRegistry::list()`, so `unsubscribe_events` must remove it there (it does).
+- `input.rs` resolves window-relative and normalized coordinates through the window model's geometry from `QueryState`; never hard-code an origin.
+- `capture.rs` and `inspect.rs` render on demand only; there is no per-event rendering anywhere in this directory.
