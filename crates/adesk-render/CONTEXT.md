@@ -109,7 +109,7 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 
 ## Test Strategy
 
-- `./tests/image_ops.rs` (18 tests): exact-pixel `crop` (copy, clamp, disjoint, empty), `downscale` (box averages, half-up rounding, no-op, aspect ratio, non-integer ratios), `fit_dimensions`, PNG round-trip through the `image` decoder (tight and padded strides), empty-image encode error, `image_from_readback` (tight, padded, flipped, malformed).
+- `./tests/image_ops.rs` (16 tests): exact-pixel `crop` (copy, clamp, disjoint, empty), `downscale` (box averages, half-up rounding, no-op, aspect ratio, non-integer ratios), `fit_dimensions`, PNG round-trip through the `image` decoder (tight and padded strides), empty-image encode error, `image_from_readback` (tight, padded, flipped, malformed).
 - `./tests/damage.rs` (11 tests): overlap/adjacency merging, disjoint preservation, clipping, `min_area` filtering, accumulator record/take/peek/clear/set_bounds/record_rect, counter behavior.
 - `./tests/renderer_bounds.rs` (2 tests): compile-time assertions that `GlesRenderer`/`PixmanRenderer` satisfy `Renderer + Bind<T> + ExportMem + Offscreen<T> + ImportAll` for their real target types and that `GlesError`/`PixmanError` are `Send + Sync + 'static`.
 - No test needs a display, GPU, network or installed application. Run: `bash scripts/dev.sh cargo test -p adesk-render` (the wrapper is a bash script; bare `cargo` cannot link outside the dev shell).
