@@ -5,7 +5,6 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::Offscreen;
 use smithay::utils::{Buffer as BufferCoords, Size as TargetSize};
 
-use crate::config::TARGET_FORMAT;
 use crate::error::Result;
 
 /// An offscreen render target of a known size and pixel format.
