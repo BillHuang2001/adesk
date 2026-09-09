@@ -203,7 +203,7 @@ Hazards:
 - Never log pixel payloads or clipboard bytes.
 
 Open risks for Phase 2:
-- `adesk-wm`/`adesk-render` interfaces may differ from the assumptions above; reconcile `WmBridge`, `HeadlessRenderer` and the element walker when they land.
+- The `adesk-wm` interface is reconciled in `WmBridge`; `adesk-render`'s landed API vs. the `HeadlessRenderer`/element-walker assumptions is still unverified.
 - `RenderedFrame`/`StateSnapshot` field shapes are the `RenderWindow`/`QueryState` reply payloads and must be confirmed with the server/AGP owner.
 - pixman `Image` may need a root workspace dependency.
 - `RuntimeCommand` has a clippy `large_enum_variant` warning; boxing reply-bearing variants is a Phase-2 option.
