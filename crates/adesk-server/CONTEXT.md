@@ -134,6 +134,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
 - **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions, input delivery and launch correlation still need the `adesk-testkit` wave.
+- **`adesk_client::default_socket_path()` diverges from this crate's third fallback** (`/tmp/adesk.sock` vs `std::env::temp_dir()/adesk.sock`; equal only when `TMPDIR` is `/tmp`). Pass an explicit socket path in tests and tooling; the client crate is outside this node's scope and the divergence is flagged to the parent.
 
 ## Test Strategy
 
