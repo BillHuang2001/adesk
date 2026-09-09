@@ -37,7 +37,9 @@ impl DmabufHandler for State {
         // The two backends return different texture/error types, so each arm
         // reports its own outcome through the shared helper.
         match &mut self.renderer {
-            HeadlessRenderer::Gl(renderer) => notify(renderer.import_dmabuf(&dmabuf, None), notifier),
+            HeadlessRenderer::Gl(renderer) => {
+                notify(renderer.import_dmabuf(&dmabuf, None), notifier)
+            }
             HeadlessRenderer::Pixman(renderer) => {
                 notify(renderer.import_dmabuf(&dmabuf, None), notifier)
             }
