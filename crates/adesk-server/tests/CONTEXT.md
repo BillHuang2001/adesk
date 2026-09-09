@@ -67,5 +67,9 @@ Delete each entry (and the matching blocker note in the suite module docs) when 
   compare serialized wire values.
 - Registry truth for subscriptions comes from `RunningServer::context().subscriptions` / `.inspect_subscriptions`;
   the typed `EventStream` unsubscribes on drop, so keep it alive while asserting.
+- `unsubscribe_events` does NOT guarantee post-response silence: the sequential inspect push loop
+  (`src/dispatch/inspect.rs`) may deliver at most ONE frame already in flight when the unsubscribe lands.
+  `inspector.rs` therefore asserts ≤1 stray frame in a 500 ms grace window, then zero for 1.5 s.
+  Do not tighten this back to "zero strays after the response" — that flakes on a correct server.
 - Window-creating E2E (tiling/focus/input delivery/launch correlation) belongs to the next wave and needs
   `adesk-testkit`; it is not covered here.
