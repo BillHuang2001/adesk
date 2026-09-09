@@ -6,6 +6,22 @@
 
 mod common;
 
+use std::time::Duration;
+
+use adesk_client::{Client, ConnectOptions};
+use adesk_core::WindowId;
+use common::MockServer;
+use serde_json::json;
+
+/// Connect without the handshake ping and accept the connection on the server.
+async fn connect(server: &mut MockServer) -> Client {
+    let client = Client::connect_with(ConnectOptions::new(server.path()).verify_version(false))
+        .await
+        .expect("connect to the mock server");
+    server.accept().await;
+    client
+}
+
 /// Many concurrent in-flight requests get distinct, monotonic ids.
 ///
 /// Fire N `list_windows` calls concurrently (for example with
@@ -16,10 +32,55 @@ mod common;
 /// its own marker, proving there is no cross-talk.
 #[tokio::test]
 async fn many_requests_in_flight_get_distinct_ids() {
-    todo!(
-        "connect with verify_version(false); spawn N concurrent list_windows calls; \
-         collect N requests with next_request() and assert their ids are exactly 1..=N with no duplicates; \
-         answer each id with a distinct marker; assert each future resolves with its own marker"
+    const N: usize = 16;
+
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let requests = futures::future::join_all((0..N).map(|_| client.list_windows()));
+    let (results, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(requests, async {
+            let mut ids = Vec::with_capacity(N);
+            for _ in 0..N {
+                let (id, method, params) = server.next_request().await;
+                assert_eq!(method, "list_windows");
+                assert_eq!(params, json!({}), "list_windows takes no params");
+                ids.push(id);
+            }
+            ids.sort_unstable();
+            assert_eq!(
+                ids,
+                (1..=N as u64).collect::<Vec<_>>(),
+                "per-connection ids are 1..=N with no duplicates"
+            );
+
+            // A distinct marker per request id.
+            for id in 1..=N as u64 {
+                server
+                    .respond(id, json!({"windows": [], "active_window_id": id}))
+                    .await;
+            }
+        })
+    })
+    .await
+    .expect("all requests complete");
+
+    let mut markers: Vec<u64> = results
+        .into_iter()
+        .map(|result| {
+            let list = result.expect("list_windows succeeds");
+            assert!(list.windows.is_empty());
+            u64::from(
+                list.active_window_id
+                    .expect("the marker is the active window id"),
+            )
+        })
+        .collect();
+    markers.sort_unstable();
+    assert_eq!(
+        markers,
+        (1..=N as u64).collect::<Vec<_>>(),
+        "every future resolved with its own marker (no cross-talk)"
     );
 }
 
@@ -30,9 +91,52 @@ async fn many_requests_in_flight_get_distinct_ids() {
 /// distinct marker per id) and that neither resolves before its own response.
 #[tokio::test]
 async fn out_of_order_responses_match_by_id() {
-    todo!(
-        "send two requests and capture ids id1 and id2 with next_request(); \
-         respond to id2 first with marker 2, then to id1 with marker 1; \
-         assert the two futures resolve with marker 2 and marker 1 respectively (matched by id, not by arrival order)"
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let mut first = Box::pin(client.list_windows());
+    let mut second = Box::pin(client.list_windows());
+
+    // Drive each future once so both requests reach the server.
+    assert!(futures::poll!(&mut first).is_pending());
+    assert!(futures::poll!(&mut second).is_pending());
+
+    let (id1, method1, _) = server.next_request().await;
+    let (id2, method2, _) = server.next_request().await;
+    assert_eq!(
+        (method1.as_str(), method2.as_str()),
+        ("list_windows", "list_windows")
     );
+    assert_ne!(id1, id2, "concurrent requests get distinct ids");
+    assert_eq!(
+        (id1, id2),
+        (1, 2),
+        "per-connection ids start at 1 and increase"
+    );
+
+    // Answer the second request first.
+    server
+        .respond(id2, json!({"windows": [], "active_window_id": 2}))
+        .await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err(),
+        "the first caller must not resolve before its own response arrives"
+    );
+    let second_list = tokio::time::timeout(Duration::from_secs(5), &mut second)
+        .await
+        .expect("the second caller resolves once its response arrives")
+        .expect("list_windows succeeds");
+    assert_eq!(second_list.active_window_id, Some(WindowId(2)));
+
+    // Now the first request, which arrived second.
+    server
+        .respond(id1, json!({"windows": [], "active_window_id": 1}))
+        .await;
+    let first_list = tokio::time::timeout(Duration::from_secs(5), &mut first)
+        .await
+        .expect("the first caller resolves once its response arrives")
+        .expect("list_windows succeeds");
+    assert_eq!(first_list.active_window_id, Some(WindowId(1)));
 }

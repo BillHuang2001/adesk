@@ -54,7 +54,9 @@ impl Client {
 
     /// `get_window` — one window by id.
     pub async fn get_window(&self, window_id: WindowId) -> Result<WindowInfo> {
-        let result: GetWindowResult = self.request("get_window", &GetWindowParams { window_id }).await?;
+        let result: GetWindowResult = self
+            .request("get_window", &GetWindowParams { window_id })
+            .await?;
         Ok(result.window)
     }
 
@@ -64,8 +66,9 @@ impl Client {
     /// never synthetic input (protocol §5.3, design invariant 3). Returns the
     /// [`ActionId`] that later observations can reference via `after_action`.
     pub async fn activate_window(&self, window_id: WindowId) -> Result<ActionId> {
-        let result: ActionIdResult =
-            self.request("activate_window", &WindowActionParams { window_id }).await?;
+        let result: ActionIdResult = self
+            .request("activate_window", &WindowActionParams { window_id })
+            .await?;
         Ok(result.action_id)
     }
 
@@ -74,8 +77,9 @@ impl Client {
     /// Returns the action id; the window's disappearance is observed via a
     /// `window_destroyed` event or an observation, never assumed.
     pub async fn close_window(&self, window_id: WindowId) -> Result<ActionId> {
-        let result: ActionIdResult =
-            self.request("close_window", &WindowActionParams { window_id }).await?;
+        let result: ActionIdResult = self
+            .request("close_window", &WindowActionParams { window_id })
+            .await?;
         Ok(result.action_id)
     }
 

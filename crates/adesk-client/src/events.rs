@@ -2,9 +2,9 @@
 //!
 //! AGP event frames carry no subscription id, so the client demultiplexes
 //! **locally**: the reader task publishes every inbound event to a per-connection
-//! broadcast channel, and each stream applies its own [`EventFilter`]. The
-//! server-side filter of `subscribe_events` (protocol §5.6) is a delivery
-//! optimisation, not a correctness requirement — local filtering is a superset.
+//! fan-out, and each stream applies its own [`EventFilter`]. The server-side
+//! filter of `subscribe_events` (protocol §5.6) is a delivery optimisation, not
+//! a correctness requirement — local filtering is a superset.
 //!
 //! Three views are offered:
 //!
@@ -19,10 +19,6 @@
 //! filtering for it. Streams are `Send + Unpin`, so they can be moved into
 //! `tokio::spawn`ed tasks.
 
-// Skeleton phase: the stream fields and `EventFilter::matches` are read by the
-// `Stream` bodies, which are not written yet. Drop this once they land.
-#![allow(dead_code)]
-
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -31,6 +27,7 @@ use futures::Stream;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::transport::EventReceiver;
 use crate::{ImagePayload, Result};
 
 /// AGP event kind — the 9 `adesk_core::EventKind` values plus the two
@@ -69,14 +66,35 @@ pub enum EventKind {
 impl EventKind {
     /// The AGP wire name (`snake_case`).
     pub fn as_str(&self) -> &'static str {
-        todo!("map each variant to its snake_case wire name")
+        match self {
+            EventKind::WindowCreated => "window_created",
+            EventKind::WindowDestroyed => "window_destroyed",
+            EventKind::WindowActivated => "window_activated",
+            EventKind::TitleChanged => "title_changed",
+            EventKind::SurfaceCommit => "surface_commit",
+            EventKind::SurfaceDamage => "surface_damage",
+            EventKind::FocusChanged => "focus_changed",
+            EventKind::PopupAppeared => "popup_appeared",
+            EventKind::PopupDisappeared => "popup_disappeared",
+            EventKind::Quiet => "quiet",
+            EventKind::AppLaunched => "app_launched",
+        }
     }
 }
 
 impl From<CoreEventKind> for EventKind {
-    #[allow(unused_variables)] // skeleton phase: the todo!() body does not read it yet
     fn from(kind: CoreEventKind) -> Self {
-        todo!("map the 9 core event kinds onto the matching variants")
+        match kind {
+            CoreEventKind::WindowCreated => EventKind::WindowCreated,
+            CoreEventKind::WindowDestroyed => EventKind::WindowDestroyed,
+            CoreEventKind::WindowActivated => EventKind::WindowActivated,
+            CoreEventKind::TitleChanged => EventKind::TitleChanged,
+            CoreEventKind::SurfaceCommit => EventKind::SurfaceCommit,
+            CoreEventKind::FocusChanged => EventKind::FocusChanged,
+            CoreEventKind::PopupAppeared => EventKind::PopupAppeared,
+            CoreEventKind::PopupDisappeared => EventKind::PopupDisappeared,
+            CoreEventKind::AppLaunched => EventKind::AppLaunched,
+        }
     }
 }
 
@@ -98,12 +116,18 @@ pub struct EventFilter {
 impl EventFilter {
     /// Deliver every event kind for every window.
     pub fn all() -> Self {
-        Self { kinds: None, window_id: None }
+        Self {
+            kinds: None,
+            window_id: None,
+        }
     }
 
     /// Deliver only the given event kinds (for every window).
     pub fn kinds(kinds: impl IntoIterator<Item = EventKind>) -> Self {
-        Self { kinds: Some(kinds.into_iter().collect()), window_id: None }
+        Self {
+            kinds: Some(kinds.into_iter().collect()),
+            window_id: None,
+        }
     }
 
     /// Restrict an existing filter to one window.
@@ -113,10 +137,110 @@ impl EventFilter {
     }
 
     /// Whether a locally observed event satisfies this filter.
+    ///
+    /// Both halves must match: the kind must be selected (`None` = all kinds,
+    /// and a kind the client cannot name never matches a `Some` filter), and an
+    /// event carrying a window id must carry *this* window id. An event without
+    /// a window id (for example `app_launched` or an `inspect_frame`) passes
+    /// only when no window filter is set.
     pub(crate) fn matches(&self, event: &AgpEvent) -> bool {
-        let _ = event;
-        todo!("kinds + window_id predicate used by the stream implementations")
+        if let Some(wanted) = self.window_id {
+            if event_window_id(event) != Some(wanted) {
+                return false;
+            }
+        }
+        match &self.kinds {
+            None => true,
+            Some(kinds) => event_kind(event).is_some_and(|kind| kinds.contains(&kind)),
+        }
     }
+}
+
+/// The client-side kind of an event, when it has one.
+fn event_kind(event: &AgpEvent) -> Option<EventKind> {
+    match event {
+        AgpEvent::Runtime(runtime) => Some(EventKind::from(runtime.kind())),
+        // Known-but-untyped frames (`quiet`, `surface_damage`, future kinds):
+        // the wire name is the only kind information available.
+        AgpEvent::Other { name, .. } => serde_json::from_value(Value::String(name.clone())).ok(),
+        AgpEvent::InspectFrame(_) => None,
+    }
+}
+
+/// The window an event belongs to, when it carries one.
+fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
+    match event {
+        AgpEvent::Runtime(runtime) => runtime.window_id(),
+        AgpEvent::Other { data, .. } => data.get("window_id").and_then(Value::as_u64).map(WindowId),
+        AgpEvent::InspectFrame(_) => None,
+    }
+}
+
+/// Map one decoded wire event onto the crate's event vocabulary.
+///
+/// Called by the reader task. The nine core kinds become
+/// [`AgpEvent::Runtime`]; `inspect_frame` becomes [`AgpEvent::InspectFrame`]
+/// when its `data.image` fits [`ImagePayload`]; everything else — the
+/// subscription-only kinds `surface_damage`/`quiet` and any kind this client
+/// version does not know (protocol §7) — is preserved verbatim as
+/// [`AgpEvent::Other`].
+pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
+    let crate::wire::RawEvent {
+        name,
+        seq,
+        ts_ms,
+        data,
+    } = raw;
+    match name.as_str() {
+        "inspect_frame" => {
+            match data
+                .get("image")
+                .cloned()
+                .map(serde_json::from_value::<ImagePayload>)
+            {
+                Some(Ok(image)) => AgpEvent::InspectFrame(InspectFrame { seq, ts_ms, image }),
+                _ => AgpEvent::Other {
+                    name,
+                    seq,
+                    ts_ms,
+                    data,
+                },
+            }
+        }
+        // Protocol-only kinds: no `RuntimeEvent` counterpart (see CONTEXT.md).
+        "surface_damage" | "quiet" => AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data,
+        },
+        _ => match runtime_event(&name, seq, ts_ms, &data) {
+            Some(event) => AgpEvent::Runtime(event),
+            None => AgpEvent::Other {
+                name,
+                seq,
+                ts_ms,
+                data,
+            },
+        },
+    }
+}
+
+/// Rebuild a typed [`RuntimeEvent`] from an event envelope plus its `data`.
+///
+/// The wire frame hoists `seq`/`ts_ms` and names the kind in `event`; the core
+/// event is internally tagged (`type`), so the three fields are merged into the
+/// data object before deserialising. `None` when the data does not match any
+/// core kind — the caller then keeps the raw frame.
+fn runtime_event(name: &str, seq: u64, ts_ms: u64, data: &Value) -> Option<RuntimeEvent> {
+    let Value::Object(fields) = data else {
+        return None;
+    };
+    let mut object = fields.clone();
+    object.insert("type".to_owned(), Value::String(name.to_owned()));
+    object.insert("seq".to_owned(), Value::from(seq));
+    object.insert("ts_ms".to_owned(), Value::from(ts_ms));
+    serde_json::from_value(Value::Object(object)).ok()
 }
 
 /// One `inspect_frame` event (protocol §5.7).
@@ -164,8 +288,8 @@ pub enum AgpEvent {
 /// ends, then `None`. Non-core frames (e.g. `inspect_frame`) are skipped — use
 /// [`AgpEventStream`] to see them.
 pub struct EventStream {
-    /// Per-connection broadcast receiver (shared with all streams).
-    receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+    /// Per-connection event fan-out (shared with all streams).
+    events: EventReceiver,
     /// Local filter applied to every event.
     filter: EventFilter,
     /// Server-assigned subscription id, used for `unsubscribe_events`.
@@ -178,12 +302,17 @@ impl EventStream {
     /// Build a stream (crate-internal; consumers obtain one from
     /// [`Client::subscribe_events`](crate::Client::subscribe_events)).
     pub(crate) fn new(
-        receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+        events: EventReceiver,
         filter: EventFilter,
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { receiver, filter, subscription_id, connection }
+        Self {
+            events,
+            filter,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -196,23 +325,39 @@ impl Stream for EventStream {
     type Item = Result<RuntimeEvent>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let _ = cx;
-        todo!("poll the broadcast receiver, filter, map to RuntimeEvent")
+        let this = self.get_mut();
+        loop {
+            match this.events.poll_event(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(event))) => {
+                    if !this.filter.matches(&event) {
+                        continue;
+                    }
+                    if let AgpEvent::Runtime(runtime) = event {
+                        return Poll::Ready(Some(Ok(runtime)));
+                    }
+                    // `inspect_frame` / unknown kinds have no typed core event.
+                }
+            }
+        }
     }
 }
 
 impl Drop for EventStream {
     fn drop(&mut self) {
         // Best-effort: enqueue `unsubscribe_events`; a dead connection is fine.
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }
 
 /// Stream of **all** AGP event frames (`subscribe_frames`), including
 /// `inspect_frame` and unknown future kinds.
 pub struct AgpEventStream {
-    /// Per-connection broadcast receiver.
-    receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+    /// Per-connection event fan-out.
+    events: EventReceiver,
     /// Local filter applied to every event.
     filter: EventFilter,
     /// Server-assigned subscription id.
@@ -224,12 +369,17 @@ pub struct AgpEventStream {
 impl AgpEventStream {
     /// Build a stream (crate-internal).
     pub(crate) fn new(
-        receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+        events: EventReceiver,
         filter: EventFilter,
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { receiver, filter, subscription_id, connection }
+        Self {
+            events,
+            filter,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -242,21 +392,33 @@ impl Stream for AgpEventStream {
     type Item = Result<AgpEvent>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let _ = cx;
-        todo!("poll the broadcast receiver and apply the filter")
+        let this = self.get_mut();
+        loop {
+            match this.events.poll_event(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(event))) => {
+                    if this.filter.matches(&event) {
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+                }
+            }
+        }
     }
 }
 
 impl Drop for AgpEventStream {
     fn drop(&mut self) {
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }
 
 /// Stream of `inspect_frame` events produced by `inspect_subscribe`.
 pub struct InspectStream {
-    /// Per-connection broadcast receiver.
-    receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+    /// Per-connection event fan-out.
+    events: EventReceiver,
     /// Server-assigned subscription id.
     subscription_id: u64,
     /// Connection handle used to cancel the subscription on drop.
@@ -266,11 +428,15 @@ pub struct InspectStream {
 impl InspectStream {
     /// Build a stream (crate-internal).
     pub(crate) fn new(
-        receiver: tokio::sync::broadcast::Receiver<AgpEvent>,
+        events: EventReceiver,
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { receiver, subscription_id, connection }
+        Self {
+            events,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -283,13 +449,25 @@ impl Stream for InspectStream {
     type Item = Result<InspectFrame>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let _ = cx;
-        todo!("poll the broadcast receiver, keep only inspect_frame events")
+        let this = self.get_mut();
+        loop {
+            match this.events.poll_event(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(event))) => {
+                    if let AgpEvent::InspectFrame(frame) = event {
+                        return Poll::Ready(Some(Ok(frame)));
+                    }
+                }
+            }
+        }
     }
 }
 
 impl Drop for InspectStream {
     fn drop(&mut self) {
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }

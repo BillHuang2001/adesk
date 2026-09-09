@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 
 use crate::transport::Connection;
 use crate::wire::PROTOCOL_VERSION;
@@ -174,7 +174,9 @@ impl Client {
 
 impl Clone for Client {
     fn clone(&self) -> Self {
-        Client { inner: Arc::clone(&self.inner) }
+        Client {
+            inner: Arc::clone(&self.inner),
+        }
     }
 }
 

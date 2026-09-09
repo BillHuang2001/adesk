@@ -96,6 +96,9 @@ pub enum ClientError {
 
 impl From<adesk_core::Error> for ClientError {
     fn from(error: adesk_core::Error) -> Self {
-        ClientError::Server { code: error.code, message: error.message }
+        ClientError::Server {
+            code: error.code,
+            message: error.message,
+        }
     }
 }

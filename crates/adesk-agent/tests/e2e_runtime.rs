@@ -1,4 +1,4 @@
-//! End-to-end plan against a real runtime (defined here, implemented in phase 2).
+//! End-to-end plan against a real runtime (defined here; implemented when `adesk-testkit` lands).
 //!
 //! Gated behind the `e2e` feature because it needs `adesk-testkit`, which has not
 //! landed yet. When it lands, add the dev-dependency

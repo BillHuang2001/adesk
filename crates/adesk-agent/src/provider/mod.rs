@@ -109,6 +109,184 @@ impl ProviderConfig {
     /// [`ProviderKind::OpenAi`] the API key is resolved from `api_key` and then
     /// from the environment, and a missing key is [`ProviderError::MissingApiKey`].
     pub fn build(&self) -> Result<Box<dyn LlmProvider>, ProviderError> {
-        todo!("phase 2: construct MockProvider or OpenAiCompatProvider")
+        match self.kind {
+            ProviderKind::Mock => Ok(Box::new(MockProvider::scripted(self.mock_script.clone()))),
+            ProviderKind::OpenAi => Ok(Box::new(OpenAiCompatProvider::new(self.openai_config()?)?)),
+        }
+    }
+
+    /// Resolve the OpenAI-compatible configuration.
+    ///
+    /// Blank CLI/env values count as absent, so the defaults apply. The API key is
+    /// taken from `api_key` first, then from [`openai::API_KEY_ENV`] and finally
+    /// [`openai::API_KEY_ENV_FALLBACK`]; no other value ever holds a secret.
+    fn openai_config(&self) -> Result<OpenAiConfig, ProviderError> {
+        let api_key = non_empty(self.api_key.as_deref())
+            .map(str::to_owned)
+            .or_else(|| non_empty_env(openai::API_KEY_ENV))
+            .or_else(|| non_empty_env(openai::API_KEY_ENV_FALLBACK))
+            .ok_or(ProviderError::MissingApiKey)?;
+
+        Ok(OpenAiConfig {
+            base_url: non_empty(self.base_url.as_deref())
+                .unwrap_or(openai::DEFAULT_BASE_URL)
+                .to_owned(),
+            model: non_empty(self.model.as_deref())
+                .unwrap_or(openai::DEFAULT_MODEL)
+                .to_owned(),
+            api_key,
+            temperature: self.temperature,
+            max_tokens: self.max_tokens,
+            timeout_ms: self.timeout_ms,
+            image_detail: ImageDetail::Auto,
+            system_prompt: non_empty(self.system_prompt.as_deref())
+                .unwrap_or(openai::DEFAULT_SYSTEM_PROMPT)
+                .to_owned(),
+        })
+    }
+}
+
+/// `Some(trimmed)` for a non-blank value, `None` otherwise.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// Non-blank environment variable, trimmed.
+fn non_empty_env(name: &str) -> Option<String> {
+    let value = std::env::var(name).ok()?;
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::decision::AgentDecision;
+
+    fn context() -> AgentContext {
+        AgentContext {
+            task: String::from("smoke"),
+            success_criteria: None,
+            step: 0,
+            max_steps: 20,
+            runtime: None,
+            windows: Vec::new(),
+            active_window: None,
+            apps: Vec::new(),
+            recent_actions: Vec::new(),
+            recent_events: Vec::new(),
+            observation: None,
+            last_error: None,
+            image: None,
+            keyframe: None,
+        }
+    }
+
+    #[test]
+    fn provider_kind_names_match_the_cli() {
+        assert_eq!(ProviderKind::Mock.as_str(), "mock");
+        assert_eq!(ProviderKind::OpenAi.as_str(), "openai");
+    }
+
+    #[tokio::test]
+    async fn default_config_builds_the_mock_provider() {
+        let provider = ProviderConfig::default().build().expect("mock builds");
+        assert_eq!(provider.name(), "mock");
+        assert!(provider.supports_images());
+
+        // The empty script is the built-in dry-run sequence.
+        let decision = provider.complete(&context()).await.unwrap();
+        assert_eq!(decision, AgentDecision::ListWindows);
+        let decision = provider.complete(&context()).await.unwrap();
+        assert!(matches!(
+            decision,
+            AgentDecision::Finish { success: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn mock_script_is_handed_to_the_mock_provider() {
+        let config = ProviderConfig {
+            mock_script: vec![AgentDecision::ListApps {
+                query: Some(String::from("term")),
+            }],
+            ..ProviderConfig::default()
+        };
+        let provider = config.build().expect("mock builds");
+        assert_eq!(
+            provider.complete(&context()).await.unwrap(),
+            AgentDecision::ListApps {
+                query: Some(String::from("term")),
+            }
+        );
+    }
+
+    #[test]
+    fn openai_config_resolves_cli_values_over_defaults() {
+        let config = ProviderConfig {
+            kind: ProviderKind::OpenAi,
+            api_key: Some(String::from("sk-test")),
+            ..ProviderConfig::default()
+        }
+        .openai_config()
+        .expect("explicit key");
+
+        assert_eq!(config.base_url, openai::DEFAULT_BASE_URL);
+        assert_eq!(config.model, openai::DEFAULT_MODEL);
+        assert_eq!(config.system_prompt, openai::DEFAULT_SYSTEM_PROMPT);
+        assert_eq!(config.image_detail, ImageDetail::Auto);
+        assert_eq!(config.timeout_ms, openai::DEFAULT_TIMEOUT_MS);
+
+        let explicit = ProviderConfig {
+            kind: ProviderKind::OpenAi,
+            model: Some(String::from("  local-model  ")),
+            base_url: Some(String::from("http://127.0.0.1:8080/v1")),
+            api_key: Some(String::from(" sk-test ")),
+            temperature: 0.5,
+            max_tokens: 128,
+            timeout_ms: 1234,
+            system_prompt: Some(String::from("SYS")),
+            mock_script: Vec::new(),
+        }
+        .openai_config()
+        .expect("explicit key");
+
+        assert_eq!(explicit.base_url, "http://127.0.0.1:8080/v1");
+        assert_eq!(explicit.model, "local-model");
+        assert_eq!(explicit.api_key, "sk-test");
+        assert_eq!(explicit.temperature, 0.5);
+        assert_eq!(explicit.max_tokens, 128);
+        assert_eq!(explicit.timeout_ms, 1234);
+        assert_eq!(explicit.system_prompt, "SYS");
+    }
+
+    #[test]
+    fn openai_config_treats_blank_values_as_absent() {
+        let config = ProviderConfig {
+            kind: ProviderKind::OpenAi,
+            model: Some(String::from("   ")),
+            base_url: Some(String::from("")),
+            api_key: Some(String::from("sk-test")),
+            system_prompt: Some(String::from("\t")),
+            ..ProviderConfig::default()
+        }
+        .openai_config()
+        .expect("explicit key");
+
+        assert_eq!(config.base_url, openai::DEFAULT_BASE_URL);
+        assert_eq!(config.model, openai::DEFAULT_MODEL);
+        assert_eq!(config.system_prompt, openai::DEFAULT_SYSTEM_PROMPT);
+    }
+
+    #[test]
+    fn build_returns_an_openai_provider_with_an_explicit_key() {
+        let config = ProviderConfig {
+            kind: ProviderKind::OpenAi,
+            api_key: Some(String::from("sk-test")),
+            ..ProviderConfig::default()
+        };
+        let provider = config.build().expect("explicit key");
+        assert_eq!(provider.name(), "openai");
+        assert!(provider.supports_images());
     }
 }

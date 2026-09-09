@@ -6,8 +6,8 @@
 //! never blocks. Commands are served in FIFO order by the `calloop` channel source,
 //! which is what gives input actions their causal order.
 //!
-//! The module is declared from `run.rs` with `#[path = "dispatch.rs"]` so the module
-//! list in `lib.rs` stays the crate skeleton; its path is `crate::run::dispatch`.
+//! The module is declared from `run.rs` with `#[path = "dispatch.rs"]`, which keeps
+//! the file at `src/dispatch.rs` while its module path is `crate::run::dispatch`.
 //!
 //! Reply types use the `adesk_core` umbrella error; [`CompositorError`] converts
 //! into it, so failures reach the AGP layer as structured `ErrorCode`s.

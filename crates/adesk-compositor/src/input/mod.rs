@@ -12,16 +12,11 @@
 //!
 //! Orchestration (resolving keysyms through the table, pressing Shift for
 //! shifted characters, choosing focus targets) stays in `crate::state`.
-#![allow(dead_code)] // Phase 2 wires these into State::inject_*; remove then.
 
 mod injector;
 mod keycode;
 mod keymap;
 
-pub use keycode::{KeyCode, Keysym};
 pub(crate) use injector::InputInjector;
-// Phase 2 wires these into State::inject_*; the re-exports are unused until then.
-#[allow(unused_imports)]
 pub(crate) use keycode::chord_sequence;
-#[allow(unused_imports)]
-pub(crate) use keymap::{KeymapTable, ResolvedKey};
+pub use keycode::{KeyCode, Keysym};

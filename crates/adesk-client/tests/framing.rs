@@ -3,6 +3,20 @@
 
 mod common;
 
+use std::time::Duration;
+
+use adesk_client::{Client, ClientError, ConnectOptions};
+use common::MockServer;
+
+/// Connect without the handshake ping and accept the connection on the server.
+async fn connect(server: &mut MockServer, options: ConnectOptions) -> Client {
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
+    server.accept().await;
+    client
+}
+
 /// Malformed JSON becomes `ClientError::Protocol`.
 ///
 /// Answer a pending request with `send_raw` of a non-JSON line (for example
@@ -11,10 +25,34 @@ mod common;
 /// afterwards.
 #[tokio::test]
 async fn malformed_json_is_protocol_error() {
-    todo!(
-        "send a request, read it with next_request(), then send_raw 'not json'; \
-         assert the future is Err(ClientError::Protocol); \
-         assert client.is_closed() is true afterwards"
+    let mut server = MockServer::start().await;
+    let options = ConnectOptions::new(server.path()).verify_version(false);
+    let client = connect(&mut server, options).await;
+
+    let request = client.list_windows();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(request, async {
+            let (id, method, _) = server.next_request().await;
+            assert_eq!(method, "list_windows");
+            let _ = id;
+            server.send_raw("not json").await;
+        })
+    })
+    .await
+    .expect("the malformed frame fails the in-flight request");
+
+    match result {
+        Err(ClientError::Protocol { message }) => {
+            assert!(
+                !message.is_empty(),
+                "the protocol error explains itself: {message}"
+            );
+        }
+        other => panic!("expected ClientError::Protocol, got {other:?}"),
+    }
+    assert!(
+        client.is_closed(),
+        "a framing violation terminates the connection"
     );
 }
 
@@ -26,10 +64,43 @@ async fn malformed_json_is_protocol_error() {
 /// line.
 #[tokio::test]
 async fn oversized_line_is_protocol_error() {
-    todo!(
-        "connect with max_frame_len 64; send a request; send_raw a line of more than 64 bytes; \
-         assert the future is Err(ClientError::Protocol) whose message mentions the frame limit; \
-         assert the connection is closed and the oversized line was not buffered in full"
+    const MAX_FRAME_LEN: usize = 64;
+
+    let mut server = MockServer::start().await;
+    let options = ConnectOptions::new(server.path())
+        .verify_version(false)
+        .max_frame_len(MAX_FRAME_LEN);
+    let client = connect(&mut server, options).await;
+
+    let request = client.list_windows();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(request, async {
+            let (_, method, _) = server.next_request().await;
+            assert_eq!(method, "list_windows");
+            // Far above the cap, and deliberately not valid JSON either: the
+            // length check must win, which the error message proves.
+            server.send_raw(&"x".repeat(4096)).await;
+        })
+    })
+    .await
+    .expect("the oversized frame fails the in-flight request");
+
+    match result {
+        Err(ClientError::Protocol { message }) => {
+            assert!(
+                message.contains("frame limit"),
+                "the error names the frame limit: {message}"
+            );
+            assert!(
+                message.contains(&MAX_FRAME_LEN.to_string()),
+                "the error names the configured limit: {message}"
+            );
+        }
+        other => panic!("expected ClientError::Protocol, got {other:?}"),
+    }
+    assert!(
+        client.is_closed(),
+        "an oversized frame terminates the connection"
     );
 }
 
@@ -40,8 +111,24 @@ async fn oversized_line_is_protocol_error() {
 /// (not a hang, not `Protocol`).
 #[tokio::test]
 async fn eof_with_inflight_request_is_closed() {
-    todo!(
-        "send a request and read it with next_request(); close the MockServer without responding; \
-         assert the future resolves to Err(ClientError::Closed) rather than hanging or returning Protocol"
-    );
+    let mut server = MockServer::start().await;
+    let options = ConnectOptions::new(server.path()).verify_version(false);
+    let client = connect(&mut server, options).await;
+
+    let request = client.list_windows();
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(request, async {
+            let (_, method, _) = server.next_request().await;
+            assert_eq!(method, "list_windows");
+            server.close().await;
+        })
+    })
+    .await
+    .expect("EOF resolves the in-flight request instead of hanging");
+
+    match result {
+        Err(ClientError::Closed) => {}
+        other => panic!("expected ClientError::Closed, got {other:?}"),
+    }
+    assert!(client.is_closed(), "EOF marks the connection closed");
 }

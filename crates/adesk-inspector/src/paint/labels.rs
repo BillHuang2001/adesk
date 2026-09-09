@@ -17,12 +17,11 @@
 //! [`text::elide`](crate::text::elide) and clipped to
 //! `window.geometry ∩ canvas.clip()`, so a label never leaves its window.
 
-#![allow(dead_code)] // Phase 2: referenced by the window-anchored painter stubs.
-
 use adesk_core::{Point, Rect};
 
 use crate::canvas::Canvas;
 use crate::style::OverlayStyle;
+use crate::text;
 
 /// Slot of the `window_ids` label.
 pub(crate) const SLOT_WINDOW_IDS: u8 = 0;
@@ -33,7 +32,6 @@ pub(crate) const SLOT_FOCUS: u8 = 2;
 
 /// Plate top-left of slot `slot` inside `window`.
 pub(crate) fn slot_origin(window: Rect, slot: u8, style: &OverlayStyle) -> Point {
-    let _ = (window, slot);
     let pad = style.pad();
     let step = crate::font::line_height(style.scale()) + pad;
     Point {
@@ -52,6 +50,19 @@ pub(crate) fn draw(
     text: &str,
     style: &OverlayStyle,
 ) -> Option<Rect> {
-    let _ = (canvas, window, slot, text, style);
-    todo!("Phase 2: elide to window.w - 2 * pad, then draw_label inside the window clip")
+    if window.is_empty() {
+        return None;
+    }
+    let pad = style.pad();
+    let inner = (window.w as i32).saturating_sub(2 * pad);
+    let elided = text::elide(text, inner, style.scale())?;
+    // `slot_origin` returns the plate's top-left; `draw_label` wants the ink's.
+    let plate_origin = slot_origin(window, slot, style);
+    let ink_origin = Point {
+        x: plate_origin.x.saturating_add(pad),
+        y: plate_origin.y.saturating_add(pad),
+    };
+    Some(canvas.with_clip(window, |clipped| {
+        text::draw_label(clipped, ink_origin, &elided, style)
+    }))
 }

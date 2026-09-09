@@ -46,8 +46,8 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod agp;
 pub mod agent_loop;
+pub mod agp;
 pub mod client;
 pub mod context;
 pub mod decision;
@@ -59,8 +59,8 @@ pub mod scenario;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
 
-pub use agp::AgpClient;
 pub use agent_loop::{AgentLoop, LoopConfig, LoopOutcome, StepRecord, StepStatus};
+pub use agp::AgpClient;
 pub use client::{
     AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
     ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WindowList, PROTOCOL_VERSION,

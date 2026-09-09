@@ -51,3 +51,71 @@ impl RunReport {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::metrics::{LatencyStats, StopReason};
+    use std::collections::BTreeMap;
+
+    fn sample() -> RunReport {
+        RunReport {
+            task: "open the settings dialog".into(),
+            provider: "mock".into(),
+            socket: Some("/run/user/1000/adesk.sock".into()),
+            metrics: MetricsReport {
+                task: "open the settings dialog".into(),
+                success: true,
+                stop_reason: StopReason::Finished,
+                steps: 3,
+                decisions: 3,
+                actions: 2,
+                actions_by_kind: BTreeMap::new(),
+                runtime_ops: 1,
+                input_actions: 1,
+                gpu_readbacks: 0,
+                images_sent: 1,
+                visual_tokens: 85,
+                decision_latency: LatencyStats::default(),
+                failures: 0,
+                failures_by_kind: BTreeMap::new(),
+                recoveries: 0,
+                failure_rate: 0.0,
+                recovery_rate: 0.0,
+                elapsed_ms: 42,
+            },
+            scenario: None,
+            history: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn json_round_trips() {
+        let report = sample();
+        let json = report.to_json_pretty().unwrap();
+        assert!(json.contains("\n  \"task\""), "expected pretty JSON");
+        assert_eq!(serde_json::from_str::<RunReport>(&json).unwrap(), report);
+    }
+
+    /// `write` creates missing parent directories and stores exactly the JSON
+    /// `to_json_pretty` produces.
+    #[test]
+    fn write_creates_parent_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "adesk-agent-report-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("nested").join("run.json");
+        let report = sample();
+        report.write(&path).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            report.to_json_pretty().unwrap()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}

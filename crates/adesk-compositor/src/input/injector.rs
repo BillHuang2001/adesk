@@ -1,11 +1,27 @@
-//! Thin wrappers around the seat's keyboard and pointer handles.
+//! Seat wrappers: the keysym table, handle accessors and one-call injections.
 //!
-//! [`InputInjector`] owns the handles created by [`State`] startup plus the
-//! [`KeymapTable`] used to turn keysyms into keycodes. Every method here does
-//! exactly one thing to Smithay: it maps an already-resolved ADesk event onto a
-//! single seat call. Deciding *what* to inject (resolving a keysym, pressing
-//! Shift for shifted characters, resolving a window-relative position, picking
-//! the focus surface) stays in `crate::state`.
+//! [`InputInjector`] owns the keyboard and pointer handles created by [`State`]
+//! startup plus the [`KeymapTable`] used to turn keysyms into keycodes.
+//!
+//! The injection helpers are **associated functions** taking a cloned handle and
+//! `&mut State`:
+//!
+//! ```ignore
+//! let keyboard = self.input.keyboard();
+//! InputInjector::keyboard_input(&keyboard, self, keycode, key_state, time)?;
+//! ```
+//!
+//! They cannot be methods: `State` owns the injector, so `self.input.keyboard_input(self, ..)`
+//! would borrow `self` immutably (for `self.input`) and mutably (as the seat data)
+//! at the same time (E0502). Cloning the handle out of the seat first keeps exactly
+//! one place per seat call while still letting `State` pass itself as the seat's
+//! user data. The handle clones are cheap (`Arc` clones) and always valid: they are
+//! created in [`InputInjector::new`] and the seat outlives them.
+//!
+//! Every helper maps an already-resolved ADesk event onto a single Smithay call.
+//! Deciding *what* to inject (resolving a keysym, pressing Shift for shifted
+//! characters, resolving a window-relative position, picking the focus surface)
+//! stays in `crate::state`.
 
 use adesk_core::{Button, ButtonState, KeyState};
 use smithay::{
@@ -13,7 +29,7 @@ use smithay::{
         Axis, AxisSource, ButtonState as SmithayButtonState, KeyState as SmithayKeyState,
     },
     input::{
-        keyboard::{FilterResult, Keycode, KeyboardHandle},
+        keyboard::{FilterResult, KeyboardHandle, Keycode},
         pointer::{AxisFrame, ButtonEvent, MotionEvent, PointerHandle},
         Seat,
     },
@@ -87,41 +103,37 @@ impl InputInjector {
         &self.keymap
     }
 
+    /// A clone of the seat's keyboard handle, for the injection helpers below.
+    pub(crate) fn keyboard(&self) -> KeyboardHandle<State> {
+        self.keyboard.clone()
+    }
+
+    /// A clone of the seat's pointer handle, for the injection helpers below.
+    pub(crate) fn pointer(&self) -> PointerHandle<State> {
+        self.pointer.clone()
+    }
+
     /// Deliver one key press/release for the given xkb `keycode`.
     ///
     /// No compositor key bindings are installed, so the event always reaches the
     /// focused client: the filter returns [`FilterResult::Forward`], which makes
     /// Smithay return `None` — that is the normal outcome, not an error.
     pub(crate) fn keyboard_input(
-        &self,
+        keyboard: &KeyboardHandle<State>,
         data: &mut State,
         keycode: u32,
         key_state: KeyState,
         time: u32,
     ) -> Result<()> {
-        let state = match key_state {
-            KeyState::Pressed => SmithayKeyState::Pressed,
-            KeyState::Released => SmithayKeyState::Released,
-        };
-        let _intercepted: Option<()> = self.keyboard.input(
+        let _forwarded: Option<()> = keyboard.input(
             data,
             Keycode::new(keycode),
-            state,
+            smithay_key_state(key_state),
             SERIAL_COUNTER.next_serial(),
             time,
             |_, _, _| FilterResult::Forward,
         );
         Ok(())
-    }
-
-    /// Move keyboard focus to `target` (or clear it with `None`).
-    pub(crate) fn set_keyboard_focus(
-        &self,
-        data: &mut State,
-        target: Option<WlSurface>,
-        serial: Serial,
-    ) {
-        self.keyboard.set_focus(data, target, serial);
     }
 
     /// Move the pointer to `location` (output/global coordinates) with an
@@ -132,7 +144,7 @@ impl InputInjector {
     /// focus surface's origin is `(0, 0)`; Smithay subtracts it to compute the
     /// surface-local pointer position.
     pub(crate) fn pointer_motion(
-        &self,
+        pointer: &PointerHandle<State>,
         data: &mut State,
         location: Point<f64, Logical>,
         focus: Option<WlSurface>,
@@ -140,7 +152,7 @@ impl InputInjector {
         time: u32,
     ) {
         let target = focus.map(|surface| (surface, Point::from((0.0, 0.0))));
-        self.pointer.motion(
+        pointer.motion(
             data,
             target,
             &MotionEvent {
@@ -153,24 +165,20 @@ impl InputInjector {
 
     /// Press or release a pointer button at the current pointer location.
     pub(crate) fn pointer_button(
-        &self,
+        pointer: &PointerHandle<State>,
         data: &mut State,
         button: Button,
         button_state: ButtonState,
         serial: Serial,
         time: u32,
     ) {
-        let state = match button_state {
-            ButtonState::Pressed => SmithayButtonState::Pressed,
-            ButtonState::Released => SmithayButtonState::Released,
-        };
-        self.pointer.button(
+        pointer.button(
             data,
             &ButtonEvent {
                 serial,
                 time,
                 button: button_code(button),
-                state,
+                state: smithay_button_state(button_state),
             },
         );
     }
@@ -179,16 +187,31 @@ impl InputInjector {
     ///
     /// A zero delta on an axis is omitted; the frame is always terminated so
     /// clients see a complete `wl_pointer.frame`.
-    pub(crate) fn pointer_axis(&self, data: &mut State, dx: f64, dy: f64, time: u32) {
-        let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
-        if dx != 0.0 {
-            frame = frame.value(Axis::Horizontal, dx);
-        }
-        if dy != 0.0 {
-            frame = frame.value(Axis::Vertical, dy);
-        }
-        self.pointer.axis(data, frame);
-        self.pointer.frame(data);
+    pub(crate) fn pointer_axis(
+        pointer: &PointerHandle<State>,
+        data: &mut State,
+        dx: f64,
+        dy: f64,
+        time: u32,
+    ) {
+        pointer.axis(data, axis_frame(time, dx, dy));
+        pointer.frame(data);
+    }
+}
+
+/// The Smithay key state matching an ADesk [`KeyState`].
+fn smithay_key_state(state: KeyState) -> SmithayKeyState {
+    match state {
+        KeyState::Pressed => SmithayKeyState::Pressed,
+        KeyState::Released => SmithayKeyState::Released,
+    }
+}
+
+/// The Smithay button state matching an ADesk [`ButtonState`].
+fn smithay_button_state(state: ButtonState) -> SmithayButtonState {
+    match state {
+        ButtonState::Pressed => SmithayButtonState::Pressed,
+        ButtonState::Released => SmithayButtonState::Released,
     }
 }
 
@@ -203,6 +226,21 @@ fn button_code(button: Button) -> u32 {
     }
 }
 
+/// A wheel axis frame carrying only the non-zero deltas.
+///
+/// The frame is created unconditionally: even a zero/zero scroll is a complete
+/// `wl_pointer.frame`, which is what clients expect.
+fn axis_frame(time: u32, dx: f64, dy: f64) -> AxisFrame {
+    let mut frame = AxisFrame::new(time).source(AxisSource::Wheel);
+    if dx != 0.0 {
+        frame = frame.value(Axis::Horizontal, dx);
+    }
+    if dy != 0.0 {
+        frame = frame.value(Axis::Vertical, dy);
+    }
+    frame
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +252,44 @@ mod tests {
         assert_eq!(button_code(Button::Middle), 0x112);
         assert_eq!(button_code(Button::Side), 0x113);
         assert_eq!(button_code(Button::Extra), 0x114);
+    }
+
+    #[test]
+    fn key_states_map_to_smithay() {
+        assert_eq!(
+            smithay_key_state(KeyState::Pressed),
+            SmithayKeyState::Pressed
+        );
+        assert_eq!(
+            smithay_key_state(KeyState::Released),
+            SmithayKeyState::Released
+        );
+    }
+
+    #[test]
+    fn button_states_map_to_smithay() {
+        assert_eq!(
+            smithay_button_state(ButtonState::Pressed),
+            SmithayButtonState::Pressed
+        );
+        assert_eq!(
+            smithay_button_state(ButtonState::Released),
+            SmithayButtonState::Released
+        );
+    }
+
+    #[test]
+    fn axis_frame_keeps_the_source_and_omits_zero_deltas() {
+        let vertical = axis_frame(42, 0.0, -3.0);
+        assert_eq!(vertical.time, 42);
+        assert_eq!(vertical.source, Some(AxisSource::Wheel));
+        assert_eq!(vertical.axis, (0.0, -3.0));
+
+        let both = axis_frame(7, 1.5, 2.5);
+        assert_eq!(both.axis, (1.5, 2.5));
+
+        let empty = axis_frame(0, 0.0, 0.0);
+        assert_eq!(empty.axis, (0.0, 0.0));
+        assert_eq!(empty.source, Some(AxisSource::Wheel));
     }
 }

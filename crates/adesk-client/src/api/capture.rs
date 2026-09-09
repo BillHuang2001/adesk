@@ -37,7 +37,12 @@ pub struct CaptureRequest {
 impl CaptureRequest {
     /// Capture the whole window as PNG.
     pub fn window(window_id: WindowId) -> Self {
-        Self { window_id, region: None, max_dimension: None, format: ImageFormat::Png }
+        Self {
+            window_id,
+            region: None,
+            max_dimension: None,
+            format: ImageFormat::Png,
+        }
     }
 
     /// Crop to `region` (window-relative).
@@ -77,7 +82,12 @@ pub struct CaptureRegionRequest {
 impl CaptureRegionRequest {
     /// Capture `region` of `window_id` as PNG.
     pub fn new(window_id: WindowId, region: Rect) -> Self {
-        Self { window_id, region, max_dimension: None, format: ImageFormat::Png }
+        Self {
+            window_id,
+            region,
+            max_dimension: None,
+            format: ImageFormat::Png,
+        }
     }
 
     /// Downscale so the longer edge is at most `max_dimension`.
@@ -263,7 +273,11 @@ pub struct WaitForChangeRequest {
 
 impl Default for WaitForChangeRequest {
     fn default() -> Self {
-        Self { window_id: None, since_commit: None, timeout_ms: DEFAULT_TIMEOUT_MS }
+        Self {
+            window_id: None,
+            since_commit: None,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+        }
     }
 }
 
@@ -307,7 +321,12 @@ pub struct WaitForQuietRequest {
 
 impl Default for WaitForQuietRequest {
     fn default() -> Self {
-        Self { window_id: None, quiet_ms: 250, timeout_ms: DEFAULT_TIMEOUT_MS, after_action: None }
+        Self {
+            window_id: None,
+            quiet_ms: 250,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
+            after_action: None,
+        }
     }
 }
 
@@ -403,7 +422,10 @@ impl Client {
     /// §6).
     pub async fn observe(&self, request: ObserveRequest) -> Result<ObserveResult> {
         let envelope: ObserveEnvelope = self.request("observe", &request).await?;
-        Ok(ObserveResult { observation: envelope.observation.observation, image: envelope.observation.image })
+        Ok(ObserveResult {
+            observation: envelope.observation.observation,
+            image: envelope.observation.image,
+        })
     }
 
     /// `wait_for_change` — resolve on the first counted change.

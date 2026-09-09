@@ -19,9 +19,11 @@
 //! | `max_detail_chars` | 160 | each summary `detail` string is truncated |
 //! | `max_dimension` | `Some(1024)` | default downscale for images sent to the provider |
 
+use std::cmp::Reverse;
+
 use adesk_core::{
-    ActionId, AppId, AppInfo, EventKind, Observation, Position, Rect, RuntimeEvent, Size,
-    WindowId, WindowInfo,
+    ActionId, AppId, AppInfo, EventKind, Observation, Position, Rect, RuntimeEvent, Size, WindowId,
+    WindowInfo, WindowState,
 };
 use adesk_proto::ImagePayload;
 use serde::{Deserialize, Serialize};
@@ -136,9 +138,92 @@ impl EventSummary {
     /// Damage regions are reduced to counts/bounds — pixel payloads and full rect
     /// lists never enter the context.
     pub fn from_event(event: &RuntimeEvent, max_detail_chars: usize) -> Self {
-        let _ = (event, max_detail_chars);
-        todo!("phase 2: summarize event kind + window + short detail")
+        Self {
+            kind: event.kind(),
+            seq: event.seq(),
+            ts_ms: event.ts_ms(),
+            window_id: event.window_id(),
+            detail: truncate_detail(describe_event(event), max_detail_chars),
+        }
     }
+}
+
+/// Human-readable, payload-free description of one runtime event.
+///
+/// Damage is reduced to a rectangle *count* — never a rect list, never pixels.
+fn describe_event(event: &RuntimeEvent) -> String {
+    match event {
+        RuntimeEvent::WindowCreated {
+            app_id, title, pid, ..
+        } => {
+            let mut detail = String::from("window created");
+            if let Some(app_id) = app_id {
+                detail.push_str(&format!(" app={app_id}"));
+            }
+            if let Some(title) = title {
+                detail.push_str(&format!(" title={title}"));
+            }
+            if let Some(pid) = pid {
+                detail.push_str(&format!(" pid={pid}"));
+            }
+            detail
+        }
+        RuntimeEvent::WindowDestroyed { .. } => String::from("window destroyed"),
+        RuntimeEvent::WindowActivated { previous, .. } => match previous {
+            Some(previous) => format!("window activated (previous {previous})"),
+            None => String::from("window activated"),
+        },
+        RuntimeEvent::TitleChanged { title, .. } => match title {
+            Some(title) => format!("title changed to {title}"),
+            None => String::from("title cleared"),
+        },
+        RuntimeEvent::SurfaceCommit {
+            commit_seq, damage, ..
+        } => commit_detail(*commit_seq, 1, damage.len()),
+        RuntimeEvent::FocusChanged { window_id, .. } => match window_id {
+            Some(window_id) => format!("focus changed to {window_id}"),
+            None => String::from("focus cleared"),
+        },
+        RuntimeEvent::PopupAppeared { popup_id, .. } => format!("popup {popup_id} appeared"),
+        RuntimeEvent::PopupDisappeared { popup_id, .. } => {
+            format!("popup {popup_id} disappeared")
+        }
+        RuntimeEvent::AppLaunched { app_id, pid, .. } => {
+            let mut detail = format!("app launched {app_id}");
+            if let Some(pid) = pid {
+                detail.push_str(&format!(" pid={pid}"));
+            }
+            detail
+        }
+    }
+}
+
+/// Detail string for a commit group, e.g. `"commit 8291 (3 damage rects)"` or,
+/// once commits collapsed, `"commit 8291 (12 commits, 3 damage rects)"`.
+fn commit_detail(commit_seq: u64, commits: u32, damage_rects: usize) -> String {
+    let damage = match damage_rects {
+        0 => String::from("no damage"),
+        1 => String::from("1 damage rect"),
+        n => format!("{n} damage rects"),
+    };
+    if commits > 1 {
+        format!("commit {commit_seq} ({commits} commits, {damage})")
+    } else {
+        format!("commit {commit_seq} ({damage})")
+    }
+}
+
+/// Truncates `detail` to at most `max_chars` characters, never splitting one.
+fn truncate_detail(mut detail: String, max_chars: usize) -> String {
+    if detail.chars().count() <= max_chars {
+        return detail;
+    }
+    let cut = detail
+        .char_indices()
+        .nth(max_chars)
+        .map_or(detail.len(), |(index, _)| index);
+    detail.truncate(cut);
+    detail
 }
 
 /// Bounded window metadata for the prompt.
@@ -165,8 +250,15 @@ pub struct WindowSummary {
 impl WindowSummary {
     /// Project a [`WindowInfo`] into the bounded form.
     pub fn from_window(window: &WindowInfo) -> Self {
-        let _ = window;
-        todo!("phase 2: project WindowInfo")
+        Self {
+            id: window.id,
+            app_id: window.app_id.clone(),
+            title: window.title.clone(),
+            active: window.state == WindowState::Active,
+            geometry: window.geometry,
+            popup_count: window.popup_count,
+            last_commit_seq: window.last_commit_seq,
+        }
     }
 }
 
@@ -187,8 +279,12 @@ pub struct AppSummary {
 impl AppSummary {
     /// Project an [`AppInfo`] into the bounded form.
     pub fn from_app(app: &AppInfo) -> Self {
-        let _ = app;
-        todo!("phase 2: project AppInfo")
+        Self {
+            id: app.id.clone(),
+            name: app.name.clone(),
+            categories: app.categories.clone(),
+            terminal: app.terminal,
+        }
     }
 }
 
@@ -208,8 +304,12 @@ pub struct RuntimeSummary {
 impl RuntimeSummary {
     /// Project [`RuntimeInfo`] into the context form.
     pub fn from_runtime(info: &RuntimeInfo) -> Self {
-        let _ = info;
-        todo!("phase 2: project RuntimeInfo")
+        Self {
+            protocol_version: info.protocol_version,
+            renderer: info.renderer.clone(),
+            output: info.output,
+            uptime_ms: info.uptime_ms,
+        }
     }
 }
 
@@ -296,6 +396,17 @@ pub struct ContextInput<'a> {
     pub last_error: Option<&'a str>,
 }
 
+/// Consecutive `surface_commit`s of one window, collapsed into one summary.
+///
+/// Collapse state is *only* valid while `events.first()` is the commit summary
+/// this group describes; every non-commit event and every reset clears it.
+#[derive(Debug, Clone, Copy)]
+struct CommitGroup {
+    window_id: WindowId,
+    commits: u32,
+    damage_rects: usize,
+}
+
 /// Stateful, bounded context assembler owned by the loop.
 ///
 /// It accumulates only what the budget allows: actions and summarized events are
@@ -307,6 +418,7 @@ pub struct ContextBuilder {
     budget: ContextBudget,
     actions: Vec<ActionRecord>,
     events: Vec<EventSummary>,
+    commit_group: Option<CommitGroup>,
     current_image: Option<ImagePayload>,
     keyframe: Option<ImagePayload>,
 }
@@ -324,6 +436,7 @@ impl ContextBuilder {
             budget,
             actions: Vec::new(),
             events: Vec::new(),
+            commit_group: None,
             current_image: None,
             keyframe: None,
         }
@@ -351,38 +464,187 @@ impl ContextBuilder {
 
     /// Record one executed action, trimming the oldest beyond `max_actions`.
     pub fn record_action(&mut self, record: ActionRecord) {
-        let _ = record;
-        todo!("phase 2: push action, trim to budget.max_actions")
+        if self.budget.max_actions == 0 {
+            return;
+        }
+        // Most recent first, so `build` is a plain clone and the oldest falls
+        // off the tail.
+        self.actions.insert(0, record);
+        self.actions.truncate(self.budget.max_actions);
     }
 
     /// Summarize and record runtime events, trimming beyond `max_events` and
     /// collapsing consecutive commits of the same window.
     pub fn record_events(&mut self, events: &[RuntimeEvent]) {
-        let _ = events;
-        todo!("phase 2: summarize, collapse commits, trim to budget.max_events")
+        if self.budget.max_events == 0 {
+            self.events.clear();
+            self.commit_group = None;
+            return;
+        }
+        for event in events {
+            self.record_event(event);
+        }
+    }
+
+    /// Record one event, collapsing it into the head summary when it is a
+    /// commit of the same window as the head.
+    fn record_event(&mut self, event: &RuntimeEvent) {
+        let summary = EventSummary::from_event(event, self.budget.max_detail_chars);
+        if let RuntimeEvent::SurfaceCommit {
+            window_id,
+            commit_seq,
+            damage,
+            ..
+        } = event
+        {
+            let collapsed = match &mut self.commit_group {
+                Some(group) if group.window_id == *window_id => {
+                    group.commits += 1;
+                    group.damage_rects += damage.len();
+                    Some((group.commits, group.damage_rects))
+                }
+                _ => None,
+            };
+            if let Some((commits, damage_rects)) = collapsed {
+                if let Some(head) = self.events.first_mut() {
+                    head.seq = summary.seq;
+                    head.ts_ms = summary.ts_ms;
+                    head.detail = truncate_detail(
+                        commit_detail(*commit_seq, commits, damage_rects),
+                        self.budget.max_detail_chars,
+                    );
+                    return;
+                }
+            }
+            self.commit_group = Some(CommitGroup {
+                window_id: *window_id,
+                commits: 1,
+                damage_rects: damage.len(),
+            });
+        } else {
+            self.commit_group = None;
+        }
+        self.events.insert(0, summary);
+        self.events.truncate(self.budget.max_events);
     }
 
     /// Set the current image, rotating the previous one into `keyframe`.
     ///
-    /// Passing `None` clears both slots.
+    /// Passing `None` clears both slots. When the budget allows fewer than two
+    /// images the keyframe is dropped instead of stored.
     pub fn set_image(&mut self, image: Option<ImagePayload>) {
-        let _ = image;
-        todo!("phase 2: rotate current -> keyframe, drop older")
+        let Some(image) = image else {
+            self.clear_image();
+            return;
+        };
+        if self.budget.max_images == 0 {
+            self.clear_image();
+            return;
+        }
+        let previous = self.current_image.take();
+        self.current_image = Some(image);
+        self.keyframe = if self.budget.max_images >= 2 {
+            previous
+        } else {
+            None
+        };
     }
 
     /// Drop both image slots.
     pub fn clear_image(&mut self) {
-        todo!("phase 2: clear image + keyframe")
+        self.current_image = None;
+        self.keyframe = None;
     }
 
     /// Drop all accumulated state (used when starting a new task).
     pub fn reset(&mut self) {
-        todo!("phase 2: clear actions, events, images")
+        self.actions.clear();
+        self.events.clear();
+        self.commit_group = None;
+        self.clear_image();
     }
 
     /// Assemble the bounded context for the next decision.
     pub fn build(&self, input: ContextInput<'_>) -> AgentContext {
-        let _ = input;
-        todo!("phase 2: project live facts, apply all caps")
+        let mut windows: Vec<WindowSummary> = input
+            .windows
+            .iter()
+            .map(WindowSummary::from_window)
+            .collect();
+        // `active_window` is authoritative from `list_windows`; honour it even
+        // when the window state lags behind.
+        if let Some(active) = input.active_window {
+            for window in &mut windows {
+                window.active |= window.id == active;
+            }
+        }
+        // Active first, then most recent commit; id keeps the order total.
+        windows.sort_by_key(|window| (!window.active, Reverse(window.last_commit_seq), window.id));
+        windows.truncate(self.budget.max_windows);
+
+        let mut apps: Vec<AppSummary> = input.apps.iter().map(AppSummary::from_app).collect();
+        apps.truncate(self.budget.max_apps);
+
+        AgentContext {
+            task: input.task.goal.clone(),
+            success_criteria: input.task.success_criteria.clone(),
+            step: input.step,
+            max_steps: input.max_steps,
+            runtime: input.runtime.map(RuntimeSummary::from_runtime),
+            windows,
+            active_window: input.active_window,
+            apps,
+            recent_actions: self.actions.clone(),
+            recent_events: self.events.clone(),
+            observation: input
+                .observation
+                .map(|observation| self.trim_observation(observation)),
+            last_error: input.last_error.map(str::to_owned),
+            image: self.current_image.clone(),
+            keyframe: self.keyframe.clone(),
+        }
     }
+
+    /// Clone `observation` with `changed_regions` reduced to the budget.
+    ///
+    /// The largest rects are kept; everything dropped is folded into the bounds
+    /// of the last kept rect, so the damage evidence is never lost and the cap
+    /// is still hard.
+    fn trim_observation(&self, observation: &Observation) -> Observation {
+        let mut trimmed = observation.clone();
+        trimmed.changed_regions = trim_regions(
+            &observation.changed_regions,
+            self.budget.max_changed_regions,
+        );
+        trimmed
+    }
+}
+
+/// Reduces `regions` to at most `cap` rects, largest area first.
+fn trim_regions(regions: &[Rect], cap: usize) -> Vec<Rect> {
+    let mut kept: Vec<Rect> = regions
+        .iter()
+        .copied()
+        .filter(|rect| !rect.is_empty())
+        .collect();
+    if kept.len() <= cap {
+        return kept;
+    }
+    if cap == 0 {
+        return Vec::new();
+    }
+    kept.sort_by(|a, b| {
+        b.area()
+            .cmp(&a.area())
+            .then_with(|| (a.y, a.x, a.h, a.w).cmp(&(b.y, b.x, b.h, b.w)))
+    });
+    let dropped = kept.split_off(cap);
+    let bounds = dropped
+        .iter()
+        .fold(Rect::EMPTY, |acc, rect| acc.union(rect));
+    if let Some(last) = kept.last_mut() {
+        let merged = last.union(&bounds);
+        *last = merged;
+    }
+    kept
 }

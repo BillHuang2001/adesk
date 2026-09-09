@@ -37,7 +37,12 @@ pub struct ClickRequest {
 impl ClickRequest {
     /// One left click at the default position.
     pub fn window(window_id: WindowId) -> Self {
-        Self { window_id, position: None, button: Button::Left, count: 1 }
+        Self {
+            window_id,
+            position: None,
+            button: Button::Left,
+            count: 1,
+        }
     }
 
     /// Click at `position`.
@@ -75,7 +80,11 @@ pub struct PointerButtonRequest {
 impl PointerButtonRequest {
     /// Left button at the default position.
     pub fn window(window_id: WindowId) -> Self {
-        Self { window_id, position: None, button: Button::Left }
+        Self {
+            window_id,
+            position: None,
+            button: Button::Left,
+        }
     }
 
     /// Use `position`.
@@ -109,7 +118,12 @@ pub struct ScrollRequest {
 impl ScrollRequest {
     /// Scroll by `(dx, dy)` at the default position.
     pub fn new(window_id: WindowId, dx: f64, dy: f64) -> Self {
-        Self { window_id, position: None, dx, dy }
+        Self {
+            window_id,
+            position: None,
+            dx,
+            dy,
+        }
     }
 
     /// Scroll at `position`.
@@ -138,7 +152,13 @@ pub struct DragRequest {
 impl DragRequest {
     /// Left-button drag from `from` to `to` over the default 150 ms.
     pub fn new(window_id: WindowId, from: Position, to: Position) -> Self {
-        Self { window_id, from, to, button: Button::Left, duration_ms: 150 }
+        Self {
+            window_id,
+            from,
+            to,
+            button: Button::Left,
+            duration_ms: 150,
+        }
     }
 
     /// Use a different button.
@@ -258,8 +278,15 @@ struct PointerMoveParams {
 impl Client {
     /// `pointer_move` — move the pointer inside a window.
     pub async fn pointer_move(&self, window_id: WindowId, position: Position) -> Result<ActionId> {
-        let result: ActionIdResult =
-            self.request("pointer_move", &PointerMoveParams { window_id, position }).await?;
+        let result: ActionIdResult = self
+            .request(
+                "pointer_move",
+                &PointerMoveParams {
+                    window_id,
+                    position,
+                },
+            )
+            .await?;
         Ok(result.action_id)
     }
 
@@ -303,22 +330,37 @@ impl Client {
     ///
     /// `window_id = None` targets the focused window; a different window is
     /// activated first by the runtime.
-    pub async fn keypress(&self, keys: impl Into<KeyChord>, window_id: Option<WindowId>) -> Result<ActionId> {
+    pub async fn keypress(
+        &self,
+        keys: impl Into<KeyChord>,
+        window_id: Option<WindowId>,
+    ) -> Result<ActionId> {
         let chord = keys.into();
-        let result: ActionIdResult =
-            self.request("keypress", &KeypressParams { keys: &chord, window_id }).await?;
+        let result: ActionIdResult = self
+            .request(
+                "keypress",
+                &KeypressParams {
+                    keys: &chord,
+                    window_id,
+                },
+            )
+            .await?;
         Ok(result.action_id)
     }
 
     /// `key_down` — press and hold a key.
     pub async fn key_down(&self, key: &str, window_id: Option<WindowId>) -> Result<ActionId> {
-        let result: ActionIdResult = self.request("key_down", &KeyParams { key, window_id }).await?;
+        let result: ActionIdResult = self
+            .request("key_down", &KeyParams { key, window_id })
+            .await?;
         Ok(result.action_id)
     }
 
     /// `key_up` — release a held key.
     pub async fn key_up(&self, key: &str, window_id: Option<WindowId>) -> Result<ActionId> {
-        let result: ActionIdResult = self.request("key_up", &KeyParams { key, window_id }).await?;
+        let result: ActionIdResult = self
+            .request("key_up", &KeyParams { key, window_id })
+            .await?;
         Ok(result.action_id)
     }
 
@@ -326,7 +368,12 @@ impl Client {
     ///
     /// Unmappable characters are skipped and reported in
     /// [`TypeTextResult::skipped`].
-    pub async fn type_text(&self, text: &str, window_id: Option<WindowId>) -> Result<TypeTextResult> {
-        self.request("type_text", &TypeTextParams { text, window_id }).await
+    pub async fn type_text(
+        &self,
+        text: &str,
+        window_id: Option<WindowId>,
+    ) -> Result<TypeTextResult> {
+        self.request("type_text", &TypeTextParams { text, window_id })
+            .await
     }
 }

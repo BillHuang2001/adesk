@@ -60,9 +60,20 @@ impl Client {
     /// `query` is a case-insensitive substring filter (`None` = no filter);
     /// `include_hidden` includes `NoDisplay`/`Hidden` entries (protocol §5.2,
     /// `docs/architecture.md` §7).
-    pub async fn list_apps(&self, query: Option<&str>, include_hidden: bool) -> Result<Vec<AppInfo>> {
-        let result: ListAppsResult =
-            self.request("list_apps", &ListAppsParams { query, include_hidden }).await?;
+    pub async fn list_apps(
+        &self,
+        query: Option<&str>,
+        include_hidden: bool,
+    ) -> Result<Vec<AppInfo>> {
+        let result: ListAppsResult = self
+            .request(
+                "list_apps",
+                &ListAppsParams {
+                    query,
+                    include_hidden,
+                },
+            )
+            .await?;
         Ok(result.apps)
     }
 
@@ -77,6 +88,7 @@ impl Client {
     /// `args` are appended after `Exec` field-code expansion; pass `&[]` for
     /// none. Returns as soon as the process is spawned.
     pub async fn launch_app(&self, app_id: &AppId, args: &[String]) -> Result<LaunchResult> {
-        self.request("launch_app", &LaunchAppParams { app_id, args }).await
+        self.request("launch_app", &LaunchAppParams { app_id, args })
+            .await
     }
 }

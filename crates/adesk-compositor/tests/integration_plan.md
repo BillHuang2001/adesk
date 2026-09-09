@@ -166,4 +166,7 @@ These tests are added only after: (a) the protocol handlers call the `State`
 side-effect API instead of `todo!()`, (b) `adesk-wm` and `adesk-render` have landed
 and `WmBridge`'s assumed surface (see `src/wm.rs`) has been reconciled, and
 (c) `adesk-testkit` exposes the helpers above. Until then the public-API smoke tests
-in `tests/compositor_smoke.rs` remain `#[ignore]`d.
+in `tests/compositor_smoke.rs` are the only live end-to-end coverage: they run
+unconditionally (no `#[ignore]`) against a real compositor thread, each one serialized
+on a process-wide lock and pointed at a private writable `XDG_RUNTIME_DIR` under
+`std::env::temp_dir()`.
