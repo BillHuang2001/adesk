@@ -87,7 +87,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 | Socket bind/accept/stale-file handling | `./src/socket.rs` |
 | Connection read loop, writer task, NDJSON framing | `./src/connection.rs` |
 | Per-connection `Session`, ordered `InputQueue` | `./src/session.rs` |
-| Event pump, `QueryState` resync, inspection-cache updates | `./src/event_pump.rs` |
+| Event pump, launch→window correlation stamping, `QueryState` resync, inspection-cache updates | `./src/event_pump.rs` |
 | Event + inspector subscription registries, fan-out | `./src/subscriptions.rs` |
 | Inspection snapshot cache + async refresh (`InspectionSource`) | `./src/inspection.rs` |
 | Image encoding (`ImageBuffer` → `ImagePayload`) | `./src/images.rs` |
