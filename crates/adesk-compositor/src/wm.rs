@@ -106,3 +106,16 @@ impl WmBridge {
             .ok_or_else(|| CompositorError::WindowManagement(format!("unknown window {id}")))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The bridge must build the window manager with the output size as its tiling
+    /// policy configuration (`PolicyConfig::new`), not as a bare size.
+    #[test]
+    fn new_wires_the_output_size_into_the_policy_config() {
+        let bridge = WmBridge::new(Size::new(1280, 800));
+        assert_eq!(bridge.manager.config().output_size, Size::new(1280, 800));
+    }
+}
