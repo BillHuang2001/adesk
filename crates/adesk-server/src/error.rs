@@ -49,20 +49,338 @@ pub type Result<T, E = ServerError> = std::result::Result<T, E>;
 
 impl ServerError {
     /// The AGP error code (`docs/protocol.md` §6) this failure maps to.
+    ///
+    /// The mapping is the server-side view of the sibling crates' pinned
+    /// mappings: an observer request mistake is a client error, a renderer
+    /// failure is a rendering failure, and anything the runtime cannot classify
+    /// is `internal` — never a code invented here.
     pub fn code(&self) -> ErrorCode {
-        todo!()
+        match self {
+            ServerError::Observer(error) => match error {
+                adesk_observer::Error::UnknownWindow(_) => ErrorCode::UnknownWindow,
+                adesk_observer::Error::UnknownAction(_) => ErrorCode::InvalidRequest,
+                adesk_observer::Error::Internal(_) => ErrorCode::Internal,
+            },
+            ServerError::Registry(error) => match error {
+                adesk_app_registry::Error::UnknownApp(_) => ErrorCode::UnknownApp,
+                adesk_app_registry::Error::NoExec { .. } => ErrorCode::NotSupported,
+                adesk_app_registry::Error::InvalidExec { .. }
+                | adesk_app_registry::Error::TryExecNotFound { .. }
+                | adesk_app_registry::Error::Spawn(_) => ErrorCode::LaunchFailed,
+                adesk_app_registry::Error::InvalidEntry { .. }
+                | adesk_app_registry::Error::Io { .. } => ErrorCode::Internal,
+                // `adesk_app_registry::Error` is `#[non_exhaustive]`: anything
+                // added later keeps the registry crate's own pinned mapping
+                // instead of silently degrading to `internal`.
+                _ => error.code(),
+            },
+            ServerError::Inspector(error) => match error {
+                adesk_inspector::Error::InvalidFrame(_)
+                | adesk_inspector::Error::InvalidRequest(_) => ErrorCode::InvalidRequest,
+                adesk_inspector::Error::Render(_) => ErrorCode::RenderFailed,
+            },
+            // `adesk_render` owns the renderer-side mapping (`Encode` is a
+            // `capture_failed`, caller mistakes are `invalid_request`).
+            ServerError::Render(error) => error.code(),
+            ServerError::ShuttingDown => ErrorCode::ShuttingDown,
+            ServerError::Compositor(_)
+            | ServerError::Io(_)
+            | ServerError::Proto(_)
+            | ServerError::Join(_)
+            | ServerError::Internal(_) => ErrorCode::Internal,
+        }
     }
 
     /// Builds the wire error payload for a failed request.
+    ///
+    /// `code`/`message` are always present; `data` carries the id that was not
+    /// found for the three lookups where the client can act on it (§6 leaves
+    /// `data` free-form, so no other variant invents a field).
     pub fn payload(&self) -> adesk_proto::ErrorPayload {
-        todo!()
+        let payload = adesk_proto::ErrorPayload::new(self.code(), self.to_string());
+        match self {
+            ServerError::Observer(adesk_observer::Error::UnknownWindow(window_id)) => {
+                payload.with_data(serde_json::json!({ "window_id": window_id }))
+            }
+            ServerError::Observer(adesk_observer::Error::UnknownAction(action_id)) => {
+                payload.with_data(serde_json::json!({ "action_id": action_id }))
+            }
+            ServerError::Registry(adesk_app_registry::Error::UnknownApp(app_id)) => {
+                payload.with_data(serde_json::json!({ "app_id": app_id }))
+            }
+            _ => payload,
+        }
     }
 }
 
 impl From<ServerError> for adesk_core::Error {
-    /// Lossy conversion used at crate boundaries (`adesk_core::Error` is the
-    /// umbrella error; its `code` mirrors [`ServerError::code`]).
+    /// Lossy conversion used at crate boundaries: the AGP [`ErrorCode`] and the
+    /// rendered message survive, while the structured `data` that
+    /// [`ServerError::payload`] attaches (window/action/app ids) is dropped —
+    /// `adesk_core::Error` has no `data` field. Use [`ServerError::payload`]
+    /// whenever the wire error object is what matters.
     fn from(error: ServerError) -> adesk_core::Error {
-        todo!()
+        adesk_core::Error::new(error.code(), error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use adesk_core::{ActionId, AppId, WindowId};
+
+    use super::*;
+
+    /// One representative instance of every [`ServerError`] variant with the
+    /// code `docs/protocol.md` §6 requires.
+    ///
+    /// `Join` is absent because a [`tokio::task::JoinError`] cannot be built
+    /// directly; `join_error_maps_to_internal` produces a real one.
+    fn cases() -> Vec<(ServerError, ErrorCode)> {
+        vec![
+            (
+                ServerError::Observer(adesk_observer::Error::UnknownWindow(WindowId(7))),
+                ErrorCode::UnknownWindow,
+            ),
+            (
+                ServerError::Observer(adesk_observer::Error::UnknownAction(ActionId(582))),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Observer(adesk_observer::Error::Internal("state dropped".into())),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::UnknownApp(AppId::from(
+                    "org.mozilla.firefox",
+                ))),
+                ErrorCode::UnknownApp,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::NoExec {
+                    app: AppId::from("org.example.dbus"),
+                }),
+                ErrorCode::NotSupported,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::InvalidExec {
+                    app: AppId::from("org.example.bad"),
+                    source: adesk_app_registry::ExecError::UnterminatedQuote { offset: 3 },
+                }),
+                ErrorCode::LaunchFailed,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::TryExecNotFound {
+                    program: "missing-binary".into(),
+                }),
+                ErrorCode::LaunchFailed,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::Spawn(
+                    adesk_app_registry::SpawnError::Other("mock spawner failed".into()),
+                )),
+                ErrorCode::LaunchFailed,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::InvalidEntry {
+                    path: PathBuf::from("/usr/share/applications/bad.desktop"),
+                    reason: "missing Name".into(),
+                }),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::Io {
+                    path: PathBuf::from("/usr/share/applications"),
+                    source: std::io::Error::new(std::io::ErrorKind::PermissionDenied, "denied"),
+                }),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Registry(adesk_app_registry::Error::InvalidArgument(
+                    "limit must be positive".into(),
+                )),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Inspector(adesk_inspector::Error::InvalidFrame("size mismatch".into())),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Inspector(adesk_inspector::Error::InvalidRequest(
+                    "empty region".into(),
+                )),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Inspector(adesk_inspector::Error::Render(
+                    adesk_render::RenderError::Encode {
+                        reason: "png failed".into(),
+                    },
+                )),
+                ErrorCode::RenderFailed,
+            ),
+            (
+                ServerError::Render(adesk_render::RenderError::Encode {
+                    reason: "png failed".into(),
+                }),
+                ErrorCode::CaptureFailed,
+            ),
+            (
+                ServerError::Render(adesk_render::RenderError::InvalidConfig {
+                    reason: "crop outside source".into(),
+                }),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Render(adesk_render::RenderError::InvalidImage {
+                    reason: "short buffer".into(),
+                }),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Render(adesk_render::RenderError::ImportFailed {
+                    reason: "dmabuf not sampleable".into(),
+                }),
+                ErrorCode::RenderFailed,
+            ),
+            (
+                ServerError::Compositor(adesk_compositor::CompositorError::Internal("bug".into())),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Io(std::io::Error::new(std::io::ErrorKind::NotFound, "gone")),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Proto(adesk_proto::ProtoError::Malformed("garbage".into())),
+                ErrorCode::Internal,
+            ),
+            (ServerError::ShuttingDown, ErrorCode::ShuttingDown),
+            (
+                ServerError::Internal("invariant violated".into()),
+                ErrorCode::Internal,
+            ),
+        ]
+    }
+
+    #[test]
+    fn code_matches_protocol_table() {
+        for (error, expected) in cases() {
+            assert_eq!(error.code(), expected, "wrong code for {error:?}");
+        }
+    }
+
+    #[test]
+    fn payload_carries_code_and_display_message() {
+        for (error, expected) in cases() {
+            let payload = error.payload();
+            assert_eq!(payload.code, expected);
+            assert_eq!(payload.message, error.to_string());
+        }
+    }
+
+    #[test]
+    fn payload_data_carries_unknown_window_id() {
+        let error = ServerError::Observer(adesk_observer::Error::UnknownWindow(WindowId(7)));
+        let payload = error.payload();
+        assert_eq!(payload.code, ErrorCode::UnknownWindow);
+        assert_eq!(payload.data, Some(serde_json::json!({ "window_id": 7 })));
+    }
+
+    #[test]
+    fn payload_data_carries_unknown_action_id() {
+        let error = ServerError::Observer(adesk_observer::Error::UnknownAction(ActionId(582)));
+        let payload = error.payload();
+        assert_eq!(payload.code, ErrorCode::InvalidRequest);
+        assert_eq!(payload.data, Some(serde_json::json!({ "action_id": 582 })));
+    }
+
+    #[test]
+    fn payload_data_carries_unknown_app_id_as_bare_string() {
+        let error = ServerError::Registry(adesk_app_registry::Error::UnknownApp(AppId::from(
+            "org.mozilla.firefox",
+        )));
+        let payload = error.payload();
+        assert_eq!(payload.code, ErrorCode::UnknownApp);
+        // `AppId` is `#[serde(transparent)]`, so the id is the bare string.
+        assert_eq!(
+            payload.data,
+            Some(serde_json::json!({ "app_id": "org.mozilla.firefox" }))
+        );
+    }
+
+    #[test]
+    fn payload_omits_data_for_every_other_variant() {
+        let variants = vec![
+            ServerError::Observer(adesk_observer::Error::Internal("boom".into())),
+            ServerError::Registry(adesk_app_registry::Error::NoExec {
+                app: AppId::from("org.example.dbus"),
+            }),
+            ServerError::Registry(adesk_app_registry::Error::InvalidEntry {
+                path: PathBuf::from("/bad.desktop"),
+                reason: "missing Name".into(),
+            }),
+            ServerError::Inspector(adesk_inspector::Error::InvalidRequest("empty".into())),
+            ServerError::Render(adesk_render::RenderError::Encode {
+                reason: "png".into(),
+            }),
+            ServerError::Compositor(adesk_compositor::CompositorError::Stopped),
+            ServerError::Io(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "gone")),
+            ServerError::Proto(adesk_proto::ProtoError::Malformed("garbage".into())),
+            ServerError::ShuttingDown,
+            ServerError::Internal("invariant violated".into()),
+        ];
+        for error in variants {
+            assert_eq!(error.payload().data, None, "unexpected data for {error:?}");
+        }
+    }
+
+    #[test]
+    fn payload_serializes_as_the_agp_error_object() {
+        let plain = ServerError::ShuttingDown.payload();
+        assert_eq!(
+            serde_json::to_value(&plain).unwrap(),
+            serde_json::json!({
+                "code": "shutting_down",
+                "message": "server is shutting down",
+            })
+        );
+
+        let with_data =
+            ServerError::Observer(adesk_observer::Error::UnknownWindow(WindowId(99))).payload();
+        assert_eq!(
+            serde_json::to_value(&with_data).unwrap(),
+            serde_json::json!({
+                "code": "unknown_window",
+                "message": "observer error: window 99 is not known",
+                "data": { "window_id": 99 },
+            })
+        );
+    }
+
+    #[test]
+    fn into_core_error_preserves_code_and_message() {
+        for (error, expected) in cases() {
+            let message = error.to_string();
+            let core: adesk_core::Error = error.into();
+            assert_eq!(core.code, expected);
+            assert_eq!(core.message, message);
+        }
+    }
+
+    #[tokio::test]
+    async fn join_error_maps_to_internal() {
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        let join_error = handle.await.expect_err("aborted task must fail to join");
+
+        let error = ServerError::Join(join_error);
+        assert_eq!(error.code(), ErrorCode::Internal);
+        assert_eq!(error.payload().code, ErrorCode::Internal);
+        assert_eq!(error.payload().data, None);
+
+        let core: adesk_core::Error = error.into();
+        assert_eq!(core.code, ErrorCode::Internal);
     }
 }
