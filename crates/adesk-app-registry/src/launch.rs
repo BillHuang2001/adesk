@@ -284,7 +284,10 @@ mod tests {
         let only_extra = LaunchEnv::new().with_var("A", "1").with_var("B", "2");
         assert_eq!(
             only_extra.overrides(),
-            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "2".to_string())
+            ]
         );
 
         let only_runtime = LaunchEnv::new().with_xdg_runtime_dir("/tmp/rt");
@@ -363,7 +366,10 @@ mod tests {
         assert_eq!(command.args, vec!["-e".to_string(), "htop".to_string()]);
         assert_eq!(
             command.env,
-            vec![("A".to_string(), "1".to_string()), ("B".to_string(), "2".to_string())]
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "2".to_string())
+            ]
         );
     }
 
@@ -445,7 +451,10 @@ mod tests {
             SpawnError::Io { program, source } => {
                 assert_eq!(program, missing);
                 assert_eq!(source.kind(), std::io::ErrorKind::NotFound);
-                assert!(rendered.contains(&missing), "message lost the program: {rendered}");
+                assert!(
+                    rendered.contains(&missing),
+                    "message lost the program: {rendered}"
+                );
             }
             other => panic!("expected SpawnError::Io, got {other:?}"),
         }

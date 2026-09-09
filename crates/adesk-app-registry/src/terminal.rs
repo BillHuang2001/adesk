@@ -123,7 +123,10 @@ mod tests {
     fn with_args_uses_prefix_args_verbatim() {
         let spec = TerminalSpec::with_args("kitty", owned(&["--single-instance", "-e"]));
         assert_eq!(spec.program(), "kitty");
-        assert_eq!(spec.prefix_args(), owned(&["--single-instance", "-e"]).as_slice());
+        assert_eq!(
+            spec.prefix_args(),
+            owned(&["--single-instance", "-e"]).as_slice()
+        );
 
         // No implicit separator is appended.
         let bare = TerminalSpec::with_args("foot", Vec::new());
@@ -156,13 +159,21 @@ mod tests {
                 "kitty",
                 owned(&["--single-instance", "-e"]),
             ),
-            (Some("wezterm start --"), "wezterm", owned(&["start", "--", "-e"])),
+            (
+                Some("wezterm start --"),
+                "wezterm",
+                owned(&["start", "--", "-e"]),
+            ),
         ];
 
         for (value, program, prefix_args) in cases {
             let spec = TerminalSpec::from_env_value(value);
             assert_eq!(spec.program(), program, "program for {value:?}");
-            assert_eq!(spec.prefix_args(), prefix_args.as_slice(), "prefix for {value:?}");
+            assert_eq!(
+                spec.prefix_args(),
+                prefix_args.as_slice(),
+                "prefix for {value:?}"
+            );
         }
     }
     #[test]
@@ -187,7 +198,10 @@ mod tests {
     fn default_is_the_deterministic_fallback() {
         assert_eq!(TerminalSpec::default(), TerminalSpec::new(DEFAULT_TERMINAL));
         assert_eq!(TerminalSpec::default().program(), DEFAULT_TERMINAL);
-        assert_eq!(TerminalSpec::default().prefix_args(), owned(&["-e"]).as_slice());
+        assert_eq!(
+            TerminalSpec::default().prefix_args(),
+            owned(&["-e"]).as_slice()
+        );
     }
 
     #[test]

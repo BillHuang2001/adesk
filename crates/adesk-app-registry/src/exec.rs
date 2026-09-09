@@ -373,7 +373,10 @@ mod tests {
     #[test]
     fn expand_tokens_single_file_codes_vanish_without_files() {
         let context = ExecContext::default();
-        assert_eq!(expand(&["app", "%f", "--flag"], &context), ["app", "--flag"]);
+        assert_eq!(
+            expand(&["app", "%f", "--flag"], &context),
+            ["app", "--flag"]
+        );
         assert_eq!(expand(&["%u"], &context), Vec::<String>::new());
     }
 
@@ -430,7 +433,10 @@ mod tests {
             expand(&["--icon=%i", "%i%i"], &context),
             ["--icon=%i", "%i%i"]
         );
-        assert_eq!(expand(&["--icon=%i"], &ExecContext::default()), ["--icon=%i"]);
+        assert_eq!(
+            expand(&["--icon=%i"], &ExecContext::default()),
+            ["--icon=%i"]
+        );
     }
 
     // --- expand_tokens: in-token substitutions ------------------------------
@@ -485,7 +491,10 @@ mod tests {
     fn expand_tokens_removes_deprecated_codes() {
         let context = ExecContext::default();
         assert_eq!(
-            expand(&["app", "%d", "%D", "%n", "%N", "%v", "%m", "--flag"], &context),
+            expand(
+                &["app", "%d", "%D", "%n", "%N", "%v", "%m", "--flag"],
+                &context
+            ),
             ["app", "--flag"]
         );
         assert_eq!(expand(&["a%Db", "%n%m", "%v%N"], &context), ["ab"]);
@@ -508,7 +517,10 @@ mod tests {
             ..ExecContext::default()
         };
         assert_eq!(
-            expand(&["--file=%f", "--file=%u", "--file=%F", "--file=%U"], &context),
+            expand(
+                &["--file=%f", "--file=%u", "--file=%F", "--file=%U"],
+                &context
+            ),
             ["--file=%f", "--file=%u", "--file=%F", "--file=%U"]
         );
     }
