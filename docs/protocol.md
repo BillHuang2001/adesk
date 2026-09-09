@@ -72,7 +72,8 @@ Three frame kinds:
 ```jsonc
 AppInfo     = {"id": "org.mozilla.firefox", "name": "Firefox", "icon": "firefox",
                "exec": "/usr/bin/firefox %u", "terminal": false, "categories": ["Network"],
-               "startup_wm_class": "firefox", "dbus_activatable": false, "hidden": false}
+               "startup_wm_class": "firefox", "dbus_activatable": false, "hidden": false,
+               "no_display": false, "try_exec": null}
 WindowId    = u64                       // stable for the lifetime of the window
 WindowInfo  = {"id": 17, "app_id": "org.mozilla.firefox" | null, "title": "GitHub" | null,
                "geometry": Rect, "state": "active" | "inactive",

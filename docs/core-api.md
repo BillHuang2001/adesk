@@ -21,8 +21,10 @@ pub struct LaunchId(pub u64);   // one per launch_app call
 pub struct AppId(pub String);   // desktop-file id, e.g. "org.mozilla.firefox"
 ```
 
-All four are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
+The three numeric ids are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
 `Deserialize` (transparent), with `Display` and `From`/`Into` for their inner type.
+`AppId` is `Clone` (not `Copy`), `Display`, `From<String>`, `From<&str>`, `AsRef<str>`,
+`as_str()`, transparent serde, `Ord`.
 
 ## Geometry
 
