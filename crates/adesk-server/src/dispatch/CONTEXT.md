@@ -26,7 +26,7 @@ Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>P
 
 Shared internal helpers (not public API):
 - `windows.rs` is the canonical home of the compositor bridge: `pub(super) async state(ctx) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(super) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(super) unknown_window(WindowId) -> ServerError`.
-- `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale`, shared with `inspect.rs`), `source_size`, `observed_window`.
+- `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale` = output width / source width, `1.0` for an empty source; shared with `inspect.rs`), `source_size` (requested crop size, else window geometry), `observed_window` (the observation's own window, else `active_window_id`/`keyboard_focus`, else none).
 - `apps.rs`: `next_launch_seq(watermark)` allocates the server-side sequence for `AppLaunched`.
 
 ## Routing Table
