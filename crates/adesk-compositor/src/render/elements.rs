@@ -270,8 +270,7 @@ pub(crate) fn overlay_elements(
 /// `cursor` marks the window instead of the pointer position (the seat is not
 /// visible to the renderer). Text labels (`window_ids`/`app_ids`/`actions`/
 /// `commit_timing` values) and cursor tracking are `adesk-inspector`'s job; the
-/// compositor only provides the composited marker. Overlay pixels have no
-/// automated test yet (they need a live window to be observable).
+/// compositor only provides the composited marker.
 fn overlay_markers(
     windows: impl IntoIterator<Item = (Rect, bool)>,
     overlays: &[OverlayKind],

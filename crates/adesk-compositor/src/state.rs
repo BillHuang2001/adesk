@@ -6,8 +6,9 @@
 //! passed as the data type to the `calloop` loop. No other thread may touch it.
 //!
 //! Protocol handler impls (`CompositorHandler`, `XdgShellHandler`, ...) live next to
-//! their protocol in `crate::protocols`; this file only defines the struct, its
-//! construction and the state accessors those impls need.
+//! their protocol in `crate::protocols`; this file defines the struct, its
+//! construction, the accessors those impls need and the side-effect API they call
+//! to change state.
 
 use std::time::Instant;
 
@@ -176,10 +177,10 @@ impl State {
     // Side-effect API
     //
     // These are the only entry points protocol handlers and the command
-    // dispatcher use to change compositor state. They are declared here (the
-    // hub) so `crate::protocols` never touches `adesk-wm`, the renderer or
-    // input internals directly. Phase 2 fills in the bodies; Phase 1 stubs
-    // exist so the whole crate type-checks against Smithay 0.7.
+    // dispatcher use to change compositor state. They live here (the hub) so
+    // `crate::protocols` never touches `adesk-wm`, the renderer or input
+    // internals directly: a handler reports what the client did and this API
+    // decides what it means for the window model, the seat and the event stream.
     // ---------------------------------------------------------------------
 
     /// A toplevel surface committed its first buffer: map it, assign a

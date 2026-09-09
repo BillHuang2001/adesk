@@ -31,9 +31,8 @@ use crate::{
     socket, state::State, Result,
 };
 
-/// Command dispatch, declared here rather than in `lib.rs` so the crate's module
-/// list stays the skeleton it already is. `#[path]` keeps the file at
-/// `src/dispatch.rs`; the module path is `crate::run::dispatch`.
+/// Command dispatch, declared here rather than in `lib.rs`. `#[path]` keeps the
+/// file at `src/dispatch.rs`; the module path is `crate::run::dispatch`.
 #[path = "dispatch.rs"]
 pub(crate) mod dispatch;
 
