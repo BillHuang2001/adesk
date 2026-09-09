@@ -77,12 +77,15 @@ impl<E> SceneNode<E> {
     }
 }
 
-/// Ordered render elements (bottom-to-top z-order) and the commit watermark
-/// they were built from.
+/// Ordered render elements and the commit watermark they were built from.
 ///
-/// The pipeline draws the nodes in reverse order (topmost first) so that
-/// lower elements are only drawn where not covered by opaque regions, matching
-/// Smithay's damage tracker. `commit_seq` is copied into
+/// Nodes are stored **bottom-to-top**: the first node is drawn first and the
+/// last node is topmost. [`crate::render_scene`] draws them in that order
+/// (painter's algorithm), so later nodes cover earlier ones.
+/// Note that Smithay's `OutputDamageTracker::render_output` expects the
+/// opposite (front-to-back, topmost first) input; `adesk-compositor` must
+/// reverse the slice if it ever feeds a scene into the tracker instead of this
+/// crate's pipeline. `commit_seq` is copied into
 /// [`crate::RenderedFrame::commit_seq`] so an image can be correlated with the
 /// window's commit history.
 #[derive(Debug, Clone)]

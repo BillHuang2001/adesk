@@ -24,9 +24,11 @@ use crate::scene::Scene;
 /// 2. `renderer.bind(target.texture_mut())` → framebuffer;
 /// 3. `renderer.render(&mut framebuffer, target_size, Transform::Normal)` → frame;
 /// 4. `frame.clear(config.clear_color, &[target_rect])`;
-/// 5. draw nodes top-to-bottom: `dst = (node.location - source.loc)`, size from
-///    `element.geometry(scale)`, `src = element.src()`, damage/opaque regions
-///    translated and clipped; empty node damage means full redraw;
+/// 5. draw nodes bottom-to-top (painter's algorithm, `scene.nodes()` order):
+///    `dst = (node.location - source.loc)` with the size from
+///    `element.geometry(scale)`, `src = element.src()`, per-node damage and
+///    opaque regions translated into element-local coordinates and clipped to
+///    the target; empty node damage means full redraw;
 /// 6. `frame.finish()`;
 /// 7. `renderer.copy_framebuffer(&framebuffer, target_rect, READBACK_FORMAT)` →
 ///    mapping, `renderer.map_texture(&mapping)` → bytes,
