@@ -25,10 +25,6 @@
 //! `EventPayload::to_data`, `NdjsonCodec` + the `Codec` trait, and
 //! `ImagePayload`.
 
-// Skeleton phase: every item below is consumed by the transport, whose bodies
-// are not written yet. Drop this once the transport uses them.
-#![allow(dead_code)]
-
 use adesk_core::ErrorCode;
 use adesk_proto::methods::Method;
 use adesk_proto::{
@@ -125,10 +121,29 @@ pub(crate) fn encode_request(id: u64, method: &str, params: Value) -> Result<Vec
 ///
 /// A request frame arriving from the server is a protocol violation: AGP is
 /// full-duplex but only the client sends requests.
+///
+/// The strict `adesk-proto` codec rejects an event frame whose `event` name it
+/// does not know ([`adesk_proto::ProtoError::UnknownEventKind`]), which would
+/// make the forward-compatibility escape hatch [`AgpEvent::Other`](crate::AgpEvent::Other)
+/// unreachable (protocol §7: additive event kinds must not break a client). When
+/// the strict decode fails, the line is therefore retried as a bare JSON object:
+/// a string `event` plus numeric `seq`/`ts_ms` (optional `data`) becomes a
+/// [`RawEvent`] and everything else keeps the original [`ClientError::Protocol`].
 pub(crate) fn decode_line(line: &[u8]) -> Result<Inbound> {
-    let frame = NdjsonCodec.decode(line).map_err(|error| ClientError::Protocol {
-        message: format!("malformed inbound frame: {error}"),
-    })?;
+    let error = match NdjsonCodec.decode(line) {
+        Ok(frame) => return from_frame(frame),
+        Err(error) => error,
+    };
+    match lenient_event(line) {
+        Some(event) => Ok(Inbound::Event(event)),
+        None => Err(ClientError::Protocol {
+            message: format!("malformed inbound frame: {error}"),
+        }),
+    }
+}
+
+/// Convert a strictly decoded frame into the crate-internal inbound vocabulary.
+fn from_frame(frame: Frame) -> Result<Inbound> {
     match frame {
         Frame::Response(ResponseFrame { id, outcome }) => match outcome {
             ResponseOutcome::Result(payload) => {
@@ -150,4 +165,26 @@ pub(crate) fn decode_line(line: &[u8]) -> Result<Inbound> {
             message: "server sent a request frame".to_owned(),
         }),
     }
+}
+
+/// Parse an event frame the strict codec refused, as raw JSON (protocol §7).
+///
+/// Requires an object with a string `event` and numeric `seq`/`ts_ms`; `data`
+/// is optional and defaults to an empty object. Anything else is not an event
+/// frame and keeps the strict error.
+fn lenient_event(line: &[u8]) -> Option<RawEvent> {
+    let Value::Object(object) = serde_json::from_slice::<Value>(line).ok()? else {
+        return None;
+    };
+    let name = match object.get("event") {
+        Some(Value::String(name)) => name.clone(),
+        _ => return None,
+    };
+    let seq = object.get("seq").and_then(Value::as_u64)?;
+    let ts_ms = object.get("ts_ms").and_then(Value::as_u64)?;
+    let data = match object.get("data") {
+        None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
+        Some(data) => data.clone(),
+    };
+    Some(RawEvent { name, seq, ts_ms, data })
 }
