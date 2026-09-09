@@ -58,9 +58,9 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 
 - Only `docs/protocol.md` defines the wire; the client must never invent a method, field or default. Adding one is a root-owned protocol change.
 - The client owns no semantics: waits, filtering, ordering and quiet detection are server-side (`docs/architecture.md` §6, §9). Methods marshal params and map results — nothing else.
-- All `adesk_proto` frame/codec types are named **only** in `src/wire.rs` (plus the `ImagePayload` re-export in `lib.rs`); the rest of the crate uses the crate-internal `RawEvent`/`Inbound` vocabulary.
+- All `adesk_proto` frame/codec types are named **only** in `src/wire.rs` (plus the `ImagePayload` re-export in `lib.rs` and its `format` vocabulary in `src/image.rs`); the rest of the crate uses the crate-internal `RawEvent`/`Inbound` vocabulary.
 - No third-party version literals: every dependency comes from `[workspace.dependencies]` via `.workspace = true`.
-- No `unsafe`; `#![deny(missing_docs)]`. No panics on request/event paths: `todo!()` marks the not-yet-implemented skeleton bodies and must be gone before this crate is "implemented" (root contract).
+- No `unsafe`; `#![deny(missing_docs)]`. No panics on request/event paths.
 - Files stay well under the ~1000-line threshold; split along protocol sections rather than growing a file.
 - Do not log pixel payloads; `tracing` at `debug`/`trace` only in transport internals, never per event above `trace`.
 
