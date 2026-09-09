@@ -1,0 +1,20 @@
+# adesk-core — shared domain model for the ADesk runtime.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift. Keep this crate free of I/O, async, Smithay and tokio.
+[package]
+name = "adesk-core"
+description = "ADesk shared domain model: ids, geometry, window/app descriptions, runtime events and errors."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
