@@ -76,7 +76,7 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 
 ## Known Issues
 
-- `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: `adesk-compositor`'s `XdgShellHandler::new_popup` (`crates/adesk-compositor/src/protocols/xdg_shell.rs`) never sends the initial `xdg_popup.configure`. Sibling blocker in `adesk-compositor`.
+- The module-level doc comments in the frozen acceptance specs (`tests/wayland_client.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/api_surface.rs`) still describe the Phase-1 skeleton ("bodies are `todo!()`", "expected to fail at runtime until Phase 2"); `tests/wayland_client.rs` also still claims `--test-threads=1` is required. Both are stale — the specs must not be edited, so ignore the comments.
 
 ## Notes for Agents
 
