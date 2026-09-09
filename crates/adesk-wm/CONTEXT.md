@@ -45,7 +45,7 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 ## Compositor integration (what `adesk-compositor` must do)
 
 - Map: `let (id, actions) = wm.on_map(MapRequest { surface_key, app_id, pid, title, created_seq })`; emit `WindowCreated { window_id: id, .. }`, then apply `actions` in order.
-- Apply `ConfigureWindow { id, rect }` by configuring the toplevel to `rect.size()` and placing its surface tree at `(rect.x, rect.y)` in output space; apply `Activate`/`ActivatePrevious` by moving keyboard focus and emitting `WindowActivated { window_id: id, previous }` + `FocusChanged`; `None` emits nothing.
+- Apply `ConfigureWindow { id, rect }` by configuring the toplevel to `rect.size()` and placing its surface tree at `(rect.x, rect.y)` in output space; apply `Activate`/`ActivatePrevious` by moving keyboard focus and emitting `WindowActivated { window_id: id, previous }` + `FocusChanged`, where `previous` is the compositor's focus target before the action (`None` for `ActivatePrevious`, whose predecessor is already destroyed); `None` emits nothing.
 - Destroy (unmap and destroy are not distinguished in v1): emit `WindowDestroyed { window_id: id }` first, then apply `wm.on_destroy(id)`.
 - Title / commit / popups: call `on_title`, `on_commit`, `on_popup_added`/`on_popup_removed` and emit `TitleChanged`, `SurfaceCommit { commit_seq, damage }`, `PopupAppeared`/`PopupDisappeared`.
 - Input: `wm.resolve_position(id, position)` yields the output `Point` for the seat; `None` means reply `unknown_window`.
