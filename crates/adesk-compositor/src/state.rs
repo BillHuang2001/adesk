@@ -483,7 +483,7 @@ impl State {
         // Resolve the whole sequence first: a key the keymap cannot produce must
         // not deliver a partially applied chord.
         let keymap = self.input.keymap();
-        let mut plan: Vec<(u32, smithay::backend::input::KeyState)> = Vec::new();
+        let mut plan: Vec<(u32, KeyState)> = Vec::new();
         for (keysym, key_state) in &sequence {
             let resolved = keymap.resolve(keysym.value()).ok_or_else(|| {
                 crate::error::CompositorError::InvalidRequest(format!(
@@ -513,20 +513,17 @@ impl State {
                     plan.extend(
                         modifiers
                             .iter()
-                            .map(|keycode| (*keycode, smithay::backend::input::KeyState::Pressed)),
+                            .map(|keycode| (*keycode, KeyState::Pressed)),
                     );
-                    plan.push((resolved.keycode, smithay::backend::input::KeyState::Pressed));
+                    plan.push((resolved.keycode, KeyState::Pressed));
                 }
                 KeyState::Released => {
-                    plan.push((
-                        resolved.keycode,
-                        smithay::backend::input::KeyState::Released,
-                    ));
+                    plan.push((resolved.keycode, KeyState::Released));
                     plan.extend(
                         modifiers
                             .iter()
                             .rev()
-                            .map(|keycode| (*keycode, smithay::backend::input::KeyState::Released)),
+                            .map(|keycode| (*keycode, KeyState::Released)),
                     );
                 }
             }
@@ -547,21 +544,15 @@ impl State {
             return Err(crate::error::CompositorError::UnknownWindow(window_id));
         }
 
-        let keyboard = self.seat.get_keyboard().ok_or_else(|| {
-            crate::error::CompositorError::Internal("the seat has no keyboard".to_owned())
-        })?;
+        // The handle is cloned out of the seat so `self` can be passed as the seat
+        // data (`State` owns the injector, so a method on it would need `self` both
+        // immutably and mutably).
+        let keyboard = self.input.keyboard();
         let time = self.uptime_ms() as u32;
         for (keycode, key_state) in plan {
             // `FilterResult::Forward` means "no compositor binding consumed it":
             // the event goes to the focused client and Smithay returns `None`.
-            let _forwarded: Option<()> = keyboard.input(
-                self,
-                smithay::input::keyboard::Keycode::new(keycode),
-                key_state,
-                smithay::utils::SERIAL_COUNTER.next_serial(),
-                time,
-                |_, _, _| smithay::input::keyboard::FilterResult::Forward,
-            );
+            InputInjector::keyboard_input(&keyboard, self, keycode, key_state, time)?;
         }
         Ok(())
     }
@@ -588,20 +579,18 @@ impl State {
             .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
         let point = self.wm.resolve_position(window_id, position)?;
 
-        let pointer = self.seat.get_pointer().ok_or_else(|| {
-            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
-        })?;
-        // The single visible toplevel is tiled at the output origin, so the focus
-        // surface's origin is `(0, 0)`; Smithay subtracts it to compute the
+        // The handle is cloned out of the seat so `self` can be passed as the seat
+        // data. The single visible toplevel is tiled at the output origin, so the
+        // focus surface's origin is `(0, 0)`; Smithay subtracts it to compute the
         // surface-local pointer position.
-        pointer.motion(
+        let pointer = self.input.pointer();
+        InputInjector::pointer_motion(
+            &pointer,
             self,
-            Some((surface, smithay::utils::Point::from((0.0, 0.0)))),
-            &smithay::input::pointer::MotionEvent {
-                location: smithay::utils::Point::from((f64::from(point.x), f64::from(point.y))),
-                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
-                time: self.uptime_ms() as u32,
-            },
+            Point::from((f64::from(point.x), f64::from(point.y))),
+            Some(surface),
+            SERIAL_COUNTER.next_serial(),
+            self.uptime_ms() as u32,
         );
         Ok(())
     }
@@ -616,18 +605,6 @@ impl State {
         button: Button,
         state: ButtonState,
     ) -> Result<()> {
-        /// The Linux evdev code of an ADesk [`Button`]
-        /// (`linux/input-event-codes.h`); Smithay's pointer speaks raw codes.
-        fn evdev_button(button: Button) -> u32 {
-            match button {
-                Button::Left => 0x110,
-                Button::Right => 0x111,
-                Button::Middle => 0x112,
-                Button::Side => 0x113,
-                Button::Extra => 0x114,
-            }
-        }
-
         let has_focus = self
             .wm
             .keyboard_focus()
@@ -638,21 +615,16 @@ impl State {
                 "no window has keyboard focus".to_owned(),
             ));
         }
-        let pointer = self.seat.get_pointer().ok_or_else(|| {
-            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
-        })?;
-        let button_state = match state {
-            ButtonState::Pressed => smithay::backend::input::ButtonState::Pressed,
-            ButtonState::Released => smithay::backend::input::ButtonState::Released,
-        };
-        pointer.button(
+        // The handle is cloned out of the seat so `self` can be passed as the seat
+        // data; the injector owns the evdev button mapping.
+        let pointer = self.input.pointer();
+        InputInjector::pointer_button(
+            &pointer,
             self,
-            &smithay::input::pointer::ButtonEvent {
-                serial: smithay::utils::SERIAL_COUNTER.next_serial(),
-                time: self.uptime_ms() as u32,
-                button: evdev_button(button),
-                state: button_state,
-            },
+            button,
+            state,
+            SERIAL_COUNTER.next_serial(),
+            self.uptime_ms() as u32,
         );
         Ok(())
     }
@@ -673,20 +645,10 @@ impl State {
                 "no window has keyboard focus".to_owned(),
             ));
         }
-        let pointer = self.seat.get_pointer().ok_or_else(|| {
-            crate::error::CompositorError::Internal("the seat has no pointer".to_owned())
-        })?;
-        let time = self.uptime_ms() as u32;
-        let mut frame = smithay::input::pointer::AxisFrame::new(time)
-            .source(smithay::backend::input::AxisSource::Wheel);
-        if dx != 0.0 {
-            frame = frame.value(smithay::backend::input::Axis::Horizontal, dx);
-        }
-        if dy != 0.0 {
-            frame = frame.value(smithay::backend::input::Axis::Vertical, dy);
-        }
-        pointer.axis(self, frame);
-        pointer.frame(self);
+        // The handle is cloned out of the seat so `self` can be passed as the seat
+        // data; the injector always terminates the axis frame.
+        let pointer = self.input.pointer();
+        InputInjector::pointer_axis(&pointer, self, dx, dy, self.uptime_ms() as u32);
         Ok(())
     }
 
