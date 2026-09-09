@@ -19,7 +19,7 @@ Everything below is re-exported at the crate root; `adesk-testkit` is designed a
   - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; identical to `adesk_client::default_socket_path`.
   - `parse_size("WxH")` / `parse_renderer("auto|gl|pixman")` are the CLI value parsers.
 - `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
-- `RunningServer` (Clone handle; dropping it does not stop the runtime):
+- `RunningServer` (Clone handle; `Debug` prints only the socket path; dropping it does not stop the runtime):
   - `socket_path() -> &Path`, `compositor() -> &CompositorHandle`, `observer() -> &ObserverService`, `registry() -> &Arc<AppRegistry>`, `context() -> &ServerContext`, `shutdown_handle() -> &ShutdownHandle`;
   - `async wait() -> Result<()>` (resolves when the runtime stops serving), `async shutdown() -> Result<()>` (idempotent).
 - `ServerContext` (`src/context.rs`): cheap-clone bundle with public fields `config`, `compositor`, `observer`, `registry`, `correlator`, `subscriptions`, `inspect_subscriptions`, `inspection`, `cursor`, `shutdown`, `started_at`; `now_ms()`, `uptime_ms()`, `next_connection_id()`.
