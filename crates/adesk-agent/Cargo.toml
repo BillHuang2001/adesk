@@ -1,0 +1,47 @@
+# adesk-agent — multimodal GUI agent prototype.
+#
+# The ADesk runtime's primary client: a provider-agnostic LLM decision loop over
+# the Agent GUI Protocol (AGP). Every third-party version is declared once in the
+# root workspace manifest ([workspace.dependencies]); this crate only references
+# them so versions can never drift.
+[package]
+name = "adesk-agent"
+description = "ADesk multimodal GUI agent prototype: provider-agnostic LLM loop over AGP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "adesk_agent"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adesk-agent"
+path = "src/main.rs"
+
+[features]
+default = []
+# Compiles `adesk_agent::testing` (ScriptedClient), the socket-free fake used by
+# this crate's own tests. Canonical test command:
+#   cargo test -p adesk-agent --features test-support
+test-support = []
+# Gates end-to-end tests that drive a real runtime through `adesk-testkit`.
+# The `adesk-testkit` dev-dependency is added when that crate lands.
+e2e = []
+
+[dependencies]
+adesk-core.workspace = true
+adesk-proto.workspace = true
+adesk-client.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true
