@@ -144,6 +144,12 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/common/mod.rs` is a shared module (`mod common;` in each test file), not a test target; it keeps `#![allow(dead_code)]` because each test target uses only a subset of the harness helpers.
 - Transport invariants: the reader task never `await`s while holding the `pending` lock and never `unwrap()`s a peer-controlled frame; `EVENT_CHANNEL_CAPACITY` (4096) is mirrored by the events lag test, so raising it means raising that test's emission count.
 
+## Status
+
+Implementation-complete: zero `todo!()`, no skeleton-phase `allow` attributes (the only one left is the harness's `#![allow(dead_code)]`, explained above).
+`bash scripts/dev.sh cargo test -p adesk-client` is green: 58 integration tests (api 30, events 7, images 10, errors 3, framing 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
+`adesk-agent` and `adesk-testkit` may build on this surface.
+
 ## See Also
 
 - `../../docs/protocol.md` — normative AGP v1 (transport, framing, methods, errors).
