@@ -1,0 +1,210 @@
+# adesk-compositor — headless Smithay compositor core
+
+## Intent
+
+`adesk-compositor` is the ADesk runtime's core: a single dedicated thread running a `calloop` loop that owns one `Display<State>`, all v1 protocol globals, one virtual output, the seat (keyboard + pointer), `adesk_wm::WindowManager` and the headless renderer.
+It is the **only** crate that may touch Smithay state; everything above it (server, observer, agent) talks to it exclusively through `RuntimeCommand` (in) and `RuntimeEvent` (out).
+It has **no agent semantics**: no quiet/observe timers, no image encoding, no Unix socket server and no frame loop.
+Rendering happens only when a `RenderWindow`/`RenderOutput` command asks for it; the crate reports what happened and the server decides what it means.
+Window-management policy and coordinate conversion live in `adesk-wm`; pixel production (crop/downscale/readback/encoding) lives in `adesk-render`; this crate owns renderer *construction* and render-*element* collection only.
+
+Phase 1 status: the full public API, module skeleton and Smithay wiring compile against Smithay 0.7; behavior bodies are `todo!()` stubs (inventory under Notes for Agents).
+
+## API Surface
+
+Entry point:
+- `spawn(CompositorConfig) -> Result<CompositorHandle>` — starts the thread named `adesk-compositor` and returns immediately.
+- `CompositorHandle` — `Clone + Send + Sync` (`Arc` inside):
+  - `command() -> calloop::channel::Sender<RuntimeCommand>`
+  - `send(RuntimeCommand) -> Result<()>`
+  - `events() -> broadcast::Sender<RuntimeEvent>`
+  - `subscribe() -> broadcast::Receiver<RuntimeEvent>`
+  - `wait_ready() -> Result<ReadyInfo>` (async, cached after first success)
+  - `wayland_display_name() -> Option<String>`
+  - `output_size() -> Size`
+  - `renderer() -> Option<RendererName>`
+  - `shutdown() -> Result<()>` (async; served after queued commands)
+  - `take_thread() -> Option<JoinHandle<()>>`
+- `ReadyInfo { display_name: String, renderer: RendererName, output_size: Size }`.
+
+Config:
+- `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`.
+- `RendererKind { Auto, Gl, Pixman }` — `Auto` tries surfaceless EGL and falls back to pixman with a warning; `Gl` fails startup when EGL is unavailable.
+- `RendererName { Gl, Pixman }` — `as_str()` → `"gl"`/`"pixman"` (AGP `ping`), `Display`.
+- `XkbSettings { rules, model, layout, variant, options }` — defaults `evdev`/`pc105`/`us`/empty/`None`; `us()`, `to_xkb_config() -> smithay::input::keyboard::XkbConfig<'_>`.
+
+Commands and replies:
+- `RuntimeCommand` — exactly `docs/architecture.md` §3: `RenderWindow`, `RenderOutput`, `QueryState`, `ActivateWindow`, `CloseWindow`, `PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`, `Shutdown`.
+- Every result-bearing variant carries its own `tokio::sync::oneshot::Sender<adesk_core::Result<T>>`; `QueryState` replies `StateSnapshot` infallibly; `Shutdown` acknowledges `()`.
+- `RuntimeCommand::method() -> &'static str` is the stable tracing span name.
+- `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `len()`, `is_empty()`.
+- `RenderedFrame { image: ImageBuffer, commit_seq: u64, damage: Vec<Rect> }` + `new()`, `size()`.
+
+Input vocabulary:
+- `Keysym` — resolved xkb keysym: `parse(name) -> adesk_core::Result<Keysym>`, `name()`, `value()`.
+- `KeyCode { Key(Keysym), Chord(Vec<Keysym>) }` — `parse`, `parse_chord`, `keysyms()`, `is_chord()`, `display_name()`; chords are valid only with `KeyState::Pressed`.
+
+Errors:
+- `CompositorError` (thiserror, 13 variants: `ThreadSpawn`, `Display`, `Socket`, `EventLoop`, `Renderer`, `Keyboard`, `NotReady`, `StartupAborted`, `Stopped`, `UnknownWindow`, `WindowManagement`, `Render`, `Internal`), `code() -> adesk_core::ErrorCode`, `From<CompositorError> for adesk_core::Error`, `pub type Result<T>`.
+
+## Constraints
+
+Threading:
+- Exactly one compositor thread; `State` is created, used and dropped on it and is not `Send`; Smithay state and the renderer never leave it.
+- Three channels only: commands (`calloop::channel`, FIFO, one command served per loop callback), events (`tokio::sync::broadcast<RuntimeEvent>`, capacity ≥ 4096, send never blocks), readiness (`oneshot`, cached in `wait_ready`).
+- A command's reply is sent from inside the callback that produced it, after the state change, so "reply implies the event is visible" holds.
+- `seq` comes from one central counter in `EventSink`; `ts_ms` is monotonic milliseconds since compositor construction (`Instant`), never wall clock.
+
+Scope:
+- v1 protocols in scope: `wl_compositor`, `wl_subcompositor`, `wl_shm`, `xdg-shell` (+ popups), `wl_seat` (keyboard + pointer), `wl_output`, `wl_data_device_manager` (basic clipboard), `zwp_linux_dmabuf`, `xdg-decoration`.
+- Explicitly out of scope: XWayland, layer-shell, screencopy, fractional scale, multi-seat.
+- Runtime-native operations (`ActivateWindow`, `CloseWindow`) mutate compositor state directly and are never synthesized input; only pointer/key/axis go through the seat.
+
+Code rules:
+- Errors: `thiserror` enums + `Result<T>`; no panics on request/event paths; `todo!()` only in Phase-1 stubs and must be gone before the crate is "implemented".
+- `unsafe` only for EGL construction in `src/render/headless.rs` (`EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`).
+- `tracing` only; never log pixel payloads or clipboard contents.
+- ~1000 lines per file is the concern threshold; split along module boundaries.
+- Dependencies come from the root `[workspace.dependencies]`; never inline versions.
+- Public API is exactly what this file documents; everything else is `pub(crate)`.
+
+## Routing Table
+
+| Area | Owner |
+|---|---|
+| Public command vocabulary (§3) | `src/command.rs` |
+| Config, renderer selection, xkb settings | `src/config.rs` |
+| Error enum + `ErrorCode` mapping | `src/error.rs` |
+| `EventSink`: seq/ts allocation + typed event emitters | `src/events.rs` |
+| `spawn`, `CompositorHandle`, `ReadyInfo` | `src/handle.rs` |
+| `StateSnapshot`, `RenderedFrame` | `src/snapshot.rs` |
+| `State`: globals, seat, output, renderer, WM bridge, side-effect API | `src/state.rs` |
+| Thread entry: display + calloop loop + three sources | `src/run.rs` |
+| `handle_command`: one command → outcome/reply (module `run::dispatch`) | `src/dispatch.rs` |
+| Wayland socket bind/name | `src/socket.rs` |
+| `adesk-wm` bridge + coordinate resolution | `src/wm.rs` |
+| Protocol handler impls + delegate macros | `src/protocols/` |
+| Input injection internals (keycode, keymap, injector) | `src/input/` |
+| Headless renderer + element collection | `src/render/` |
+| Smoke tests (ignored) + integration test plan | `tests/` |
+
+`src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
+`src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` seat wrappers).
+`src/render/`: `headless.rs` (`HeadlessRenderer`: create/name/dmabuf_formats/render paths), `elements.rs` (`render_surface_tree`, `popup_surfaces`), `mod.rs` (`OutputWindow`).
+
+Sibling cross-references (read-only from this node; escalate writes to the parent):
+- `../adesk-core/` — domain types and `RuntimeEvent` (landed, implemented).
+- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (designed in parallel; unlanded).
+- `../adesk-render/` — crop/downscale/readback/encoding (designed in parallel; unlanded; dependency declared for Phase 2).
+- `../adesk-testkit/` — integration harness the test plan depends on.
+
+## Design Decisions
+
+### Smithay 0.7 facts this crate depends on (verified against the vendored source)
+
+Handlers and wiring:
+- `CompositorHandler` requires `compositor_state`, `client_compositor_state(&self, &Client)`, `commit(&mut self, &WlSurface)`; `on_commit_buffer_handler::<State>` lives in `smithay::backend::renderer::utils`, **not** `wayland::compositor`.
+- `delegate_compositor!` does **not** implement `BufferHandler`; `BufferHandler::buffer_destroyed` is implemented in `src/protocols/shm.rs` (Smithay requires it because `wl_buffer` is owned by the buffer-owning protocols).
+- `ClientState { compositor_state: CompositorClientState }` (`Default`) + `impl ClientData`; clients are inserted with `display.handle().insert_client(stream, Arc::new(ClientState::default())) -> io::Result<Client>`.
+- All eight `delegate_*!(State)` macros take only the state type and generate `Dispatch`/`GlobalDispatch` only — they never create globals; globals are created explicitly in `State::new`, so no `OutputManagerState` field is needed.
+- `XdgShellHandler`: required `xdg_shell_state`, `new_toplevel`, `new_popup(PopupSurface, PositionerState)`, `grab(PopupSurface, WlSeat, Serial)`, `reposition_request(PopupSurface, PositionerState, u32)`; defaulted `toplevel_destroyed`, `popup_destroyed`, `title_changed`, `app_id_changed`, `ack_configure`. There is **no `request_close`** — close is `ToplevelSurface::send_close()`.
+- `XdgDecorationHandler`: all three methods required (`new_decoration`, `request_mode(Mode)`, `unset_mode`); `Mode` is `wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode`.
+- `SeatHandler`: focus types are `WlSurface` (`WaylandFocus`); `SeatState::new()` takes no arguments.
+- `SeatState::new_wl_seat(display, name)`: the method's generic `N` is the seat **name** (`N: Into<String>`) while the state type comes from `SeatState<D>` — do not turbofish the method.
+- `DataDeviceHandler::data_device_state`; `SelectionHandler::SelectionUserData = ()`; `ClientDndGrabHandler`/`ServerDndGrabHandler` live in `smithay::wayland::selection::data_device` (not `selection`); `DataDeviceState::new::<D>(&dh)`.
+- `ShmHandler::shm_state`; `ShmState::new::<D>(&dh, formats)` (Argb8888/Xrgb8888 are auto-inserted).
+- `OutputHandler` is fully defaulted; the output global is created manually with `output.create_global::<D>(&dh) -> GlobalId`.
+- `Output::new(name, PhysicalProperties { size: Size<i32, Raw> /* millimetres */, subpixel, make, model })`; `change_current_state(Option<Mode>, Option<Transform>, Option<Scale>, Option<Point<i32, Logical>>)`; `Mode { size: Size<i32, Physical> /* pixels */, refresh: i32 /* mHz */ }`; `set_preferred`, `add_mode`.
+- `DmabufHandler`: `dmabuf_state() -> &mut DmabufState`, `dmabuf_imported(&mut self, &DmabufGlobal, Dmabuf, ImportNotifier)` (0.7 has no `Node`/`BufferInfo` arguments); `DmabufState::new()`; `create_global::<D>(&dh, formats) -> DmabufGlobal`.
+- `Format` is `smithay::backend::allocator::Format` (re-export of `drm_fourcc::DrmFormat`); `FormatSet` is at `smithay::backend::allocator::format::FormatSet` and iterates `Format`s.
+
+Seat and input:
+- `Seat::add_keyboard(XkbConfig<'_>, repeat_delay, repeat_rate) -> Result<KeyboardHandle<D>, KeyboardError>`; `Seat::add_pointer() -> PointerHandle<D>`.
+- `XkbConfig { rules, model, layout, variant: &str, options: Option<String> }` at `smithay::input::keyboard::XkbConfig`.
+- `KeyboardHandle::input(&self, &mut D, Keycode, KeyState, Serial, u32, F) -> Option<T>` with `FilterResult::{Forward, Intercept}`; `set_focus(&self, data, Option<WlSurface>, serial)`.
+- `PointerHandle::motion(&self, data, Option<(PointerFocus, Point<f64, Logical>)>, &MotionEvent { location, serial, time })`; `button(.., &ButtonEvent { serial, time, button: u32, state: ButtonState })`; `axis(.., AxisFrame::new(time).source(..).value(Axis::Vertical, f64))` then `frame()`.
+- Button codes: BTN_LEFT=0x110, BTN_RIGHT=0x111, BTN_MIDDLE=0x112, BTN_SIDE=0x113, BTN_EXTRA=0x114; `Serial::from(0u32)` works; `SERIAL_COUNTER.next_serial()`.
+- xkb re-exports at `smithay::input::keyboard::xkb`; `keysym_from_name(name, KEYSYM_CASE_INSENSITIVE)`; `Keysym::raw()`; `Keymap::new_from_names::<str>(&ctx, rules, model, layout, variant, options, flags) -> Option<Keymap>`; `min_keycode`/`max_keycode`/`num_layouts`/`num_levels_for_key`/`key_get_syms_by_level(keycode, layout, level) -> &[Keysym]`.
+- Smithay/xkbcommon has **no reverse keysym→keycode API**, so `KeymapTable` indexes the keymap once at startup; single-character inputs (e.g. `"+"`) need a `utf32_to_keysym` fallback because `keysym_from_name("+")` returns NoSymbol.
+- Keyboard setup needs `XKB_CONFIG_ROOT` (set by the dev shell); running binaries outside the shell fails keymap compilation.
+
+Rendering:
+- Headless GL: `EGLSurfacelessDisplay` (`smithay::backend::egl::native`), `unsafe EGLDisplay::new(native)`, `EGLContext::new(&display)`, `unsafe EGLContext::make_current()`, `unsafe GlesRenderer::new(context)`; pixman: `PixmanRenderer::new()`.
+- `GlesRenderer` is `!Send` (fits the single-thread model); `PixmanRenderer` also implements `ImportDma`; GL readback is y-flipped (`GlesMapping::flipped() == true`); there is **no unified offscreen abstraction** (GL uses `Offscreen<GlesTexture>`, pixman `Offscreen<Image>`), which is why `HeadlessRenderer` is an enum with per-backend render paths.
+- `render_elements_from_surface_tree` walks the whole surface tree (subsurfaces yes, **popups no**); `location: impl Into<Point<i32, Physical>>`; popups come from the static `PopupManager::popups_for_surface(&WlSurface)` yielding `(PopupKind, Point)`.
+- `OutputDamageTracker::render_output(.., elements: front-to-back, clear_color)`.
+- Smithay does **not** re-export pixman's `Image`; Phase 2 may need `pixman` added to the root `[workspace.dependencies]`.
+- EGL/GLES exist only in the Nix dev shell (Mesa llvmpipe, `EGL_PLATFORM=surfaceless`, `LIBGL_ALWAYS_SOFTWARE=1`); CI has no GPU, so tests use `RendererKind::Pixman`.
+
+Event loop:
+- `Display::new()`, `backend().poll_fd()`, `dispatch_clients(&mut self, &mut State) -> io::Result<usize>`, `flush_clients()`.
+- `ListeningSocketSource::{new_auto, with_name, socket_name() -> &OsStr}`; `Event = UnixStream`, `Metadata = ()`, `Ret = ()`, `Error = io::Error`.
+- calloop 0.14.4: `EventLoop::run(timeout, data, cb)` is 3-arg; `Generic` callbacks return `Result<PostAction, io::Error>`; `calloop::channel::Event::{Msg, Closed}`; `Channel<T>` has `Ret = ()`; `Sender<T>: Send + Sync` (this is what makes `CompositorHandle: Send + Sync`); `LoopSignal::stop()`.
+- Startup order is part of the contract: display → bind socket → create globals → register the three sources → publish readiness. Binding before globals means the reported name is already connectable.
+
+Crate-local decisions:
+- `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
+- Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding. The `adesk-render` dependency is declared but unused in Phase 1.
+- `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model; the assumed `adesk-wm` surface is documented at the top of that file: `WindowManager::new(Size)`, `resolve_position(&self, WindowId, &Position) -> Result<Point, adesk_wm::Error: Display>`, `WmAction` opaque. Reconcile in Phase 2 if the landed API differs.
+- Popups are tracked manually (`PopupAppeared`/`PopupDisappeared` with owner `window_id` + `popup_id`) because Smithay's element walker skips them.
+- `src/dispatch.rs` is declared from `src/run.rs` with `#[path = "dispatch.rs"] pub(crate) mod dispatch;` (module path `crate::run::dispatch`).
+- `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
+- `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
+- `#![allow(dead_code)]` with "remove when Phase 2 wires this" comments in `input/mod.rs`, `render/mod.rs`, `wm.rs`; `state.rs`/`events.rs` stubs still produce dead-code warnings until Phase 2 — expected, not a defect.
+
+## Test Strategy
+
+Unit tests (colocated `#[cfg(test)]`; 38 tests + 1 doc test pass today):
+- `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
+- `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, emitting without subscribers is not an error.
+- `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
+- `error`: `ErrorCode` mapping per variant.
+- `input::keycode`: named keys, aliases (case-insensitive), F1–F24, printable chars, chord order/display, chord release rejection, unknown/empty → `invalid_request`.
+- `input::keymap`: letters unshifted, shifted chars at level 1, unknown keysyms, uncompilable settings → keyboard error (needs `XKB_CONFIG_ROOT`).
+- `input::injector`: logical buttons → evdev codes.
+- `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
+- `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
+- `snapshot`: lookup/helpers, frame size.
+
+Integration tests (defined, NOT implemented — `tests/integration_plan.md`; added only after Phase 2 and `adesk-testkit` land):
+1. Window appears with a tiling configure (1280x800 `Activated` configure, `window_created`, `QueryState`, first `SurfaceCommit` damage, `RenderWindow` pixels).
+2. Focus follows activation (`window_activated` then `focus_changed`, reply after events, unknown id → error with no events, no synthesized input).
+3. Input delivery through the real seat path (motion/button/axis/keyboard chord order, release rejection, no focused window → error).
+4. Popup tracking (`popup_appeared`/`popup_disappeared`, popup pixels in `RenderWindow`, commit counter shared with the window, owner-destroy ordering).
+5. Clipboard basics (selection round-trip, re-set invalidates, unadvertised mime fails client-side, no payload in logs/events).
+- Ground rules: real compositor thread in-process, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap assertions instead of sleeps; GL-only tests gated behind `ADESK_TEST_GL=1`.
+- Smoke tests (`tests/compositor_smoke.rs`) spawn a real runtime and stay `#[ignore]`d until Phase 2.
+
+Validation recipe (used for Phase 1, repeat until `adesk-wm`/`adesk-render` land):
+- The workspace glob `members = ["crates/*"]` requires every member to have a manifest, so `cargo check -p adesk-compositor` cannot run while `adesk-wm`/`adesk-render` are unlanded.
+- Copy `src/` + `tests/` into a temp crate with inlined dependency versions, real `adesk-core` and stub `adesk-wm`/`adesk-render` honouring the `WmBridge` contract, then run `cargo check --all-targets`, `cargo test` and `cargo clippy --all-targets` through `scripts/dev.sh`.
+- Expected clippy output today: dead-code warnings for Phase-2 stubs plus one `large_enum_variant` on `RuntimeCommand` (boxing is a Phase-2 option).
+
+## Dependencies
+
+- Internal: `adesk-core` (landed, implemented — domain types only), `adesk-wm` (unlanded; contract above), `adesk-render` (unlanded; declared for Phase 2, unused in Phase 1).
+- External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `wayland-server 0.31`; `calloop 0.14`; `tokio 1` (sync/rt/time/net); `thiserror 2`; `tracing 0.1`; `libc 0.2`.
+- System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
+- Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.
+
+## Notes for Agents
+
+Phase-2 `todo!()` inventory (all must be gone before the crate is "implemented"):
+- `src/state.rs` (16): `on_toplevel_mapped`, `on_toplevel_destroyed`, `on_title_changed`, `on_app_id_changed`, `on_popup_created`, `on_popup_destroyed`, `on_surface_commit`, `activate_window`, `close_window`, `inject_key`, `inject_pointer_move`, `inject_pointer_button`, `inject_pointer_axis`, `render_window`, `render_output`, `snapshot`.
+- `src/wm.rs` (8): `active_window`, `keyboard_focus`, `window_for_surface`, `windows`, `toplevel_of`, `surface_of`, `last_commit_seq`, `note_launch`.
+- `src/render/headless.rs`: `render_window` (GL + pixman paths), `render_output`; `src/render/elements.rs`: `render_surface_tree`, `popup_surfaces`.
+- `src/protocols/xdg_shell.rs`: initial tiling configure, popup grab tracking, `reposition_request`; `src/protocols/dmabuf.rs`: import + notify; `src/protocols/decoration.rs`: answer `Mode::ServerSide`; `src/protocols/shm.rs`: drop cached renderer state on `buffer_destroyed`.
+- `src/dispatch.rs`: per-command arms currently return stub outcomes and must call the `State` side-effect API.
+
+Hazards:
+- `PopupConfigureError` must be handled, never unwrapped, in the xdg-shell path.
+- GL readback is y-flipped; `GlesRenderer` is `!Send`; there is no shared offscreen abstraction.
+- Smithay's `XdgShellHandler` has no `request_close`; use `ToplevelSurface::send_close()`.
+- EGL and `XKB_CONFIG_ROOT` exist only in the dev shell; keymap-compiling tests need it.
+- Never log pixel payloads or clipboard bytes.
+
+Open risks for Phase 2:
+- `adesk-wm`/`adesk-render` interfaces may differ from the assumptions above; reconcile `WmBridge`, `HeadlessRenderer` and the element walker when they land.
+- `RenderedFrame`/`StateSnapshot` field shapes are the `RenderWindow`/`QueryState` reply payloads and must be confirmed with the server/AGP owner.
+- pixman `Image` may need a root workspace dependency.
+- `RuntimeCommand` has a clippy `large_enum_variant` warning; boxing reply-bearing variants is a Phase-2 option.
