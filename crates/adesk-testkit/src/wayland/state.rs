@@ -183,9 +183,9 @@ impl WindowState {
 
 /// Locks a window slot, ignoring poisoning.
 ///
-/// A panic in a `todo!()` dispatch body poisons the mutex; the test harness must keep
-/// reporting the real failure (a panic in a test) instead of cascading `PoisonError`s, so
-/// poisoned state is used as-is.
+/// Dispatch bodies must not panic, but if one does the mutex is poisoned and the harness
+/// must keep reporting the real failure (the panic in the test) instead of cascading
+/// `PoisonError`s, so poisoned state is used as-is.
 pub(crate) fn lock_window(slot: &WindowSlot) -> MutexGuard<'_, WindowState> {
     slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -202,8 +202,8 @@ pub(crate) fn lock_pool(pool: &Mutex<ShmPool>) -> MutexGuard<'_, ShmPool> {
 
 // --- Dispatch implementations -------------------------------------------------------
 //
-// Phase 1: every body is `todo!()` with the exact Phase-2 semantics in comments. Event
-// argument types below were verified against the generated bindings
+// One `Dispatch` impl per interface this client binds, all implemented. Event argument
+// types below were verified against the generated bindings
 // (wayland-client 0.31.15 `wayland.xml`, wayland-protocols 0.32.13 xdg-shell.xml).
 
 impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for ClientState {
@@ -246,10 +246,11 @@ impl Dispatch<wl_shm::WlShm, ()> for ClientState {
         //
         // Only known formats are recorded so `supports_argb8888` reflects the runtime
         // instead of an assumption; unknown numeric codes are ignored.
-        if let wl_shm::Event::Format { format } = event {
-            if let WEnum::Value(format) = format {
-                state.shm_formats.insert(format);
-            }
+        if let wl_shm::Event::Format {
+            format: WEnum::Value(format),
+        } = event
+        {
+            state.shm_formats.insert(format);
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.

@@ -495,7 +495,9 @@ pub struct TestPopup {
     state: WindowSlot,
     /// Configures published by the reader thread.
     configure_rx: Mutex<mpsc::Receiver<ConfiguredSize>>,
-    /// The immutable description this popup was created from.
+    /// The immutable description this popup was created from (record-only; unused by the
+    /// harness).
+    #[allow(dead_code)]
     spec: PopupSpec,
     /// Client state shared with the reader thread; used to deregister the slot on
     /// [`destroy`](TestPopup::destroy).

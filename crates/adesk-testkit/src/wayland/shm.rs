@@ -242,7 +242,8 @@ impl ShmPool {
         ))
     }
 
-    /// Total size of the backing file in bytes.
+    /// Total size of the backing file in bytes (record-only accessor; unused by the harness).
+    #[allow(dead_code)]
     pub(crate) fn capacity(&self) -> usize {
         self.capacity
     }
@@ -254,12 +255,14 @@ impl ShmBuffer {
         &self.buffer
     }
 
-    /// The pattern the buffer was filled with.
+    /// The pattern the buffer was filled with (record-only accessor; unused by the harness).
+    #[allow(dead_code)]
     pub(crate) fn fill(&self) -> FillPattern {
         self.fill
     }
 
-    /// The pixel size the buffer was allocated for.
+    /// The pixel size the buffer was allocated for (record-only accessor; unused by the harness).
+    #[allow(dead_code)]
     pub(crate) fn size(&self) -> Size {
         self.size
     }

@@ -49,15 +49,11 @@
 //! counters it accumulated (with `closed` set if EOF happened meanwhile). There is no
 //! unbounded wait in this module.
 //!
-//! ## Phase 1 skeleton
+//! ## Implementation state
 //!
-//! Public signatures and the data model are final. Every body that touches the protocol,
-//! threads, time or I/O is `todo!()` with the exact Phase-2 semantics in its doc comment;
-//! only trivial constructors/accessors are implemented.
-//!
-//! Phase 1 skeleton: most internals are unreachable until the `todo!()` bodies land, so
-//! dead-code analysis is disabled for this module tree only.
-#![allow(dead_code)]
+//! The client is fully implemented: the reader thread owns the `EventQueue` and dispatches
+//! into `Arc<Mutex<ClientState>>`, every pump/wait is deadline-bounded, and teardown
+//! interrupts the reader by shutting the socket down rather than blocking on a join.
 
 use std::io::ErrorKind;
 use std::os::unix::net::UnixStream;
