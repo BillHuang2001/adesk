@@ -234,4 +234,5 @@ Hazards:
 - EGL and `XKB_CONFIG_ROOT` exist only in the dev shell; keymap-compiling tests need it.
 - A Wayland socket needs a writable `XDG_RUNTIME_DIR`; the ambient one is read-only here, so tests must install a temp dir (see Test Strategy).
 - Never log pixel payloads or clipboard bytes.
+- `PointerButton`/`PointerAxis` reply `Ok(())` whenever any window is active but are silently dropped unless a prior `PointerMove` established pointer focus (Smithay's default grab sends only to the focused surface; initial pointer focus is `None`), so e2e tests must move before clicking or scrolling.
 - The compositor must never grow quiet/timer semantics: observation belongs to `adesk-observer`, which the server feeds.
