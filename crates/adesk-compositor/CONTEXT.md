@@ -162,7 +162,7 @@ Event loop:
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
-- Two field-level `#[allow(dead_code)]` sites are deliberate: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals). No crate-level allow attributes remain.
+- Three `#[allow(dead_code)]` sites remain, all field/method-level: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals) and `WmBridge::note_launch` (stale — it is reachable via `RuntimeCommand::NoteLaunch`). No crate-level allow attributes remain.
 
 ## Test Strategy
 
