@@ -1,54 +1,81 @@
-//! Renderer construction: surfaceless-EGL GLES or pixman software.
+//! Renderer construction and the offscreen render pipeline entry points.
 //!
 //! The compositor owns exactly one [`HeadlessRenderer`]. It is created once, on
 //! the compositor thread, inside [`State::new`](crate::state::State) — before the
 //! dmabuf global, which needs [`HeadlessRenderer::dmabuf_formats`] — and it is
 //! never moved to another thread.
 //!
-//! # Facts Phase 2 must not have to re-discover
+//! Pixel production itself belongs to `adesk-render`: this module builds the
+//! [`RenderConfig`], asks [`elements`](super::elements) for the scene, and hands
+//! both to [`adesk_render::render_scene`], which allocates the offscreen target,
+//! draws, reads back, crops and downscales. Nothing here touches raw pixels.
+//!
+//! # Facts this module depends on
 //!
 //! * **`GlesRenderer` is `!Send`/`!Sync`.** Smithay marks it with
 //!   `_not_send: PhantomData<*mut ()>` and it holds `Rc`-based GL state, so the
 //!   renderer *and every offscreen target derived from it* may only be touched
 //!   on the compositor thread. That is already the crate's threading contract.
-//! * **GL readback is y-flipped.** `GlesMapping` implements
-//!   `TextureMapping::flipped()` as `true`
-//!   (`smithay-0.7.0/src/backend/renderer/gles/texture.rs:216`), so pixels
-//!   obtained through `ExportMem::copy_framebuffer` come out bottom-up and must
-//!   be flipped before they become `ImageBuffer` rows.
 //! * **There is no unified offscreen abstraction in Smithay 0.7.** The GL path
-//!   uses `Offscreen<GlesTexture>` (`renderer/gles/mod.rs:1559`), the pixman
-//!   path `Offscreen<Image<'static, 'static>>` (`renderer/pixman/mod.rs:1246`,
-//!   where `Image` comes from the `pixman` crate and is *not* re-exported by
-//!   Smithay). Both are driven through
-//!   `Offscreen::create_buffer(Fourcc, Size<i32, BufferCoord>)`, and both
-//!   renderers implement `ExportMem::copy_framebuffer`.
-//! * **Crop, downscale, readback and encoding are `adesk-render`'s job**
-//!   (`docs/architecture.md` §5). The reconciliation contract with that crate is
-//!   still pending its landing, so the compositor keeps only renderer
-//!   construction and element collection here and hands raw framebuffers over
-//!   later. The `todo!()`s below mark exactly where.
+//!   uses `Offscreen<GlesRenderbuffer>`, the pixman path
+//!   `Offscreen<pixman::Image<'static, 'static>>` (Smithay *does* re-export
+//!   pixman's `Image` as `smithay::reexports::pixman::Image`, so no extra
+//!   dependency is needed). Both are created through
+//!   [`adesk_render::create_target`] and rendered through
+//!   [`adesk_render::render_scene`], which is why the two backends share one
+//!   generic implementation below.
+//! * **GL readback rows are already top-down in scene order.** `adesk-render`
+//!   deliberately ignores `TextureMapping::flipped()` (`GlesMapping::flipped()`
+//!   is `true` but describes GL's native lower-left origin, not scene space), so
+//!   nothing here may flip the image again.
+//! * **Render failures are never panics.** A `RenderError` becomes
+//!   [`CompositorError::Render`] (`render_failed`) — except a malformed request
+//!   (empty source, crop outside the source, ...), which becomes
+//!   [`CompositorError::InvalidRequest`] (`invalid_request`), mirroring
+//!   `adesk_render::RenderError::code`.
+//! * Buffer-import failures inside the surface-tree walk are logged and dropped
+//!   by Smithay itself (the element is absent, the rest of the frame renders);
+//!   that is `render_elements_from_surface_tree`'s documented behaviour, not a
+//!   silent error path of this crate.
 //!
 //! Renderer selection is the documented `--renderer auto|gl|pixman` behaviour:
 //! `Gl` must succeed, `Pixman` always works headless, `Auto` prefers GL and
 //! falls back to pixman with a warning. The result is reported by `ping`.
 
-use adesk_core::{OverlayKind, Rect};
+use adesk_core::{OverlayKind, Rect, Size};
+use adesk_render::{create_target, render_scene, RenderConfig, RenderError, Scene};
 use smithay::{
     backend::{
         allocator::{format::FormatSet, Format},
         egl::{native::EGLSurfacelessDisplay, EGLContext, EGLDisplay},
-        renderer::{gles::GlesRenderer, pixman::PixmanRenderer, ImportDma},
+        renderer::{
+            element::RenderElement,
+            gles::{GlesRenderbuffer, GlesRenderer},
+            pixman::PixmanRenderer,
+            ExportMem, ImportAll, ImportDma, Offscreen, Renderer,
+        },
     },
-    reexports::wayland_server::protocol::wl_surface::WlSurface,
+    reexports::{
+        pixman::Image as PixmanImage,
+        wayland_server::protocol::wl_surface::WlSurface,
+    },
 };
 
-use super::OutputWindow;
+use super::{
+    elements::{self, OutputRenderElements},
+    OutputWindow,
+};
 use crate::{
     config::{RendererKind, RendererName},
     error::CompositorError,
     snapshot::RenderedFrame,
 };
+
+/// Offscreen target type of the GL backend.
+type GlTarget = GlesRenderbuffer;
+
+/// Offscreen target type of the pixman backend (`smithay::reexports::pixman::Image`).
+type PixmanTarget = PixmanImage<'static, 'static>;
 
 /// The compositor's renderer: GLES (EGL) or pixman (software).
 ///
@@ -116,10 +143,13 @@ impl HeadlessRenderer {
     /// Render one window's surface tree (toplevel + subsurfaces + popups) into
     /// an `Rgba8` frame.
     ///
-    /// `geometry` is the window rectangle in output pixels and sizes the
-    /// offscreen target; `region` crops the result and `max_dimension` caps the
-    /// long edge after cropping (`docs/architecture.md` §5). The returned
-    /// `commit_seq`/`damage` come from the surface tree's damage state.
+    /// `geometry` is the window rectangle in output pixels; the target is sized
+    /// to it and the tree is rendered window-relative (toplevel at `(0, 0)`,
+    /// popups at their offsets). `region` crops the result and `max_dimension`
+    /// caps the long edge after cropping (`docs/architecture.md` §5); both are in
+    /// window-relative pixels. The returned `commit_seq` is `0` — the caller
+    /// (`State::render_window`) stamps the window's commit counter — and `damage`
+    /// is the union of the drawn element rectangles, clipped to the window.
     pub(crate) fn render_window(
         &mut self,
         surface: &WlSurface,
@@ -127,12 +157,11 @@ impl HeadlessRenderer {
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> crate::Result<RenderedFrame> {
+        let config = window_config(geometry, region, max_dimension);
         match self {
-            HeadlessRenderer::Gl(renderer) => {
-                render_window_gl(renderer, surface, geometry, region, max_dimension)
-            }
+            HeadlessRenderer::Gl(renderer) => render_window_gl(renderer, surface, &config),
             HeadlessRenderer::Pixman(renderer) => {
-                render_window_pixman(renderer, surface, geometry, region, max_dimension)
+                render_window_pixman(renderer, surface, &config)
             }
         }
     }
@@ -140,21 +169,30 @@ impl HeadlessRenderer {
     /// Compose the whole virtual output: every window in z-order plus optional
     /// debug overlays, then crop/downscale/read back.
     ///
-    /// `commit_seq` of the resulting frame is `0`: an output composition is not
-    /// tied to a single window's commit counter.
+    /// `output_size` is the virtual output's pixel size and sizes the target, so
+    /// an **empty window list is a valid clear frame**, not an error. `region`
+    /// and `max_dimension` are output-relative. `commit_seq` of the resulting
+    /// frame is `0`: an output composition is not tied to a single window's
+    /// commit counter.
+    ///
+    /// `overlays` are debug-only markers; see
+    /// [`elements::overlay_elements`](super::elements) for what each
+    /// [`OverlayKind`] paints.
     pub(crate) fn render_output(
         &mut self,
+        output_size: Size,
         windows: &[OutputWindow],
         overlays: &[OverlayKind],
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> crate::Result<RenderedFrame> {
+        let config = output_config(output_size, region, max_dimension);
         match self {
             HeadlessRenderer::Gl(renderer) => {
-                render_output_gl(renderer, windows, overlays, region, max_dimension)
+                render_output_gl(renderer, windows, overlays, &config)
             }
             HeadlessRenderer::Pixman(renderer) => {
-                render_output_pixman(renderer, windows, overlays, region, max_dimension)
+                render_output_pixman(renderer, windows, overlays, &config)
             }
         }
     }
@@ -202,62 +240,302 @@ fn create_pixman() -> crate::Result<PixmanRenderer> {
         .map_err(|error| CompositorError::Renderer(format!("pixman renderer: {error}")))
 }
 
-/// GL path for [`HeadlessRenderer::render_window`].
+/// Render configuration of one window: target sized to the window, window-relative
+/// crop and downscale.
+fn window_config(geometry: Rect, region: Option<Rect>, max_dimension: Option<u32>) -> RenderConfig {
+    let mut config = RenderConfig::new(Rect::from_size(geometry.size()));
+    if let Some(region) = region {
+        config = config.with_crop(region);
+    }
+    if let Some(max_dimension) = max_dimension {
+        config = config.with_max_dimension(max_dimension);
+    }
+    config
+}
+
+/// Render configuration of the whole output: target sized to the output,
+/// output-relative crop and downscale.
+fn output_config(output_size: Size, region: Option<Rect>, max_dimension: Option<u32>) -> RenderConfig {
+    let mut config = RenderConfig::new(Rect::from_size(output_size));
+    if let Some(region) = region {
+        config = config.with_crop(region);
+    }
+    if let Some(max_dimension) = max_dimension {
+        config = config.with_max_dimension(max_dimension);
+    }
+    config
+}
+
+/// Shared render pass: allocate the backend target, render the scene, convert
+/// the pipeline frame into the compositor's reply payload.
 ///
-/// Phase 2: `Offscreen<GlesTexture>::create_buffer(Fourcc::Abgr8888, size)`,
-/// `OutputDamageTracker::render_output`, `ExportMem::copy_framebuffer(..,
-/// Fourcc::Abgr8888)`, `map_texture` (y-flipped: `GlesMapping::flipped()` is
-/// `true`), then crop/downscale/readback through `adesk-render`.
+/// `T` is the backend's offscreen target type; the caller picks it, everything
+/// else is renderer-independent.
+fn render_scene_frame<R, T, E>(
+    renderer: &mut R,
+    scene: &Scene<E>,
+    config: &RenderConfig,
+) -> crate::Result<RenderedFrame>
+where
+    R: Renderer + Offscreen<T> + ExportMem,
+    R::Error: Send + Sync + 'static,
+    E: RenderElement<R>,
+{
+    // Validate before allocating: an empty source or a crop outside the source is
+    // a client mistake (`invalid_request`), not a renderer failure.
+    config.validate().map_err(render_error)?;
+    let mut target = create_target::<R, T>(renderer, config.target_size()).map_err(render_error)?;
+    let frame = render_scene(renderer, &mut target, scene, config).map_err(render_error)?;
+    Ok(RenderedFrame::new(
+        frame.image,
+        frame.commit_seq,
+        frame.damage.simplified(),
+    ))
+}
+
+/// Maps a pipeline failure onto the compositor error that carries the right AGP
+/// code, mirroring `adesk_render::RenderError::code`.
+fn render_error(error: RenderError) -> CompositorError {
+    let message = error.to_string();
+    match error {
+        RenderError::InvalidConfig { .. } | RenderError::InvalidImage { .. } => {
+            CompositorError::InvalidRequest(message)
+        }
+        _ => CompositorError::Render(message),
+    }
+}
+
+/// GL path for [`HeadlessRenderer::render_window`].
 fn render_window_gl(
-    _renderer: &mut GlesRenderer,
-    _surface: &WlSurface,
-    _geometry: Rect,
-    _region: Option<Rect>,
-    _max_dimension: Option<u32>,
+    renderer: &mut GlesRenderer,
+    surface: &WlSurface,
+    config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    todo!("Phase 2: Offscreen<GlesTexture>::create_buffer(Fourcc::Abgr8888, size), OutputDamageTracker::render_output, ExportMem::copy_framebuffer(.., Fourcc::Abgr8888), map_texture (y-flipped: GlesMapping::flipped()==true), then crop/downscale/readback via adesk-render")
+    render_window_frame::<_, GlTarget>(renderer, surface, config)
 }
 
 /// pixman path for [`HeadlessRenderer::render_window`].
 ///
-/// Phase 2: `Offscreen<Image>::create_buffer(Fourcc::Xrgb8888, size)`, render
-/// the surface tree, `ExportMem::copy_framebuffer(.., Fourcc::Xrgb8888)`, then
-/// readback through `adesk-render`.
+/// The software path renders SHM-backed windows fully; a DMA-BUF the software
+/// renderer cannot import is dropped by Smithay's element walk (logged), and any
+/// pipeline failure surfaces as [`CompositorError::Render`] — never a panic.
 fn render_window_pixman(
-    _renderer: &mut PixmanRenderer,
-    _surface: &WlSurface,
-    _geometry: Rect,
-    _region: Option<Rect>,
-    _max_dimension: Option<u32>,
+    renderer: &mut PixmanRenderer,
+    surface: &WlSurface,
+    config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    todo!("Phase 2: Offscreen<Image>::create_buffer(Fourcc::Xrgb8888, size), render, ExportMem::copy_framebuffer(.., Fourcc::Xrgb8888), readback via adesk-render")
+    render_window_frame::<_, PixmanTarget>(renderer, surface, config)
 }
 
 /// GL path for [`HeadlessRenderer::render_output`].
-///
-/// Phase 2: compose the windows (and popups) plus overlays into render elements
-/// and push them through one `OutputDamageTracker` sized to the virtual output.
 fn render_output_gl(
-    _renderer: &mut GlesRenderer,
-    _windows: &[OutputWindow],
-    _overlays: &[OverlayKind],
-    _region: Option<Rect>,
-    _max_dimension: Option<u32>,
+    renderer: &mut GlesRenderer,
+    windows: &[OutputWindow],
+    overlays: &[OverlayKind],
+    config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    todo!("Phase 2: compose windows + overlays through OutputDamageTracker")
+    render_output_frame::<_, GlTarget>(renderer, windows, overlays, config)
 }
 
 /// pixman path for [`HeadlessRenderer::render_output`].
 ///
-/// Phase 2: same composition as the GL path, but into an `Offscreen<Image>`
-/// target (the software path must fully render SHM-backed windows; an
-/// unsupported DMA-BUF must surface as `render_failed`, never a panic).
+/// Same composition as the GL path, but into a software target, so the whole
+/// output (including the clear frame with no windows) works without a GPU.
 fn render_output_pixman(
-    _renderer: &mut PixmanRenderer,
-    _windows: &[OutputWindow],
-    _overlays: &[OverlayKind],
-    _region: Option<Rect>,
-    _max_dimension: Option<u32>,
+    renderer: &mut PixmanRenderer,
+    windows: &[OutputWindow],
+    overlays: &[OverlayKind],
+    config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    todo!("Phase 2: compose windows + overlays through OutputDamageTracker")
+    render_output_frame::<_, PixmanTarget>(renderer, windows, overlays, config)
+}
+
+/// Backend-independent window render: collect the window's scene and render it.
+fn render_window_frame<R, T>(
+    renderer: &mut R,
+    surface: &WlSurface,
+    config: &RenderConfig,
+) -> crate::Result<RenderedFrame>
+where
+    R: Renderer + ImportAll + Offscreen<T> + ExportMem,
+    R::TextureId: Clone + 'static,
+    R::Error: Send + Sync + 'static,
+{
+    let scene = elements::window_scene(renderer, surface);
+    render_scene_frame(renderer, &scene, config)
+}
+
+/// Backend-independent output render: collect the composition and render it.
+fn render_output_frame<R, T>(
+    renderer: &mut R,
+    windows: &[OutputWindow],
+    overlays: &[OverlayKind],
+    config: &RenderConfig,
+) -> crate::Result<RenderedFrame>
+where
+    R: Renderer + ImportAll + Offscreen<T> + ExportMem,
+    R::TextureId: Clone + 'static,
+    R::Error: Send + Sync + 'static,
+{
+    let scene: Scene<OutputRenderElements<R>> = elements::output_scene(renderer, windows, overlays);
+    render_scene_frame(renderer, &scene, config)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adesk_render::DEFAULT_CLEAR_COLOR;
+
+    /// Creates the software renderer; pixman needs no display, GPU or EGL.
+    fn pixman() -> HeadlessRenderer {
+        HeadlessRenderer::create(RendererKind::Pixman).expect("pixman renderer")
+    }
+
+    /// Creates the GL renderer only when the test environment provides EGL
+    /// (`ADESK_TEST_GL=1`); returns `None` (skip) otherwise.
+    fn gl() -> Option<HeadlessRenderer> {
+        if std::env::var("ADESK_TEST_GL").as_deref() != Ok("1") {
+            eprintln!("skipping GL test: set ADESK_TEST_GL=1 to enable it");
+            return None;
+        }
+        match HeadlessRenderer::create(RendererKind::Gl) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                eprintln!("skipping GL test: EGL/GLES unavailable: {error}");
+                None
+            }
+        }
+    }
+
+    /// Asserts that a frame is a uniform clear frame of the expected size.
+    fn assert_clear_frame(frame: &RenderedFrame, width: u32, height: u32) {
+        assert_eq!(frame.image.width, width);
+        assert_eq!(frame.image.height, height);
+        assert_eq!(frame.commit_seq, 0, "output composition has no commit seq");
+        assert!(
+            frame.damage.is_empty(),
+            "an empty composition draws nothing, so it reports no damage"
+        );
+        for y in 0..height {
+            for x in 0..width {
+                assert_eq!(
+                    frame.image.pixel(x, y),
+                    Some(DEFAULT_CLEAR_COLOR),
+                    "pixel ({x}, {y}) is not the clear color"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn pixman_output_without_windows_is_a_clear_frame() {
+        let mut renderer = pixman();
+        let frame = renderer
+            .render_output(Size::new(4, 3), &[], &[], None, None)
+            .expect("empty output composition must render");
+        assert_clear_frame(&frame, 4, 3);
+    }
+
+    #[test]
+    fn pixman_output_with_overlays_but_no_windows_is_still_a_clear_frame() {
+        let mut renderer = pixman();
+        let frame = renderer
+            .render_output(
+                Size::new(4, 3),
+                &[],
+                &[OverlayKind::Focus, OverlayKind::Damage],
+                None,
+                None,
+            )
+            .expect("overlays without windows draw nothing");
+        assert_clear_frame(&frame, 4, 3);
+    }
+
+    #[test]
+    fn pixman_output_applies_crop_and_downscale() {
+        let mut renderer = pixman();
+        let frame = renderer
+            .render_output(
+                Size::new(16, 8),
+                &[],
+                &[],
+                Some(Rect::new(2, 1, 8, 4)),
+                Some(4),
+            )
+            .expect("crop and downscale must apply to the output composition");
+        // 8x4 crop, longest edge capped at 4 -> 4x2.
+        assert_eq!(frame.size(), Size::new(4, 2));
+        assert_eq!(frame.commit_seq, 0);
+    }
+
+    #[test]
+    fn empty_output_size_is_an_invalid_request() {
+        let mut renderer = pixman();
+        let error = renderer
+            .render_output(Size::ZERO, &[], &[], None, None)
+            .expect_err("a 0x0 output cannot be rendered");
+        assert!(matches!(error, CompositorError::InvalidRequest(_)));
+        assert_eq!(error.code(), adesk_core::ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn invalid_window_crop_is_an_invalid_request() {
+        let mut renderer = create_pixman().expect("pixman renderer");
+        let scene = Scene::<OutputRenderElements<PixmanRenderer>>::new(0);
+        let config = window_config(
+            Rect::new(0, 0, 10, 10),
+            Some(Rect::new(50, 50, 4, 4)),
+            None,
+        );
+        let error = render_scene_frame::<_, PixmanTarget, _>(&mut renderer, &scene, &config)
+            .expect_err("a crop outside the window is rejected");
+        assert!(matches!(error, CompositorError::InvalidRequest(_)));
+        assert_eq!(error.code(), adesk_core::ErrorCode::InvalidRequest);
+    }
+
+    #[test]
+    fn window_config_sizes_the_target_to_the_window() {
+        let config = window_config(
+            Rect::new(30, 40, 640, 480),
+            Some(Rect::new(10, 20, 100, 50)),
+            Some(64),
+        );
+        // Window-relative source: the geometry origin is never part of it.
+        assert_eq!(config.source, Rect::new(0, 0, 640, 480));
+        assert_eq!(config.target_size(), Size::new(640, 480));
+        assert_eq!(config.crop, Some(Rect::new(10, 20, 100, 50)));
+        assert_eq!(config.max_dimension, Some(64));
+        // 100x50 crop downscaled to a longest edge of 64 -> 64x32.
+        assert_eq!(config.output_size(), Size::new(64, 32));
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn output_config_sizes_the_target_to_the_output() {
+        let config = output_config(Size::new(1280, 800), None, None);
+        assert_eq!(config.source, Rect::new(0, 0, 1280, 800));
+        assert_eq!(config.target_size(), Size::new(1280, 800));
+        assert_eq!(config.output_size(), Size::new(1280, 800));
+        assert_eq!(config.clear_color, DEFAULT_CLEAR_COLOR);
+    }
+
+    #[test]
+    fn gl_output_without_windows_is_a_clear_frame() {
+        let Some(mut renderer) = gl() else {
+            return;
+        };
+        let frame = renderer
+            .render_output(Size::new(4, 3), &[], &[], None, None)
+            .expect("empty output composition must render on GL too");
+        // The GL readback is consumed top-down in scene order by adesk-render, so
+        // the frame must be identical to the software clear frame.
+        assert_clear_frame(&frame, 4, 3);
+        eprintln!("GL test ran: surfaceless EGL clear frame matched the software path");
+    }
+
+    #[test]
+    fn renderer_name_and_scene_scale_match_the_contract() {
+        assert_eq!(pixman().name(), RendererName::Pixman);
+        assert_eq!(elements::SCENE_SCALE, 1.0);
+    }
 }

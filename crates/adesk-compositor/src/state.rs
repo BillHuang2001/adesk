@@ -746,8 +746,9 @@ impl State {
                 });
             }
         }
+        let output_size = self.output_size();
         self.renderer
-            .render_output(&windows, overlays, region, max_dimension)
+            .render_output(output_size, &windows, overlays, region, max_dimension)
     }
 
     /// Point-in-time window/focus/sequence snapshot for `QueryState`.
