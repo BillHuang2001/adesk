@@ -10,6 +10,11 @@ use crate::style::OverlayStyle;
 /// Empty rects are skipped; overlapping rects blend repeatedly (damage is
 /// evidence, not a mask).
 pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlayStyle) {
-    let _ = (canvas, input, style);
-    todo!("Phase 2: for each damage rect, fill_rect(fill) then outline_rect(outline)")
+    for rect in &input.damage {
+        if rect.is_empty() {
+            continue;
+        }
+        canvas.fill_rect(*rect, style.fill);
+        canvas.outline_rect(*rect, style.outline);
+    }
 }
