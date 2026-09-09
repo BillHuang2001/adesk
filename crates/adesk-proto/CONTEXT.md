@@ -103,6 +103,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `EventKind::InspectFrame` is a real enum variant, so `subscribe_events.kinds` deserializes it even though §5.6 lists 11 filterable kinds; enforcing filterability is `adesk-server`'s job, not this crate's.
 - `ObserveResult`'s custom serde assumes core `Observation` has no `image` field; adding one in `adesk-core` would break the split (see Design Decisions).
 - Requests are always fully explicit on the wire: `#[serde(default)]` values are still emitted when serializing params (e.g. `format:"png"`, `count:1`), which is additive-safe.
+- `ImagePayload` likewise always emits both `stride` (JSON `null` for `png`) and `scale` (default `1.0`); the only optional wire field that is omitted when `None` is `ErrorPayload.data` (`skip_serializing_if`), so wire assertions must expect `stride`/`scale` keys but not `data`.
 
 ## Status
 
