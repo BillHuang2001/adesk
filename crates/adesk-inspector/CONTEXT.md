@@ -129,16 +129,17 @@ Painters preserve input order for windows, damage rects and action markers.
 
 ## Cross-crate contract with `adesk-render`
 
-`./src/post.rs` is the only integration point and expects these flat re-exports:
+`./src/post.rs` is the only integration point and uses these flat re-exports (both
+infallible):
 
 ```rust
-adesk_render::crop(&ImageBuffer, Rect) -> adesk_render::Result<ImageBuffer>
-adesk_render::downscale(&ImageBuffer, u32) -> adesk_render::Result<ImageBuffer>
+adesk_render::crop(&ImageBuffer, Rect) -> ImageBuffer
+adesk_render::downscale(&ImageBuffer, u32) -> ImageBuffer
 ```
 
-If `adesk-render` names or signatures differ, change only `./src/post.rs` — or move
-post-processing to the server and drop the dependency. `adesk_render::Error` must stay a
-`thiserror` type (it is embedded in `Error::Render`).
+`adesk_render::RenderError` must stay a `thiserror` type (it is embedded in `Error::Render`);
+if `adesk-render` names or signatures differ, change only `./src/post.rs` — or move
+post-processing to the server and drop the dependency.
 
 ## Test Strategy
 
