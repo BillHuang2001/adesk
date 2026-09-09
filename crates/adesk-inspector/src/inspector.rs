@@ -2,6 +2,7 @@
 
 use adesk_core::{ImageBuffer, OverlayKind};
 
+use crate::canvas::Canvas;
 use crate::error::{Error, Result};
 use crate::input::InspectionInput;
 use crate::paint;
@@ -76,10 +77,6 @@ impl Inspector {
 
     /// Composes `input` into `out`, which must have the same size as
     /// `input.frame`; `out` is overwritten.
-    ///
-    /// Phase 2: copy `input.frame` into `out`, then paint every overlay of
-    /// [`Inspector::normalized_overlays`] through a
-    /// [`Canvas`](crate::Canvas) in [`CANONICAL_ORDER`](crate::CANONICAL_ORDER).
     pub fn render_into(&self, input: &InspectionInput, out: &mut ImageBuffer) -> Result<()> {
         if out.size() != input.frame.size() {
             return Err(Error::InvalidFrame(format!(
@@ -87,7 +84,19 @@ impl Inspector {
                 out.width, out.height, input.frame.width, input.frame.height
             )));
         }
-        todo!("Phase 2: copy the frame, then paint normalized overlays in CANONICAL_ORDER")
+        if out.data.len() != input.frame.data.len() {
+            return Err(Error::InvalidFrame(format!(
+                "target {} bytes does not match the {} byte inspection frame",
+                out.data.len(),
+                input.frame.data.len()
+            )));
+        }
+        out.data.copy_from_slice(&input.frame.data);
+        let mut canvas = Canvas::new(out);
+        for kind in self.normalized_overlays() {
+            paint::overlay(kind, &mut canvas, input, &self.style);
+        }
+        Ok(())
     }
 
     /// Composes `input`, then applies `request` (crop, then downscale) through
