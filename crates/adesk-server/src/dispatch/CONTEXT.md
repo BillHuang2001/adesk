@@ -13,7 +13,7 @@ Router (`mod.rs`):
 - `RequestContext<'a> { server: &'a ServerContext, session: &'a Session }` — the only handle handlers receive.
 - `Dispatcher::new(ServerContext)` / `context()` / `async dispatch(&Session, RequestFrame) -> ResponseFrame` — total over `adesk_proto::Method`; every `Err` becomes `error_response` and the connection stays open.
 - `error_response(id, &ServerError) -> ResponseFrame` = `ResponseFrame::error(id, error.payload())`.
-- Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)` (see Known Issues).
+- Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)`; `Connection::run` publishes the writer queue on connect and forgets it on disconnect.
 
 Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>Params) -> Result<<Proto>Result>`:
 - `runtime::ping`.
