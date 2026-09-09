@@ -128,7 +128,6 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 
 ## Known Issues
 
-- **Skeleton state:** `src/` is implemented and the `api` (30), `concurrency` (2), `errors` (3), `framing` (3), `images` (10) and `version` (3) test targets are green. `tests/events.rs` still carries 7 `todo!()` bodies — the last skeleton in this crate.
 - **Close reasons travel out of band.** A `oneshot` can only carry the server's answer, so the reader/writer/`close()` store the first `CloseReason` (Protocol / Closed / Io) in the connection; every request cancelled afterwards reports it. `tests/framing.rs` pins Protocol for malformed/oversized frames and Closed for EOF.
 - **Unknown event kinds need the lenient wire path.** `adesk_proto::NdjsonCodec::decode` rejects an event name it does not know, so `wire::decode_line` retries the line as bare JSON (`event`/`seq`/`ts_ms`, optional `data`) before reporting `Protocol`; this is what makes `AgpEvent::Other` reachable for future kinds (protocol §7).
 - `docs/protocol.md` §5.7 does not specify the data shape of an `inspect_frame` event; the client assumes `{"image": ImagePayload}` and falls back to `AgpEvent::Other` if the payload does not fit.
