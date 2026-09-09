@@ -54,6 +54,7 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 - **No `libc`.** SHM is a `tempfile`-backed anonymous file written through `FileExt::write_all_at`; no `mmap` and no `unsafe`.
 - **`Drop` never blocks.** `TestRuntime::drop` sends `RuntimeCommand::Shutdown` synchronously and detached-spawns the graceful server shutdown inside the current tokio runtime; only `shutdown().await` observes errors or applies `shutdown_timeout`.
 - **Process env is explicit.** `TestRuntimeConfig::apply_env` (default on) scopes the env for the runtime's lifetime because the app registry launches children with `LaunchEnv::from_process()`; the hazard for parallel tests is documented in `src/env.rs`.
+- **Fixtures speak the registry's language.** Share roots (`with_fixture_dir`/`with_app_dirs`) are translated to `<root>/applications` before the server sees them because the registry derives app ids relative to each configured dir, and `Exec` arguments are quoted iff empty or containing ASCII whitespace/`"`/`\` so `adesk_app_registry`'s tokenizer returns them unchanged; both rules live in `src/runtime.rs`/`src/fixtures/mod.rs` module docs.
 - **Close is observed, never assumed.** The reader records `xdg_toplevel.close` in the window slot and the client keeps the surface alive, so `TestWindow::close_requested()` lets `tests/e2e_close.rs` prove the AGP `close_window` request path instead of inferring it from the window's disappearance.
 - **GL is opt-in and fails loudly.** `test_renderer()` returns `RendererKind::Gl` when `ADESK_TEST_GL=1`, so a broken GL setup fails instead of silently falling back to pixman.
 - **Assertions panic, plumbing returns `Result`.** `ImageAssert`/`EventAssert` are assertions (`assert_eq!` semantics with pixel/event detail); everything else returns `TestkitError`.
@@ -75,12 +76,11 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 ## Known Issues
 
-- `fixtures::launch_app_starts_helper_window` fails because the landed server records a launch but does not attribute windows to it, so `WindowCreated.launch_id` is `None` (expected `Some(LaunchId(1))`). Sibling blocker in `adesk-server`/`adesk-compositor`; the capstone documents the same gap and uses pid correlation instead.
-- `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: the landed compositor does not configure xdg popups yet. Sibling blocker in `adesk-compositor`.
+- `fixtures::launch_app_starts_helper_window` fails: `RuntimeEvent::WindowCreated.launch_id` is always `None` because no AGP command feeds the compositor's `WmBridge::note_launch` (`crates/adesk-compositor/src/wm.rs`, kept under `#[allow(dead_code)]`) and the server's `Correlator` is never applied to events. Sibling blocker in `adesk-compositor`/`adesk-server`; the capstone correlates launches via pid instead.
+- `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: `adesk-compositor`'s `XdgShellHandler::new_popup` (`crates/adesk-compositor/src/protocols/xdg_shell.rs`) never sends the initial `xdg_popup.configure`. Sibling blocker in `adesk-compositor`.
 
 ## Notes for Agents
 
-- **`adesk-server` contract designed against** (see `src/runtime.rs` module docs): `ServerConfig::new(socket_path, CompositorConfig)`, `ServerConfig::with_app_dirs(Vec<PathBuf>)`, `Server::start(ServerConfig).await -> Result<RunningServer, ServerError>`, `RunningServer::{socket_path, compositor, observer, registry}()`, `RunningServer::shutdown(self).await -> Result<(), ServerError>`; `registry()` may return `&Arc<AppRegistry>` (deref-coerces). If the landed server differs, adapt only `TestRuntime::start_with`/`shutdown`.
-- `runtime.rs` is the only file coupled to `adesk-server`; everything else is independent of it.
+- **`adesk-server` coupling**: `runtime.rs` is the only file that touches `ServerConfig`/`Server::start`/`RunningServer` (contract in its module docs); adapt only `TestRuntime::start_with`/`shutdown` when that contract changes.
 - `wayland/mod.rs` documents the reader-thread, lock-order and teardown rules; `wayland/shm.rs` documents the Argb8888 byte order; `wayland/state.rs` holds every `Dispatch` impl.
 - The frozen acceptance specs (`tests/api_surface.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/wayland_client.rs`) must not be edited; add new behavior proof in new test files instead.
