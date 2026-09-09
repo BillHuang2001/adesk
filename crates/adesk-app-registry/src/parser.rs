@@ -62,6 +62,7 @@ pub enum ParseError {
 /// Parses the `[Desktop Entry]` group from the text of a `.desktop` file.
 ///
 /// CRLF line endings are accepted; a leading BOM is ignored.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn parse_str(text: &str) -> Result<RawEntry, ParseError> {
     todo!("stub: implementation phase")
 }

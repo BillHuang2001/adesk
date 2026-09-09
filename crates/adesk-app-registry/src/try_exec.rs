@@ -12,16 +12,19 @@ use std::path::{Path, PathBuf};
 ///
 /// Returns the path of the first executable match, or the given path when it
 /// contains a `/` and is executable.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn resolve_try_exec(program: &str) -> Option<PathBuf> {
     todo!("stub: implementation phase")
 }
 
 /// Pure core of [`resolve_try_exec`] with an explicit `PATH` value.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn resolve_try_exec_with(program: &str, path: Option<&str>) -> Option<PathBuf> {
     todo!("stub: implementation phase")
 }
 
 /// `true` when `path` is a regular file with at least one execute bit set.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn is_executable(path: &Path) -> bool {
     todo!("stub: implementation phase")
 }

@@ -18,7 +18,7 @@ use std::sync::{Arc, RwLock};
 use adesk_core::{AppId, AppInfo};
 
 use crate::clock::Clock;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::launch::{LaunchEnv, LaunchRecord, ProcessSpawner};
 use crate::parser::DesktopEntry;
 use crate::terminal::TerminalSpec;
@@ -179,10 +179,10 @@ impl AppRegistry {
     /// Launches an application and returns its [`LaunchRecord`].
     ///
     /// Pipeline (AGP §5.2, `docs/architecture.md` §7):
-    /// 1. unknown id → [`Error::UnknownApp`];
-    /// 2. `TryExec` set and unresolvable → [`Error::TryExecNotFound`];
+    /// 1. unknown id → [`crate::Error::UnknownApp`];
+    /// 2. `TryExec` set and unresolvable → [`crate::Error::TryExecNotFound`];
     /// 3. `Exec` expanded with [`crate::ExecExpander`] (empty `files` context);
-    ///    a missing/empty result → [`Error::NoExec`] — this is also the
+    ///    a missing/empty result → [`crate::Error::NoExec`] — this is also the
     ///    `DBusActivatable` fallback rule: v1 attempts `Exec` and only reports
     ///    `not_supported` when there is no usable `Exec` line;
     /// 4. `args` are appended after expansion;
@@ -191,7 +191,7 @@ impl AppRegistry {
     /// 7. the launch id is allocated (monotonic from 1, consumed even on failure)
     ///    and `started_at_ms` is read from the clock;
     /// 8. [`ProcessSpawner::spawn`] runs the command; OS failures →
-    ///    [`Error::Spawn`] (AGP `launch_failed`).
+    ///    [`crate::Error::Spawn`] (AGP `launch_failed`).
     ///
     /// This method does **not** emit events or register with the
     /// [`crate::Correlator`]; the server does both with the returned record.

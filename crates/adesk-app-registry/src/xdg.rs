@@ -32,6 +32,7 @@ pub fn search_dirs() -> Vec<PathBuf> {
 ///   entries.
 /// - [`APPLICATIONS_SUBDIR`] is appended to every base directory.
 /// - Duplicates are removed, keeping the first occurrence.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn search_dirs_with(
     data_home: Option<&Path>,
     data_dirs: Option<&str>,

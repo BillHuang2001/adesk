@@ -19,6 +19,7 @@ use adesk_core::AppId;
 pub const DESKTOP_EXTENSION: &str = ".desktop";
 
 /// `true` when `path`'s file name ends with `.desktop` (case-sensitive).
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn is_desktop_file(path: &Path) -> bool {
     todo!("stub: implementation phase")
 }
@@ -27,6 +28,7 @@ pub fn is_desktop_file(path: &Path) -> bool {
 ///
 /// Returns `None` when `path` is not below `applications_dir`, does not end in
 /// `.desktop`, has no id component, or is not valid UTF-8.
+#[allow(unused_variables)] // stub: parameters are consumed by the implementation.
 pub fn desktop_file_id(applications_dir: &Path, path: &Path) -> Option<AppId> {
     todo!("stub: implementation phase")
 }
