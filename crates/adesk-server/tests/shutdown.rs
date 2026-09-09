@@ -15,23 +15,6 @@
 //! outcomes only; `TestRuntime::drop` shuts the runtime down and removes the
 //! temp dir even when an assertion fails. SIGINT/SIGTERM are deliberately never
 //! raised — they would hit the test runner, not the runtime.
-//!
-//! ## Measured outcome of scenario 5 (in-flight requests)
-//!
-//! Shutdown step 2 is **not** implemented for requests that are already inside a
-//! handler: the probe is answered normally (`Ok(ObserveResult { .. })` after the
-//! full 3 s timeout, 6 out of 6 runs — no race) instead of failing with
-//! `shutting_down`. The implementation gap is in the transport layer: on
-//! `ShutdownHandle::cancelled()` the read loop only stops *reading*
-//! (`src/connection.rs:122-175`), while the dispatch tasks it already spawned
-//! (`src/connection.rs:162-171`) are neither cancelled nor made to answer
-//! `ServerError::ShuttingDown`; observer-only handlers such as `observe`
-//! (`src/dispatch/capture.rs:52-76`) never consult the token, so they run to
-//! their own timeout and their response is still written out. The assertion
-//! below encodes the documented contract (`docs/architecture.md` §9,
-//! `crates/adesk-server/CONTEXT.md` → Lifecycle, `src/shutdown.rs:58-70`) and is
-//! therefore deliberately kept as-is: it must stay red until the runtime fails
-//! in-flight requests, not be relaxed to match the current behaviour.
 
 mod common;
 
@@ -209,11 +192,9 @@ fn wait_resolves_when_shutdown_happens_concurrently() {
 /// The probe is an `observe(until=timeout, timeout_ms=3000)` that is already
 /// awaiting the observer when the shutdown starts 200 ms later. `include_image`
 /// is off so the request touches no compositor command — it isolates the
-/// lifecycle rule from rendering.
-///
-/// **Currently red against `src/` (see the module doc):** the runtime answers
-/// the in-flight observation instead of failing it, deterministically. The
-/// assertion states the documented contract and is intentionally not relaxed.
+/// lifecycle rule from rendering. The dispatch task races the handler against
+/// the shutdown token, so the request fails instead of answering from a
+/// torn-down runtime.
 #[test]
 fn in_flight_requests_fail_with_shutting_down() {
     let runtime = TestRuntime::start();

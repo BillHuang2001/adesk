@@ -7,8 +7,7 @@ It starts the compositor thread, binds the AGP Unix socket, pumps `RuntimeEvent`
 It owns the process-lifetime concerns no sibling can own: the socket file, the action→observation wiring, subscription fan-out, signal handling and the ordered shutdown sequence.
 It also owns every conversion between sibling crates' overlapping types (`src/translate.rs`), because no sibling depends on another.
 
-Phase 2: every module is implemented (`src/` has no `todo!()`), the public API is unchanged from Phase 1, and `cargo test -p adesk-server --lib` is green (119 tests).
-The E2E suites in `./tests/` are the remaining work.
+Phase 2: every module is implemented (`src/` has no `todo!()`), the public API is unchanged from Phase 1, `cargo test -p adesk-server --lib` is green (125 tests), and the E2E suites in `./tests/` are green as well (178 tests across lib, bin and the eight integration targets, 0 failed).
 
 ## API Surface
 
@@ -71,7 +70,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 - `activate_window` / `close_window` are runtime-native: they change compositor state directly, never synthesize input.
 - Observation methods await the observer first, then render; a wait timeout is an `Observation` with `timed_out: true`, never an error.
 - Rendering is on demand: `RenderWindow`/`RenderOutput` only when pixels are needed; no screenshot loop, no per-event rendering.
-- Error mapping: `adesk_observer::Error::UnknownWindow` → `unknown_window`, `UnknownAction` → `invalid_request`; `adesk_app_registry::Error::UnknownApp` → `unknown_app`, `NoExec` → `not_supported`, `InvalidExec`/`TryExecNotFound`/`Spawn` → `launch_failed`, `InvalidEntry`/`Io` → `internal`; inspector `InvalidFrame`/`InvalidRequest` → `invalid_request`, `Render` → `render_failed`; everything else → `internal`.
+- Error mapping: `adesk_observer::Error::UnknownWindow` → `unknown_window`, `UnknownAction` → `invalid_request`; `adesk_app_registry::Error::UnknownApp` → `unknown_app`, `NoExec` → `not_supported`, `InvalidExec`/`TryExecNotFound`/`Spawn` → `launch_failed`, `InvalidEntry`/`Io` → `internal`; inspector `InvalidFrame`/`InvalidRequest` → `invalid_request`, `Render` → `render_failed`; `adesk_compositor::CompositorError::code()` and `adesk_proto::ProtoError::error_code()` are delegated verbatim, so compositor `unknown_window`/`invalid_request`/`render_failed`/`shutting_down` and protocol `unknown_method`/`protocol_version_mismatch`/`invalid_request` reach the wire unchanged; `Io`/`Join`/`Internal` and everything unclassified → `internal`.
 - `tracing` only: one span per request (`request{id method}`), one per connection, one per window lifecycle; never log pixel payloads.
 - Timestamps are monotonic ms since `ServerContext::started_at`; no wall clock in observations.
 - Dependencies: every version comes from the root `[workspace.dependencies]`; no inline versions.
@@ -111,12 +110,14 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 - **Dev-dependencies are only what `./tests/` needs** (`adesk-client`, `tempfile`; `adesk-testkit` lands with the suites) — the in-module unit tests use no test-only crates.
 - **`Server::start` and `RunningServer::wait`/`shutdown` are async.** The objective's signature sketch omitted `async`, but compositor `wait_ready()`/`shutdown()` are async and the server is a tokio process; `adesk-testkit` must `.await` them. `registry() -> &Arc<AppRegistry>` (not `&AppRegistry`) is pinned so tests can clone the handle.
 - **One writer task per connection + bounded queue.** The read loop owns decoding/dispatch; a dedicated writer task owns the write half and is fed by an `mpsc::Sender<Frame>` (`ConnectionWriter`). Responses `send().await` (backpressure); subscription events `try_send` (drop, never block the pump). This keeps every request answered exactly once even while events stream.
+- **An unknown method is answered inline by the read loop.** `ProtoError::UnknownMethod` carries only the method name, so the read loop lifts the request id from the raw line and answers `unknown_method` through `error_response` (connection stays open, §1); a line without a usable id is malformed framing and still closes the connection.
+- **Every dispatch task races the shutdown token.** The task selects (biased) between `ShutdownHandle::cancelled()` and the handler, so a request already in flight when the runtime stops answers `shutting_down` instead of running to its own timeout.
 - **Ordered input queue is a fair `tokio::sync::Mutex` per session.** Input methods may expand into several compositor commands (`click` = move + down + up); the queue guarantees submission order per connection without serializing the whole connection.
 - **`InspectionSource` is synchronous, the runtime is not.** `adesk-inspector` requires a cheap, non-blocking `inspection_input()`; the server therefore keeps an `InspectionCache` and refreshes it asynchronously (`inspection::refresh` renders the full output and issues `QueryState`) immediately before each `inspect_*` frame. Overlays are composited at full resolution and cropped/downscaled afterwards.
 - **`translate.rs` owns every cross-crate conversion** (`StateSnapshot`, `Condition`, `ActionKind`, `RendererName`, `Position` → `Point`, `Observation` + image → `ObserveResult`). This is deliberate: it is the single file to change if a sibling changes shape, and it documents the mismatches rather than hiding them.
 - **Lag handling is `QueryState` + `resync`, not best-effort patching.** On `broadcast::error::RecvError::Lagged(n)` the pump issues `QueryState`, translates the snapshot and calls `ObserverService::resync`, which marks affected windows uncertain (`docs/architecture.md` §2).
 - **Shutdown token is a `tokio::sync::watch<bool>`**, so `cancelled()` cannot miss an already-flagged shutdown (no `Notify` registration race) and `initiate()` is idempotent.
-- **Socket lifecycle is RAII + explicit**: `SocketListener::drop` removes the socket file; `shutdown::run` also removes it so the file is gone before `wait()` resolves. A live socket is never clobbered (`prepare_socket_path` probes with a connect).
+- **Socket lifecycle is RAII + explicit**: `SocketListener::drop` unlinks the socket file only while the path still holds the `(device, inode)` pair it bound, so a successor runtime that rebound the same path keeps its socket; `shutdown::run` removes the file so it is gone before `wait()` resolves. A live socket is never clobbered (`prepare_socket_path` probes with a connect).
 - **`adesk-render` and `adesk-wm` are declared dependencies even though dispatch reaches them only through the compositor handle.** They are part of the composition contract (workspace map) and keep the server's dependency list aligned with the crates it composes.
 - **`serde_json` is a direct dependency** (beyond the objective's list) because `ErrorPayload::with_data` carries structured error data (e.g. `{"window_id": 99}`) and `ResultPayload` wraps `serde_json::Value`. `serde` itself is not a direct dependency: the server never derives its own wire types.
 
@@ -131,14 +132,14 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 ## Known Issues
 
-- **No E2E test files exist yet.** `./tests/` holds only the plan (`./tests/CONTEXT.md`); the suites land together with the `adesk-testkit` dev-dependency.
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
+- **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions, input delivery and launch correlation still need the `adesk-testkit` wave.
 
 ## Test Strategy
 
-- **Unit level (in-module):** `config::parse_size/parse_renderer/default_socket_path`, `translate` (every bridge, both directions), `images::encode` (png/rgba8/scale), `subscriptions` (id allocation, filtering, removal on disconnect), `session::InputQueue` (FIFO), `shutdown::ShutdownHandle` (idempotence, `cancelled`), `inspection::InspectionCache`; `cargo test -p adesk-server --lib` is green.
-- **E2E level (`./tests/`):** `adesk-testkit::TestRuntime::start()` on a temp socket with the pixman renderer plus `WaylandTestClient` and `adesk-client`; full plan in `./tests/CONTEXT.md`. No test may require a display, GPU, network or installed application.
-- **Validation commands (always through the dev shell):** `./scripts/dev.sh cargo check -p adesk-server --all-targets`, `./scripts/dev.sh cargo test -p adesk-server --lib`, `./scripts/dev.sh cargo clippy -p adesk-server --all-targets --no-deps -- -D warnings`, `./scripts/dev.sh cargo doc -p adesk-server --no-deps` — all warning-free.
+- **Unit level (in-module):** `config::parse_size/parse_renderer/default_socket_path`, `translate` (every bridge, both directions), `images::encode` (png/rgba8/scale), `subscriptions` (id allocation, filtering, removal on disconnect), `session::InputQueue` (FIFO), `shutdown::ShutdownHandle` (idempotence, `cancelled`), `inspection::InspectionCache`, `error` (compositor/proto mapping tables), `socket::SocketFileId` (drop identity check), `connection::request_id_from_line`; `cargo test -p adesk-server --lib` is green.
+- **E2E level (`./tests/`):** `common::TestRuntime` starts one real runtime per test (`Server::start`) on a private temp socket with the pixman renderer, driven through `adesk-client` and the raw NDJSON `RawClient`; full plan in `./tests/CONTEXT.md`. No test may require a display, GPU, network or installed application.
+- **Validation commands (always through the dev shell):** `./scripts/dev.sh cargo check -p adesk-server --all-targets`, `./scripts/dev.sh cargo test -p adesk-server`, `./scripts/dev.sh cargo clippy -p adesk-server --all-targets --no-deps -- -D warnings`, `./scripts/dev.sh cargo doc -p adesk-server --no-deps` — all warning-free.
 
 ## Notes for Agents
 

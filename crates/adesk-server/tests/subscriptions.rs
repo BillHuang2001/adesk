@@ -22,19 +22,6 @@
 //! assertion. `disconnect_removes_subscriptions` uses [`RawClient`] instead of a
 //! stream precisely because a stream's drop-time unsubscribe would make the
 //! registry assertion vacuous.
-//!
-//! ## Known blockers (server bugs, not test bugs)
-//!
-//! 1. `Connection::run` never calls `dispatch::register_session_sink`
-//!    (`src/connection.rs:60-83`), so `session_sink` (`src/dispatch/mod.rs:275-287`)
-//!    fails and every `subscribe_events` answers `internal` instead of a
-//!    `subscription_id`. Tests 1, 2, 3, 6 and 7 stay red until that seam is
-//!    wired; they assert the §5.6 behaviour, never the broken one.
-//! 2. `ServerError::code()` maps `ServerError::Proto(_)` to `internal`
-//!    (`src/error.rs:86-91`), so the handler's `ProtoError::InvalidParams`
-//!    (`src/dispatch/events.rs:27-37`, whose own docs promise AGP
-//!    `invalid_request`) reaches the wire as `internal`. Test 4 stays red until
-//!    the mapping honours `ProtoError::error_code()`.
 
 use std::time::Duration;
 

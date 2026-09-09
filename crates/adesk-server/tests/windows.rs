@@ -8,11 +8,9 @@
 //! state the "no windows" and "unknown window" branches are defined on.
 //!
 //! Unknown-window failures reached through the *compositor* path
-//! (`get_window`, `activate_window`, `close_window`, every §5.5 method) pin the
-//! protocol-correct `unknown_window` code (§6). `src/error.rs` currently maps
-//! `ServerError::Compositor(_)` to `internal`, so those cases report `internal`
-//! and stay red until that mapping is fixed — the assertions here are the
-//! specification, not the status quo.
+//! (`get_window`, `activate_window`, `close_window`, every §5.5 method) must
+//! answer the protocol-correct `unknown_window` code (§6): the server delegates
+//! to `CompositorError::code()`, so the assertions here are the specification.
 
 mod common;
 

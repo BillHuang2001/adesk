@@ -9,7 +9,7 @@
 //! - `ping` identity: protocol/runtime version, renderer, output size, and
 //!   monotonically non-decreasing `uptime_ms` (scenario 1).
 //! - every §5 method answers exactly once with the protocol-mandated outcome;
-//!   mismatches are aggregated so one run reports every blocked method
+//!   mismatches are aggregated so one run reports every mismatching method
 //!   (scenario 2).
 //! - an unknown method answers `unknown_method` and keeps the connection open
 //!   (§1, scenario 3).
@@ -27,22 +27,6 @@
 //! (`adesk-core::Observation::timed_out`) and `adesk-observer` pins exactly that
 //! (`src/spec.rs:190-194`, `src/service.rs:716-721`). This suite asserts that
 //! documented semantics, not an expiry.
-//!
-//! Known blockers in `src/` (parallel-owned). The assertions below describe the
-//! **correct** protocol behaviour and therefore stay red until these are fixed;
-//! they are deliberately not weakened:
-//!
-//! - **#1 compositor error mapping** — `src/error.rs:86-90` maps
-//!   `ServerError::Compositor(_)` to `internal`, so compositor-path
-//!   unknown-window errors answer `internal` instead of `unknown_window`
-//!   (`src/dispatch/windows.rs:52-58`, plus the capture/input handlers that
-//!   share `dispatch::windows::unknown_window`). Affects scenarios 2 and 5.
-//! - **#2 session sink** — `src/connection.rs:60-83` never calls
-//!   `register_session_sink`, so `subscribe_events`/`inspect_subscribe` answer
-//!   `internal` instead of a `subscription_id`. Affects scenario 2.
-//! - **#3 unknown method** — `src/connection.rs:141-147` closes the connection
-//!   on `ProtoError::UnknownMethod` instead of answering `unknown_method`.
-//!   Affects scenario 3.
 
 mod common;
 
@@ -64,8 +48,8 @@ use serde_json::json;
 /// minutes old. Generous so a loaded CI machine cannot make it flaky.
 const UPTIME_CEILING_MS: u64 = 10 * 60 * 1000;
 
-/// Aggregates per-method expectations so scenario 2 reports **every** blocked
-/// method in one run instead of failing on the first one.
+/// Aggregates per-method expectations so scenario 2 reports **every**
+/// mismatching method in one run instead of failing on the first one.
 #[derive(Default)]
 struct Sweep {
     /// One human-readable line per method that did not answer as required.
@@ -470,16 +454,14 @@ fn every_method_answers_exactly_once() {
 
     assert!(
         sweep.mismatches.is_empty(),
-        "{} of 29 AGP methods did not answer as docs/protocol.md §5/§6 requires:\n  - {}\n\
-         (known src blockers: #1 compositor unknown-window → internal, \
-         #2 missing session sink for subscriptions)",
+        "{} of 29 AGP methods did not answer as docs/protocol.md §5/§6 requires:\n  - {}",
         sweep.mismatches.len(),
         sweep.mismatches.join("\n  - ")
     );
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 3 — unknown method (#3)
+// Scenario 3 — unknown method
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -549,7 +531,7 @@ fn error_response_does_not_close_the_connection() {
 }
 
 // ---------------------------------------------------------------------------
-// Scenario 5 — compositor error path keeps the connection open (#1)
+// Scenario 5 — compositor error path keeps the connection open
 // ---------------------------------------------------------------------------
 
 #[test]

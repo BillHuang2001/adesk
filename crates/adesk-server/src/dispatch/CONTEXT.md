@@ -47,7 +47,7 @@ Shared internal helpers (not public API):
 ## Constraints
 
 - Exactly one response per request; a handler `Err` never closes the connection.
-- `adesk_proto::Method` is a total enum, so `unknown_method` can only arise at decode (`Method::from_parts` → `ProtoError::UnknownMethod`, mapped in `src/error.rs`).
+- `adesk_proto::Method` is a total enum, so `unknown_method` can only arise at decode (`Method::from_parts` → `ProtoError::UnknownMethod`, mapped in `src/error.rs` and answered by the read loop in `src/connection.rs`).
 - One `tracing` span per request (`request{id method}`) applied with `tracing::Instrument` — never `span.enter()` across an `.await`; never log pixel payloads.
 - Input handlers (§5.5) call `ObserverService::record_action` BEFORE any compositor command and run inside `Session::input()` so they keep submission order per connection; keyboard methods activate a named, unfocused `window_id` first (protocol §5.5).
 - `activate_window` / `close_window` are runtime-native `RuntimeCommand`s — never synthesized input.
@@ -65,7 +65,7 @@ Shared internal helpers (not public API):
 ## Test Strategy
 
 - In-module unit tests cover the runtime-free parts: error-response shape, sink-registry round-trip, `command_error` mapping, `scale_from`/`source_size`, pointer-position resolution, `is_unmappable_key`, overlay/scale helpers.
-- Behavioral coverage belongs to `crates/adesk-server/tests/` (E2E wave with `adesk-testkit` + `adesk-client`); no test in this directory may start the runtime.
+- Behavioral coverage belongs to `crates/adesk-server/tests/` (a live runtime driven through `adesk-client` and `RawClient`); no test in this directory may start the runtime.
 - Validate with `./scripts/dev.sh cargo check -p adesk-server --all-targets` and `./scripts/dev.sh cargo clippy -p adesk-server --all-targets --no-deps`.
 
 ## Notes for Agents

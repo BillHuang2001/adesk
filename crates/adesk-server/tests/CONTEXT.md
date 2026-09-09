@@ -33,24 +33,6 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
 | `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids. |
 | `shutdown.rs` | idempotent shutdown, socket removal, `wait()`, rebinding the same path, handle drop does not stop the runtime, in-flight `shutting_down`. |
 
-## Known Issues — red tests blocked on src bugs (assertions are CORRECT; do NOT weaken them)
-
-Baseline `bash scripts/dev.sh cargo test -p adesk-server --no-fail-fast` = **154 passed / 18 failed**;
-every failure is one of these five src defects:
-1. `src/error.rs:86-91` maps `ServerError::Compositor(_)` to `internal`, so compositor-path `unknown_window` is unreachable
-   (red: `capture.rs` 3, `windows.rs` 4, `protocol.rs` sweep + `unknown_window_error_keeps_the_connection_open`).
-   Fix: honour `CompositorError::code()`.
-2. The same lines map `ServerError::Proto(_)` to `internal`, so a non-subscribable event kind answers `internal`
-   instead of `invalid_request` (red: `subscriptions.rs::subscribe_with_inspect_frame_kind_is_invalid_request`).
-   Fix: honour `ProtoError::error_code()`.
-3. `src/connection.rs:60-83` never calls `register_session_sink`, so `subscribe_events`/`inspect_subscribe` answer
-   `internal` instead of a `subscription_id` (red: `subscriptions.rs` 5, `inspector.rs` 1, `protocol.rs` sweep).
-4. `src/connection.rs:141-147` closes the connection on `ProtoError::UnknownMethod` instead of answering
-   `unknown_method` (red: `protocol.rs::unknown_method_answers_unknown_method_and_keeps_the_connection_open`).
-5. In-flight requests are not failed with `shutting_down` (`src/connection.rs:122-175` spawns dispatch tasks that
-   ignore the shutdown token) (red: `shutdown.rs::in_flight_requests_fail_with_shutting_down`).
-Delete each entry (and the matching blocker note in the suite module docs) when the src fix lands.
-
 ## Notes for Agents
 
 - `cargo test` stops at the first failing test target; always pass `--no-fail-fast` for the full picture.
