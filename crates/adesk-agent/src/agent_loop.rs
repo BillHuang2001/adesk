@@ -147,14 +147,22 @@ pub struct LoopOutcome {
 /// The agent loop, generic over the client and provider seams.
 #[derive(Debug)]
 pub struct AgentLoop<C, P> {
+    /// AGP client seam.
+    #[allow(dead_code)] // consumed by `run` in phase 2
     client: C,
+    /// LLM seam.
+    #[allow(dead_code)] // consumed by `run` in phase 2
     provider: P,
     config: LoopConfig,
     context: ContextBuilder,
     metrics: Metrics,
     history: Vec<StepRecord>,
     last_action_id: Option<ActionId>,
+    /// Runtime capabilities cached from `ping`.
+    #[allow(dead_code)] // consumed by `run` in phase 2
     runtime: Option<crate::client::RuntimeInfo>,
+    /// Last error string shown to the agent.
+    #[allow(dead_code)] // consumed by `run` in phase 2
     last_error: Option<String>,
 }
 

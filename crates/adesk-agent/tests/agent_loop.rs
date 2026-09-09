@@ -5,10 +5,12 @@
 //! Every test here must run without a socket, compositor, GPU or network.
 #![cfg(feature = "test-support")]
 
-use adesk_agent::testing::{ScriptedClient, ScriptedResponse};
-use adesk_agent::{AgentDecision, AgentLoop, LoopConfig, MockProvider, TaskDescription};
+use adesk_agent::testing::ScriptedClient;
+use adesk_agent::{AgentDecision, AgentLoop, LoopConfig, MockProvider};
 
-/// Build a loop over a scripted client and mock provider.
+/// Build a loop over a scripted client and mock provider (used by the phase-2
+/// tests below).
+#[allow(dead_code)]
 fn loop_with(
     client: ScriptedClient,
     decisions: Vec<AgentDecision>,

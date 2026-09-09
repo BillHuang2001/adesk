@@ -218,7 +218,7 @@ impl ActionKind {
 
 /// The `until` condition of an observation, mirroring AGP `Condition`
 /// (`docs/protocol.md` §5.4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ObserveCondition {
     /// Wait until the window has been quiet for `quiet_ms`.
@@ -228,14 +228,9 @@ pub enum ObserveCondition {
         /// Required quiet period in milliseconds.
         quiet_ms: u64,
     },
-    /// Return on the first surface commit or window lifecycle event.
+    /// Return on the first surface commit or window lifecycle event (default).
+    #[default]
     Change,
     /// Wait the full timeout and report what accumulated (animation sampling).
     Timeout,
-}
-
-impl Default for ObserveCondition {
-    fn default() -> Self {
-        Self::Change
-    }
 }

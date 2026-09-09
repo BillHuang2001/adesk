@@ -72,7 +72,7 @@ async fn navigation_scenario_crosses_pages() {
 #[tokio::test]
 #[ignore = "phase 2: scenarios not implemented"]
 async fn error_recovery_scenario_recovers() {
-    todo!("phase 2: assert recoveries >= 1 and Finished{true}")
+    todo!("phase 2: assert recoveries >= 1 and Finished success")
 }
 
 /// The runner honours `min(runner.max_steps, scenario.max_steps)` and reports

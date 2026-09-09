@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-use adesk_core::{ActionId, AppInfo, WindowId, WindowInfo};
+use adesk_core::{ActionId, AppId, AppInfo, WindowId, WindowInfo};
 use async_trait::async_trait;
 
 use crate::client::{

@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::agent_loop::{AgentLoop, LoopConfig, LoopOutcome};
+use crate::agent_loop::{LoopConfig, LoopOutcome};
 use crate::client::AgentClient;
 use crate::context::TaskDescription;
 use crate::decision::ActionKind;

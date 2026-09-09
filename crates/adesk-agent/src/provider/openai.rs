@@ -153,7 +153,7 @@ impl OpenAiCompatProvider {
 #[async_trait]
 impl LlmProvider for OpenAiCompatProvider {
     async fn complete(&self, _ctx: &AgentContext) -> Result<AgentDecision, ProviderError> {
-        todo!("phase 2: POST {base_url}/chat/completions, parse content -> decision")
+        todo!("phase 2: POST /chat/completions at the configured base_url, parse content")
     }
 
     fn name(&self) -> &str {
