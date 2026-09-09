@@ -5,7 +5,7 @@
 `adesk-testkit` makes the whole ADesk runtime testable without a display, GPU, network or installed application.
 It is the only supported way to run ADesk end-to-end tests: an in-process runtime on private temp paths, a real Wayland protocol client, `.desktop` fixtures, a helper process, and deadline-bounded image/event assertions.
 **Dev-dependency target only** — no runtime crate may depend on it, and the `adesk-test-app` binary is never shipped.
-Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnings` are clean, and `cargo test -p adesk-testkit` passes except two tests blocked on sibling crates (see Known Issues).
+Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!()` bodies, and the full `cargo test -p adesk-testkit` suite passes under the dev shell (46 tests + 3 doctests, 0 failures, 0 ignored test functions).
 
 ## API Surface
 
@@ -65,7 +65,7 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 - Self-tests live in `tests/`: `runtime.rs` (start/stop, ping, renderer, drop), `wayland_client.rs` (toplevel appears in `list_windows` with the tiling configure, commit → `SurfaceCommit`, captured pixels match the fill, popups, resize), `fixtures.rs` (`.desktop` writing, launch path, helper process), `assertions.rs` (ImageAssert/EventAssert/`wait_until` self-checks), `api_surface.rs` (signature stability), `e2e_launch_observe.rs` (capstone: launch → observe → capture → input → close round trip) and `e2e_close.rs` (cooperating-client proof that `close_window` really sends `xdg_toplevel.close`).
 - Unit tests inside `src/assert/`, `src/fixtures/` and `src/bin/adesk-test-app.rs` cover the already-implemented plumbing.
-- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; two tests fail only because of sibling crates (see Known Issues).
+- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; the full suite passes (46 tests + 3 doctests, 0 failures) and no test is `#[ignore]`d or env-gated except the GL paths (which skip cleanly without `ADESK_TEST_GL=1`).
 - No test needs a display, GPU, network or installed app; the helper binary is built by cargo (`env!("CARGO_BIN_EXE_adesk-test-app")` is available to this package's integration tests).
 - Launch tests mutate the process env; the harness serializes env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 
@@ -76,7 +76,7 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 ## Known Issues
 
-- `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: `adesk-compositor`'s `XdgShellHandler::new_popup` (`crates/adesk-compositor/src/protocols/xdg_shell.rs`) never sends the initial `xdg_popup.configure`. Sibling blocker in `adesk-compositor`.
+- The module-level doc comments in the frozen acceptance specs (`tests/wayland_client.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/api_surface.rs`) still describe the Phase-1 skeleton ("bodies are `todo!()`", "expected to fail at runtime until Phase 2"); `tests/wayland_client.rs` also still claims `--test-threads=1` is required. Both are stale — the specs must not be edited, so ignore the comments.
 
 ## Notes for Agents
 

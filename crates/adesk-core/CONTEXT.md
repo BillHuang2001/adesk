@@ -45,7 +45,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 ### event (`src/event.rs`)
 - `EventKind` (9 variants, snake_case serde).
 - `RuntimeEvent` (9 struct variants, every one carrying `seq` + `ts_ms`) + `seq()`, `ts_ms()`, `window_id()`, `kind()`.
-- `Observation` (16 fields per core-api).
+- `Observation` (15 fields per core-api).
 - `RuntimeEvent` serde: internally tagged `{"type":"window_created",...}`; the external AGP event frame is `adesk-proto`'s shape.
 
 ### error (`src/error.rs`)
@@ -86,6 +86,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `right()`/`bottom()` saturate at `i32::MAX` rather than wrapping; all edge arithmetic goes through `i64`.
 - `Position::resolve` maps normalized values with `round(n * (dim - 1))` so `0.0`/`1.0` are the first/last pixel, clamps pixels into the window, maps `NaN` to `0.0` (infinities saturate), and resolves empty windows to their origin.
 - `ImageBuffer::new_rgba` is infallible and fills opaque black (alpha 255); `from_rgba` accepts only tightly packed data (`stride == width * 4`) and rejects length mismatch or stride > `u32::MAX` with `InvalidRequest`.
+- `ImageBuffer` data is row-major top-down, RGBA8 with straight (non-premultiplied) alpha; `stride` is a **public field**, not an accessor, and is only guaranteed `>= width * 4` (rows may be padded), so readers must not assume `stride == width * 4`.
 - `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says all four ids are `Copy`, which is impossible for a `String` payload — the three numeric ids are `Copy`.
 - `Observation` lives in `event.rs` (the task's module layout has no observation module); it is the temporal summary of the event vocabulary.
 - `Button`/`WindowState` derive `Default` via `#[default]` (`Left`/`Inactive`) so protocol defaults (`button = "left"`) are expressible with `#[serde(default)]` downstream.
@@ -106,3 +107,6 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `docs/protocol.md` §5.6 defines an `EventKind` with 11 values (`surface_damage`, `quiet` extra); `adesk_core::EventKind` has the 9 core-api values — `adesk-proto` must define its own subscription-filter enum.
 - `docs/protocol.md` §4 `AppInfo` example omits `no_display`/`try_exec`; `adesk_core::AppInfo` includes and serializes them (additive, allowed by §7).
 - `Observation` carries no `image` field; `adesk-proto` attaches it (`ObserveResult { observation, image }`).
+- `Observation`, `WindowInfo` and `AppInfo` carry no serde container attributes at all (field names are already the wire names); `Option` fields serialize as JSON `null` (no `skip_serializing_if`), so an e2e test must expect explicit nulls for `window_id`, `after_action`, `focus_changed`, `app_id`, `title`, `pid`.
+- `Observation.changed_regions` is `Vec<Rect>` (already simplified by the observer), not `Region`; only `RuntimeEvent::SurfaceCommit.damage` is a `Region` (serializes as a bare `[Rect]` array).
+- There is no `PopupInfo` type: `WindowInfo.popup_count: u32` is the only popup surface; popup ids appear only in `RuntimeEvent::PopupAppeared/PopupDisappeared` and `Observation.popups_appeared/disappeared`.

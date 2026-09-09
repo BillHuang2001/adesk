@@ -26,7 +26,7 @@ Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>P
 
 Shared internal helpers (not public API):
 - `windows.rs` is the canonical home of the compositor bridge: `pub(super) async state(ctx) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(super) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(super) unknown_window(WindowId) -> ServerError`.
-- `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale`, shared with `inspect.rs`), `source_size`, `observed_window`.
+- `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale` = output width / source width, `1.0` for an empty source; shared with `inspect.rs`), `source_size` (requested crop size, else window geometry), `observed_window` (the observation's own window, else `active_window_id`/`keyboard_focus`, else none).
 - `apps.rs`: `next_launch_seq(watermark)` allocates the server-side sequence for `AppLaunched`.
 
 ## Routing Table
@@ -74,3 +74,5 @@ Shared internal helpers (not public API):
 - `inspect.rs`'s push loop stops when its subscription id disappears from `InspectRegistry::list()`, so `unsubscribe_events` must remove it there (it does).
 - `input.rs` resolves window-relative and normalized coordinates through the window model's geometry from `QueryState`; never hard-code an origin.
 - `capture.rs` and `inspect.rs` render on demand only; there is no per-event rendering anywhere in this directory.
+- `launch_app` returns immediately after the spawn (plus a best-effort `NoteLaunch` ack); it never waits or polls for a window. The toplevel arrives later as a `WindowCreated` carrying `launch_id` (compositor ledger and/or `event_pump::correlate_window`); `WindowInfo.app_id` stays the client-set xdg app_id, so correlate by `launch_id`/`pid`, not by `app_id`.
+- Observation methods do not validate `window_id` in the server — the observer answers `unknown_window` for an untracked id. `include_image` on a global observation renders the active window (or attaches no image when none is active). `max_dimension` is passed through to `RuntimeCommand::RenderWindow` unchanged; the compositor bounds the longest edge with per-axis half-up rounding, never upscales, and treats `0` as "disabled".

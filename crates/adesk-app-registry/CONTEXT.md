@@ -133,6 +133,7 @@ Every item is re-exported flat at the crate root; the modules are `pub` as well.
 - `adesk-testkit` will provide a `.desktop` fixture writer and a helper launch binary for end-to-end tests; this crate's own tests use `tempfile` directly and never spawn real processes.
 - `RawEntry`, `DesktopEntry` and the `ProcessSpawner`/`Clock` traits are public so tests and `adesk-testkit` can build fixtures without reimplementing parsing or launch plumbing.
 - `tests/support/mod.rs` carries a module-level `#![allow(dead_code)]` because it is compiled into five test binaries and each uses a subset of its helpers.
+- `Error::Io`, `Error::InvalidEntry` and `Error::InvalidArgument` exist for API completeness but are never constructed by this crate: `scan()` reports per-file problems as `ScanIssue`s (it only returns `Ok`), and `launch()` can only fail with `UnknownApp`, `TryExecNotFound`, `NoExec`, `InvalidExec` or `Spawn`.
 
 ## Status
 

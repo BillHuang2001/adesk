@@ -108,6 +108,7 @@ Handlers and wiring:
 - `ClientState { compositor_state: CompositorClientState }` (`Default`) + `impl ClientData`; clients are inserted with `display.handle().insert_client(stream, Arc::new(ClientState::default())) -> io::Result<Client>`.
 - All eight `delegate_*!(State)` macros take only the state type and generate `Dispatch`/`GlobalDispatch` only — they never create globals; globals are created explicitly in `State::new`, so no `OutputManagerState` field is needed.
 - `XdgShellHandler`: required `xdg_shell_state`, `new_toplevel`, `new_popup(PopupSurface, PositionerState)`, `grab(PopupSurface, WlSeat, Serial)`, `reposition_request(PopupSurface, PositionerState, u32)`; defaulted `toplevel_destroyed`, `popup_destroyed`, `title_changed`, `app_id_changed`, `ack_configure`. There is **no `request_close`** — close is `ToplevelSurface::send_close()`.
+- There is no ADesk-side `get_popup` handler: Smithay's `xdg_surface.get_popup` dispatch seeds the popup's `server_pending.geometry` from `positioner.get_geometry()` and then calls `XdgShellHandler::new_popup`; `PopupSurface::send_configure` emits **both** `xdg_popup.configure(x, y, w, h)` and `xdg_surface.configure(serial)` (serial from `SERIAL_COUNTER.next_serial()`) and sets `initial_configure_sent`; `ack_configure` stays Smithay's default (not overridden here).
 - `XdgDecorationHandler`: all three methods required (`new_decoration`, `request_mode(Mode)`, `unset_mode`); the crate answers `Mode::ServerSide`. `XdgDecorationState { global: GlobalId }` is kept alive in `State`.
 - `SeatHandler`: focus types are `WlSurface` (`WaylandFocus`); `SeatState::new()` takes no arguments.
 - `SeatState::new_wl_seat(display, name)`: the method's generic `N` is the seat **name** (`N: Into<String>`) while the state type comes from `SeatState<D>` — do not turbofish the method.
@@ -148,6 +149,8 @@ Event loop:
 ### Crate-local decisions
 
 - `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
+- `WindowId` allocation is entirely `adesk-wm`'s: `WindowModel::next_id` (a per-`WindowManager` `u64` field, no statics/atomics) starts at `1` and increments only in `policy::on_map`, so a fresh compositor assigns `WindowId(1)`, then `WindowId(2)`, ... to the first two *mapped* toplevels; registration and duplicate maps allocate nothing. Popups use a separate `SurfaceRegistry::next_popup_id` counter and surfaces a separate `SurfaceKey` counter, so only a toplevel map can consume a window id.
+- Title/app-id updates are metadata-only: `policy::on_title` returns no actions and neither path marks damage or re-configures — damage comes exclusively from surface commits.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding.
 - `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model. Its surface: `new(output_size)`, `active_window`, `keyboard_focus`, `window_for_surface`, `windows`, `tiled_rect`, `toplevel_of`, `surface_of`, `last_commit_seq`, `note_launch`, `resolve_position`, `register_toplevel`, `unmapped_toplevel`, `map_toplevel -> MapOutcome`, `destroy_toplevel`, `title_changed`, `app_id_changed`, `popup_added`, `popup_removed`, `popup_window_offset`, `note_popup_grab`, `popup_grab`, `take_popup_grab`, `commit`, `activate`. `WmDecision { actions, previous_focus }` captures focus *before* the policy ran.
 - `State`'s side-effect API is the only mutation path: `on_toplevel_mapped`, `on_toplevel_registered`, `on_toplevel_destroyed`, `on_title_changed`, `on_app_id_changed`, `on_popup_created`, `on_popup_destroyed`, `on_surface_commit`, `note_launch`, `activate_window`, `close_window`, `inject_key`, `inject_pointer_move`, `inject_pointer_button`, `inject_pointer_axis`, `render_window`, `render_output`, `snapshot`. Protocol handlers never touch `adesk-wm`, the renderer or input internals directly.
@@ -159,7 +162,21 @@ Event loop:
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
-- Two field-level `#[allow(dead_code)]` sites are deliberate: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals). No crate-level allow attributes remain.
+- Three `#[allow(dead_code)]` sites remain, all field/method-level: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals) and `WmBridge::note_launch` (stale — it is reachable via `RuntimeCommand::NoteLaunch`). No crate-level allow attributes remain.
+
+### AGP command semantics (verified against the code)
+
+- `RenderWindow` resolves `window_id` through `WmBridge::windows()` and then `surface_of`; either miss is `CompositorError::UnknownWindow` (`unknown_window`).
+- The render source is `Rect::from_size(geometry.size())`, so `region` is window-relative and must be non-empty and **strictly contained** in the window rect; an out-of-bounds crop is `invalid_request`, never clipped.
+- Crop is applied first, then `max_dimension` downscales the cropped image.
+- `max_dimension` bounds the **longest edge**; each axis is `clamp(round_half_up(value * M / longest), 1, value)` with one shared scale, so aspect ratio is approximately preserved; `Some(0)` disables scaling and nothing ever upscales.
+- `RenderedFrame.commit_seq` is the window's `last_commit_seq` for `RenderWindow` and `0` for `RenderOutput`; `damage` stays in full window coordinates even when the image is cropped/downscaled.
+- Pipeline images are tightly packed `Rgba8` (row-major, top-down, straight alpha, stride == width*4); `ImageBuffer::stride` is a public field that may be padded in general, so read pixels via `pixel(x, y)`.
+- `StateSnapshot.windows` is creation order, exactly one record is `Active`, every record has `mapped == true`, and popups appear only as `popup_count`, never as entries.
+- `StateSnapshot.keyboard_focus` always equals `active_window_id` in v1 because `WmBridge::keyboard_focus()` returns `manager.active_window()`.
+- Snapshot `seq` is the event watermark and snapshot `ts_ms` is monotonic ms from `State::start`; event `ts_ms` uses `EventSink::start` (a distinct but equally monotonic origin).
+- Input commands carry no window id: `PointerMove` is a window-relative `Position` resolved and clamped against the focused-or-active window, while `PointerButton`/`PointerAxis` act at the current pointer location; with no window the reply is `invalid_request`.
+- `WmBridge::resolve_position` reports an unknown id as `WindowManagement` (→ `internal`), but the command paths resolve the surface first and answer `unknown_window`; normalized `1.0` resolves to the last pixel (`w-1`), never outside the window.
 
 ## Test Strategy
 
@@ -190,7 +207,7 @@ Integration tests: defined, not yet implemented — `tests/integration_plan.md` 
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (80 lib + 3 smoke + doctests)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (82 lib + 3 smoke + doctests)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
@@ -198,9 +215,13 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
+- `WmBridge::note_launch` still carries a comment and `#[allow(dead_code)]` claiming no AGP command feeds it, but `RuntimeCommand::NoteLaunch` does feed it through `State::note_launch`.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 - The `adesk-render` API vs. the element-walker assumptions is verified only through the crate's own tests and the GL clear-frame path; end-to-end pixel assertions arrive with `adesk-testkit` (Phase 4).
+- A late `xdg_toplevel.app_id` (set after the first buffer commit) is not written back into the window model: `WmBridge::app_id_changed` (src/wm.rs:805) updates only its own change-detection map and the launch ledger, and `adesk-wm` has no app-id setter, so `WindowInfo.app_id`/`list_windows` keep the map-time value. Clients that set `app_id` before their first commit are unaffected.
+- Output composition stacks every mapped window at the same tiled rect (`State::render_output` includes all windows; `output_scene` pushes them in creation order). `OutputWindow.active` only drives the `focus` overlay, so with 2+ windows `render_output`/`inspect_capture` shows the last-created window on top regardless of which one is active. Window-level `render_window` is unaffected.
+- The `WmBridge::note_launch` doc comment (src/wm.rs:624-627) still claims "No AGP command feeds this today"; `adesk-server` sends `RuntimeCommand::NoteLaunch` (crates/adesk-server/src/dispatch/apps.rs:82) and `dispatch.rs:65-81` serves it.
 
 ## Dependencies
 
@@ -219,4 +240,5 @@ Hazards:
 - EGL and `XKB_CONFIG_ROOT` exist only in the dev shell; keymap-compiling tests need it.
 - A Wayland socket needs a writable `XDG_RUNTIME_DIR`; the ambient one is read-only here, so tests must install a temp dir (see Test Strategy).
 - Never log pixel payloads or clipboard bytes.
+- `PointerButton`/`PointerAxis` reply `Ok(())` whenever any window is active but are silently dropped unless a prior `PointerMove` established pointer focus (Smithay's default grab sends only to the focused surface; initial pointer focus is `None`), so e2e tests must move before clicking or scrolling.
 - The compositor must never grow quiet/timer semantics: observation belongs to `adesk-observer`, which the server feeds.
