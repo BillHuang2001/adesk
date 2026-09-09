@@ -86,14 +86,18 @@ mod wire;
 pub use adesk_proto::ImagePayload;
 
 // --- core handle, options, errors ---
-pub use client::{Client, ConnectOptions, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_FRAME_LEN, default_socket_path};
+pub use client::{
+    default_socket_path, Client, ConnectOptions, DEFAULT_CONNECT_TIMEOUT, DEFAULT_MAX_FRAME_LEN,
+};
 pub use error::{ClientError, Result};
 
 // --- events ---
-pub use events::{AgpEvent, AgpEventStream, EventFilter, EventKind, EventStream, InspectFrame, InspectStream};
+pub use events::{
+    AgpEvent, AgpEventStream, EventFilter, EventKind, EventStream, InspectFrame, InspectStream,
+};
 
 // --- images ---
-pub use image::{ImageFormat, decode_image};
+pub use image::{decode_image, ImageFormat};
 
 // --- AGP §5.1 runtime ---
 pub use api::runtime::{PingInfo, Renderer};
@@ -106,12 +110,14 @@ pub use api::windows::{FocusInfo, WindowList};
 
 // --- AGP §5.4 capture and observation ---
 pub use api::capture::{
-    CaptureRegionRequest, CaptureRequest, CaptureResult, Condition, DEFAULT_TIMEOUT_MS, ObserveRequest,
-    ObserveResult, WaitForChangeRequest, WaitForQuietRequest,
+    CaptureRegionRequest, CaptureRequest, CaptureResult, Condition, ObserveRequest, ObserveResult,
+    WaitForChangeRequest, WaitForQuietRequest, DEFAULT_TIMEOUT_MS,
 };
 
 // --- AGP §5.5 input ---
-pub use api::input::{ClickRequest, DragRequest, KeyChord, PointerButtonRequest, ScrollRequest, TypeTextResult};
+pub use api::input::{
+    ClickRequest, DragRequest, KeyChord, PointerButtonRequest, ScrollRequest, TypeTextResult,
+};
 
 // --- AGP §5.7 human inspector ---
 pub use api::inspect::{InspectCaptureRequest, InspectSubscribeRequest};

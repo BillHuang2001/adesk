@@ -11,8 +11,11 @@ use crate::events::InspectStream;
 use crate::{Client, ImagePayload, Result};
 
 /// The three overlays the protocol enables by default (protocol §5.7).
-pub const DEFAULT_OVERLAYS: [OverlayKind; 3] =
-    [OverlayKind::WindowIds, OverlayKind::Focus, OverlayKind::Damage];
+pub const DEFAULT_OVERLAYS: [OverlayKind; 3] = [
+    OverlayKind::WindowIds,
+    OverlayKind::Focus,
+    OverlayKind::Damage,
+];
 
 /// `inspect_capture` params (protocol §5.7).
 #[derive(Debug, Clone, Serialize)]
@@ -31,14 +34,22 @@ pub struct InspectCaptureRequest {
 impl Default for InspectCaptureRequest {
     /// `window_ids` + `focus` + `damage` over the whole output.
     fn default() -> Self {
-        Self { overlays: DEFAULT_OVERLAYS.to_vec(), region: None, max_dimension: None }
+        Self {
+            overlays: DEFAULT_OVERLAYS.to_vec(),
+            region: None,
+            max_dimension: None,
+        }
     }
 }
 
 impl InspectCaptureRequest {
     /// Request a specific overlay set.
     pub fn overlays(overlays: impl IntoIterator<Item = OverlayKind>) -> Self {
-        Self { overlays: overlays.into_iter().collect(), region: None, max_dimension: None }
+        Self {
+            overlays: overlays.into_iter().collect(),
+            region: None,
+            max_dimension: None,
+        }
     }
 
     /// Crop the composed output.
@@ -67,7 +78,10 @@ pub struct InspectSubscribeRequest {
 impl InspectSubscribeRequest {
     /// Default interval (100 ms) with the given overlays.
     pub fn new(overlays: impl IntoIterator<Item = OverlayKind>) -> Self {
-        Self { overlays: overlays.into_iter().collect(), min_interval_ms: 100 }
+        Self {
+            overlays: overlays.into_iter().collect(),
+            min_interval_ms: 100,
+        }
     }
 
     /// Override the push interval.
@@ -94,8 +108,16 @@ impl Client {
     ///
     /// Frames arrive as `inspect_frame` events; the returned [`InspectStream`]
     /// yields them typed and unsubscribes on drop.
-    pub async fn inspect_subscribe(&self, request: InspectSubscribeRequest) -> Result<InspectStream> {
-        let result: crate::api::subscribe::SubscribeResult = self.request("inspect_subscribe", &request).await?;
-        Ok(InspectStream::new(self.inner.subscribe(), result.subscription_id, self.inner.clone()))
+    pub async fn inspect_subscribe(
+        &self,
+        request: InspectSubscribeRequest,
+    ) -> Result<InspectStream> {
+        let result: crate::api::subscribe::SubscribeResult =
+            self.request("inspect_subscribe", &request).await?;
+        Ok(InspectStream::new(
+            self.inner.subscribe(),
+            result.subscription_id,
+            self.inner.clone(),
+        ))
     }
 }

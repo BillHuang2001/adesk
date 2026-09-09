@@ -30,7 +30,9 @@ const ERROR_CODES: [ErrorCode; 13] = [
 /// Connect without the handshake ping and accept the connection on the server.
 async fn connect(server: &mut MockServer) -> Client {
     let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options).await.expect("connect to the mock server");
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
     server.accept().await;
     client
 }
@@ -63,7 +65,10 @@ async fn every_error_code_maps_to_server_error() {
         .expect("the error frame answers the request");
 
         match result {
-            Err(ClientError::Server { code: got, message: got_message }) => {
+            Err(ClientError::Server {
+                code: got,
+                message: got_message,
+            }) => {
                 assert_eq!(got, code, "the error code is preserved");
                 assert_eq!(got_message, message, "the error message is preserved");
             }
@@ -89,7 +94,9 @@ async fn error_does_not_close_connection() {
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(request, async {
             let (id, _, _) = server.next_request().await;
-            server.respond_error(id, ErrorCode::UnknownWindow, "window 99 is not known").await;
+            server
+                .respond_error(id, ErrorCode::UnknownWindow, "window 99 is not known")
+                .await;
         })
     })
     .await
@@ -102,7 +109,10 @@ async fn error_does_not_close_connection() {
         }
         other => panic!("expected ClientError::Server, got {other:?}"),
     }
-    assert!(!client.is_closed(), "an AGP error frame never closes the connection");
+    assert!(
+        !client.is_closed(),
+        "an AGP error frame never closes the connection"
+    );
 
     // The same connection still round-trips.
     let request = client.list_windows();
@@ -110,7 +120,9 @@ async fn error_does_not_close_connection() {
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
-            server.respond(id, json!({"windows": [], "active_window_id": 7})).await;
+            server
+                .respond(id, json!({"windows": [], "active_window_id": 7}))
+                .await;
         })
     })
     .await
@@ -134,8 +146,12 @@ async fn unknown_response_id_is_ignored() {
         tokio::join!(request, async {
             let (id, _, _) = server.next_request().await;
             // Nobody awaits this id: the reader must ignore it, not panic.
-            server.respond(id + 1000, json!({"windows": [], "active_window_id": 999})).await;
-            server.respond(id, json!({"windows": [], "active_window_id": 7})).await;
+            server
+                .respond(id + 1000, json!({"windows": [], "active_window_id": 999}))
+                .await;
+            server
+                .respond(id, json!({"windows": [], "active_window_id": 7}))
+                .await;
         })
     })
     .await
@@ -143,5 +159,8 @@ async fn unknown_response_id_is_ignored() {
 
     let list = result.expect("the caller resolves to its own result");
     assert_eq!(list.active_window_id, Some(WindowId(7)));
-    assert!(!client.is_closed(), "an unknown response id must not break the connection");
+    assert!(
+        !client.is_closed(),
+        "an unknown response id must not break the connection"
+    );
 }

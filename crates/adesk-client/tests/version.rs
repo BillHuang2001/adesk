@@ -30,7 +30,9 @@ fn ping_result(protocol_version: u32) -> serde_json::Value {
 async fn ping_rejects_protocol_version_mismatch() {
     let mut server = MockServer::start().await;
     let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options).await.expect("connect to the mock server");
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
     server.accept().await;
 
     let ping = client.ping();
@@ -52,7 +54,10 @@ async fn ping_rejects_protocol_version_mismatch() {
         }
         other => panic!("expected ClientError::VersionMismatch, got {other:?}"),
     }
-    assert!(!client.is_closed(), "a version mismatch is a result, not a broken connection");
+    assert!(
+        !client.is_closed(),
+        "a version mismatch is a result, not a broken connection"
+    );
 
     // The same payload is accepted by the unchecked variant.
     let ping_raw = client.ping_raw();
@@ -140,7 +145,9 @@ async fn connect_with_verify_version_false_skips_ping() {
 
     // No handshake: nothing must be readable until the test asks.
     assert!(
-        tokio::time::timeout(Duration::from_millis(100), server.next_request()).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(100), server.next_request())
+            .await
+            .is_err(),
         "verify_version(false) must not send a handshake ping"
     );
 
@@ -148,7 +155,10 @@ async fn connect_with_verify_version_false_skips_ping() {
     let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
         tokio::join!(ping, async {
             let (id, method, _) = server.next_request().await;
-            assert_eq!(method, "ping", "the first request observed is the explicit call");
+            assert_eq!(
+                method, "ping",
+                "the first request observed is the explicit call"
+            );
             server.respond(id, ping_result(1)).await;
         })
     })

@@ -116,12 +116,18 @@ pub struct EventFilter {
 impl EventFilter {
     /// Deliver every event kind for every window.
     pub fn all() -> Self {
-        Self { kinds: None, window_id: None }
+        Self {
+            kinds: None,
+            window_id: None,
+        }
     }
 
     /// Deliver only the given event kinds (for every window).
     pub fn kinds(kinds: impl IntoIterator<Item = EventKind>) -> Self {
-        Self { kinds: Some(kinds.into_iter().collect()), window_id: None }
+        Self {
+            kinds: Some(kinds.into_iter().collect()),
+            window_id: None,
+        }
     }
 
     /// Restrict an existing filter to one window.
@@ -156,9 +162,7 @@ fn event_kind(event: &AgpEvent) -> Option<EventKind> {
         AgpEvent::Runtime(runtime) => Some(EventKind::from(runtime.kind())),
         // Known-but-untyped frames (`quiet`, `surface_damage`, future kinds):
         // the wire name is the only kind information available.
-        AgpEvent::Other { name, .. } => {
-            serde_json::from_value(Value::String(name.clone())).ok()
-        }
+        AgpEvent::Other { name, .. } => serde_json::from_value(Value::String(name.clone())).ok(),
         AgpEvent::InspectFrame(_) => None,
     }
 }
@@ -167,9 +171,7 @@ fn event_kind(event: &AgpEvent) -> Option<EventKind> {
 fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
     match event {
         AgpEvent::Runtime(runtime) => runtime.window_id(),
-        AgpEvent::Other { data, .. } => {
-            data.get("window_id").and_then(Value::as_u64).map(WindowId)
-        }
+        AgpEvent::Other { data, .. } => data.get("window_id").and_then(Value::as_u64).map(WindowId),
         AgpEvent::InspectFrame(_) => None,
     }
 }
@@ -183,19 +185,43 @@ fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
 /// version does not know (protocol §7) — is preserved verbatim as
 /// [`AgpEvent::Other`].
 pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
-    let crate::wire::RawEvent { name, seq, ts_ms, data } = raw;
+    let crate::wire::RawEvent {
+        name,
+        seq,
+        ts_ms,
+        data,
+    } = raw;
     match name.as_str() {
         "inspect_frame" => {
-            match data.get("image").cloned().map(serde_json::from_value::<ImagePayload>) {
+            match data
+                .get("image")
+                .cloned()
+                .map(serde_json::from_value::<ImagePayload>)
+            {
                 Some(Ok(image)) => AgpEvent::InspectFrame(InspectFrame { seq, ts_ms, image }),
-                _ => AgpEvent::Other { name, seq, ts_ms, data },
+                _ => AgpEvent::Other {
+                    name,
+                    seq,
+                    ts_ms,
+                    data,
+                },
             }
         }
         // Protocol-only kinds: no `RuntimeEvent` counterpart (see CONTEXT.md).
-        "surface_damage" | "quiet" => AgpEvent::Other { name, seq, ts_ms, data },
+        "surface_damage" | "quiet" => AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data,
+        },
         _ => match runtime_event(&name, seq, ts_ms, &data) {
             Some(event) => AgpEvent::Runtime(event),
-            None => AgpEvent::Other { name, seq, ts_ms, data },
+            None => AgpEvent::Other {
+                name,
+                seq,
+                ts_ms,
+                data,
+            },
         },
     }
 }
@@ -281,7 +307,12 @@ impl EventStream {
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { events, filter, subscription_id, connection }
+        Self {
+            events,
+            filter,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -317,7 +348,8 @@ impl Stream for EventStream {
 impl Drop for EventStream {
     fn drop(&mut self) {
         // Best-effort: enqueue `unsubscribe_events`; a dead connection is fine.
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }
 
@@ -342,7 +374,12 @@ impl AgpEventStream {
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { events, filter, subscription_id, connection }
+        Self {
+            events,
+            filter,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -373,7 +410,8 @@ impl Stream for AgpEventStream {
 
 impl Drop for AgpEventStream {
     fn drop(&mut self) {
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }
 
@@ -394,7 +432,11 @@ impl InspectStream {
         subscription_id: u64,
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
-        Self { events, subscription_id, connection }
+        Self {
+            events,
+            subscription_id,
+            connection,
+        }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
@@ -425,6 +467,7 @@ impl Stream for InspectStream {
 
 impl Drop for InspectStream {
     fn drop(&mut self) {
-        self.connection.unsubscribe_fire_and_forget(self.subscription_id);
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }

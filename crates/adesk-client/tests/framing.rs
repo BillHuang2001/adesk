@@ -10,7 +10,9 @@ use common::MockServer;
 
 /// Connect without the handshake ping and accept the connection on the server.
 async fn connect(server: &mut MockServer, options: ConnectOptions) -> Client {
-    let client = Client::connect_with(options).await.expect("connect to the mock server");
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
     server.accept().await;
     client
 }
@@ -41,11 +43,17 @@ async fn malformed_json_is_protocol_error() {
 
     match result {
         Err(ClientError::Protocol { message }) => {
-            assert!(!message.is_empty(), "the protocol error explains itself: {message}");
+            assert!(
+                !message.is_empty(),
+                "the protocol error explains itself: {message}"
+            );
         }
         other => panic!("expected ClientError::Protocol, got {other:?}"),
     }
-    assert!(client.is_closed(), "a framing violation terminates the connection");
+    assert!(
+        client.is_closed(),
+        "a framing violation terminates the connection"
+    );
 }
 
 /// A line above `max_frame_len` becomes `ClientError::Protocol`.
@@ -90,7 +98,10 @@ async fn oversized_line_is_protocol_error() {
         }
         other => panic!("expected ClientError::Protocol, got {other:?}"),
     }
-    assert!(client.is_closed(), "an oversized frame terminates the connection");
+    assert!(
+        client.is_closed(),
+        "an oversized frame terminates the connection"
+    );
 }
 
 /// EOF with a request in flight becomes `ClientError::Closed`.

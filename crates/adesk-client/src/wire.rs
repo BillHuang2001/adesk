@@ -110,9 +110,11 @@ pub(crate) fn encode_request(id: u64, method: &str, params: Value) -> Result<Vec
     })?;
     let frame = Frame::Request(RequestFrame::new(id, typed));
     // The codec payload has no terminator; the NDJSON line adds it.
-    let mut line = NdjsonCodec.encode(&frame).map_err(|error| ClientError::Protocol {
-        message: format!("failed to encode request {id} ({method}): {error}"),
-    })?;
+    let mut line = NdjsonCodec
+        .encode(&frame)
+        .map_err(|error| ClientError::Protocol {
+            message: format!("failed to encode request {id} ({method}): {error}"),
+        })?;
     line.push(b'\n');
     Ok(line)
 }
@@ -146,20 +148,34 @@ pub(crate) fn decode_line(line: &[u8]) -> Result<Inbound> {
 fn from_frame(frame: Frame) -> Result<Inbound> {
     match frame {
         Frame::Response(ResponseFrame { id, outcome }) => match outcome {
-            ResponseOutcome::Result(payload) => {
-                Ok(Inbound::Response { id, result: Ok(payload.as_value().clone()) })
-            }
+            ResponseOutcome::Result(payload) => Ok(Inbound::Response {
+                id,
+                result: Ok(payload.as_value().clone()),
+            }),
             ResponseOutcome::Error(error) => Ok(Inbound::Response {
                 id,
-                result: Err(ServerError { code: error.code, message: error.message }),
+                result: Err(ServerError {
+                    code: error.code,
+                    message: error.message,
+                }),
             }),
         },
-        Frame::Event(EventFrame { event, seq, ts_ms, data }) => {
+        Frame::Event(EventFrame {
+            event,
+            seq,
+            ts_ms,
+            data,
+        }) => {
             let name = event_name(event)?;
             let data = data.to_data().map_err(|error| ClientError::Protocol {
                 message: format!("malformed event payload: {error}"),
             })?;
-            Ok(Inbound::Event(RawEvent { name, seq, ts_ms, data }))
+            Ok(Inbound::Event(RawEvent {
+                name,
+                seq,
+                ts_ms,
+                data,
+            }))
         }
         Frame::Request(_) => Err(ClientError::Protocol {
             message: "server sent a request frame".to_owned(),
@@ -186,5 +202,10 @@ fn lenient_event(line: &[u8]) -> Option<RawEvent> {
         None | Some(Value::Null) => Value::Object(serde_json::Map::new()),
         Some(data) => data.clone(),
     };
-    Some(RawEvent { name, seq, ts_ms, data })
+    Some(RawEvent {
+        name,
+        seq,
+        ts_ms,
+        data,
+    })
 }

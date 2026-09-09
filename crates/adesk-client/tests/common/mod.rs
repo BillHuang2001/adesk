@@ -30,8 +30,8 @@ use adesk_proto::{
 use serde_json::Value;
 use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tokio::net::unix::OwnedWriteHalf;
+use tokio::net::UnixListener;
 
 /// A scripted AGP peer speaking NDJSON over a real Unix socket.
 ///
@@ -81,8 +81,11 @@ impl MockServer {
 
     /// Accept exactly one client connection and split it into read/write halves.
     pub async fn accept(&mut self) {
-        let (stream, _addr) =
-            self.listener.accept().await.expect("mock server: accept client connection");
+        let (stream, _addr) = self
+            .listener
+            .accept()
+            .await
+            .expect("mock server: accept client connection");
         let (reader, writer) = stream.into_split();
         self.reader = Some(BufReader::new(reader));
         self.writer = Some(writer);
@@ -159,14 +162,24 @@ impl MockServer {
 
     /// Read one newline-terminated line, without the terminator.
     async fn read_line(&mut self) -> Vec<u8> {
-        let reader = self.reader.as_mut().expect("mock server: accept() was not called");
+        let reader = self
+            .reader
+            .as_mut()
+            .expect("mock server: accept() was not called");
         let mut line = Vec::new();
         let read = reader
             .read_until(b'\n', &mut line)
             .await
             .expect("mock server: read a client frame");
-        assert!(read > 0, "mock server: the client closed the connection mid-request");
-        assert_eq!(line.last(), Some(&b'\n'), "mock server: frame is not newline-terminated");
+        assert!(
+            read > 0,
+            "mock server: the client closed the connection mid-request"
+        );
+        assert_eq!(
+            line.last(),
+            Some(&b'\n'),
+            "mock server: frame is not newline-terminated"
+        );
         line.pop();
         line
     }
@@ -179,9 +192,18 @@ impl MockServer {
 
     /// Write raw bytes and flush.
     async fn write_bytes(&mut self, bytes: &[u8]) {
-        let writer = self.writer.as_mut().expect("mock server: accept() was not called");
-        writer.write_all(bytes).await.expect("mock server: write to the client");
-        writer.flush().await.expect("mock server: flush to the client");
+        let writer = self
+            .writer
+            .as_mut()
+            .expect("mock server: accept() was not called");
+        writer
+            .write_all(bytes)
+            .await
+            .expect("mock server: write to the client");
+        writer
+            .flush()
+            .await
+            .expect("mock server: flush to the client");
     }
 }
 
@@ -197,12 +219,18 @@ fn encode_frame(codec: &NdjsonCodec, frame: &Frame) -> Vec<u8> {
 
 /// Build the success `ResponseFrame` for `id`.
 fn result_response(id: u64, result: Value) -> ResponseFrame {
-    ResponseFrame { id, outcome: ResponseOutcome::Result(ResultPayload(result)) }
+    ResponseFrame {
+        id,
+        outcome: ResponseOutcome::Result(ResultPayload(result)),
+    }
 }
 
 /// Build the error `ResponseFrame` for `id` from an AGP error object.
 fn error_response(id: u64, error: ErrorPayload) -> ResponseFrame {
-    ResponseFrame { id, outcome: ResponseOutcome::Error(error) }
+    ResponseFrame {
+        id,
+        outcome: ResponseOutcome::Error(error),
+    }
 }
 
 /// Build the `EventFrame` for one pushed event (protocol §5.6).
@@ -221,8 +249,8 @@ fn event_frame(name: &str, seq: u64, ts_ms: u64, data: Value) -> EventFrame {
 fn request_parts(request: RequestFrame) -> (u64, String, Value) {
     let RequestFrame { id, method } = request;
     let name = method.method_name().to_owned();
-    let params = method
-        .params_value()
-        .unwrap_or_else(|error| panic!("mock server: params of `{name}` do not serialise: {error}"));
+    let params = method.params_value().unwrap_or_else(|error| {
+        panic!("mock server: params of `{name}` do not serialise: {error}")
+    });
     (id, name, params)
 }

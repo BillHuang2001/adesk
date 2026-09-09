@@ -29,7 +29,12 @@ impl Client {
     /// falls behind; the stream ends once the connection closes.
     pub async fn subscribe_events(&self, filter: EventFilter) -> Result<EventStream> {
         let result: SubscribeResult = self.request("subscribe_events", &filter).await?;
-        Ok(EventStream::new(self.inner.subscribe(), filter, result.subscription_id, self.inner.clone()))
+        Ok(EventStream::new(
+            self.inner.subscribe(),
+            filter,
+            result.subscription_id,
+            self.inner.clone(),
+        ))
     }
 
     /// `subscribe_events`, but yielding every AGP event frame — including
@@ -40,7 +45,12 @@ impl Client {
     /// when forward compatibility matters more than the typed core vocabulary.
     pub async fn subscribe_frames(&self, filter: EventFilter) -> Result<AgpEventStream> {
         let result: SubscribeResult = self.request("subscribe_events", &filter).await?;
-        Ok(AgpEventStream::new(self.inner.subscribe(), filter, result.subscription_id, self.inner.clone()))
+        Ok(AgpEventStream::new(
+            self.inner.subscribe(),
+            filter,
+            result.subscription_id,
+            self.inner.clone(),
+        ))
     }
 
     /// `unsubscribe_events` — cancel a subscription by server-assigned id.
@@ -49,7 +59,9 @@ impl Client {
     /// id was obtained elsewhere (or to stop delivery before dropping a
     /// stream).
     pub async fn unsubscribe_events(&self, subscription_id: u64) -> Result<()> {
-        let _: Empty = self.request("unsubscribe_events", &UnsubscribeParams { subscription_id }).await?;
+        let _: Empty = self
+            .request("unsubscribe_events", &UnsubscribeParams { subscription_id })
+            .await?;
         Ok(())
     }
 }

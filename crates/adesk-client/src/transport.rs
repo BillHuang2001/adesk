@@ -43,12 +43,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde::Serialize;
 use serde_json::Value;
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::net::unix::OwnedWriteHalf;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
@@ -97,7 +97,9 @@ impl CloseReason {
     /// Materialise a fresh [`ClientError`] for one caller.
     fn to_error(&self) -> ClientError {
         match self {
-            CloseReason::Protocol { message } => ClientError::Protocol { message: message.clone() },
+            CloseReason::Protocol { message } => ClientError::Protocol {
+                message: message.clone(),
+            },
             CloseReason::Closed => ClientError::Closed,
             CloseReason::Io { kind, message } => {
                 ClientError::Io(io::Error::new(*kind, message.clone()))
@@ -107,7 +109,10 @@ impl CloseReason {
 
     /// Capture an I/O error (`std::io::Error` is not `Clone`).
     fn io(error: &io::Error) -> CloseReason {
-        CloseReason::Io { kind: error.kind(), message: error.to_string() }
+        CloseReason::Io {
+            kind: error.kind(),
+            message: error.to_string(),
+        }
     }
 }
 
@@ -117,7 +122,9 @@ impl From<ClientError> for CloseReason {
             ClientError::Protocol { message } => CloseReason::Protocol { message },
             ClientError::Closed => CloseReason::Closed,
             ClientError::Io(error) => CloseReason::io(&error),
-            other => CloseReason::Protocol { message: other.to_string() },
+            other => CloseReason::Protocol {
+                message: other.to_string(),
+            },
         }
     }
 }
@@ -145,11 +152,18 @@ impl EventFanout {
         let skipped = Arc::new(AtomicU64::new(0));
         let (sender, receiver) = mpsc::channel(EVENT_CHANNEL_CAPACITY);
         if !self.closed {
-            self.subscribers.push(Subscriber { sender, skipped: skipped.clone() });
+            self.subscribers.push(Subscriber {
+                sender,
+                skipped: skipped.clone(),
+            });
         }
         // When already closed the sender is dropped here, so `receiver` is
         // immediately at its end (the stream reports `Closed`).
-        EventReceiver { receiver, skipped, closed_reported: false }
+        EventReceiver {
+            receiver,
+            skipped,
+            closed_reported: false,
+        }
     }
 
     /// Deliver one event to every live subscriber.
@@ -160,16 +174,16 @@ impl EventFanout {
         if self.closed {
             return;
         }
-        self.subscribers.retain_mut(|subscriber| {
-            match subscriber.sender.try_send(event.clone()) {
+        self.subscribers.retain_mut(
+            |subscriber| match subscriber.sender.try_send(event.clone()) {
                 Ok(()) => true,
                 Err(TrySendError::Full(_)) => {
                     subscriber.skipped.fetch_add(1, Ordering::SeqCst);
                     true
                 }
                 Err(TrySendError::Closed(_)) => false,
-            }
-        });
+            },
+        );
     }
 
     /// End every subscription (dropping the senders wakes the streams).
@@ -302,12 +316,16 @@ impl Connection {
         let (outbound, inbound) = mpsc::channel::<Vec<u8>>(OUTBOUND_QUEUE_CAPACITY);
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
 
-        let pending: Arc<Mutex<HashMap<u64, PendingSender>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<HashMap<u64, PendingSender>>> = Arc::new(Mutex::new(HashMap::new()));
         let events = Arc::new(Mutex::new(EventFanout::default()));
         let closed = Arc::new(AtomicBool::new(false));
         let close_reason: Arc<Mutex<Option<CloseReason>>> = Arc::new(Mutex::new(None));
-        let shared = Shared { pending, events, closed, close_reason };
+        let shared = Shared {
+            pending,
+            events,
+            closed,
+            close_reason,
+        };
 
         let reader = tokio::spawn(reader_task(
             BufReader::new(read_half),
@@ -379,14 +397,17 @@ impl Connection {
         }
 
         match receiver.await {
-            Ok(Ok(value)) => serde_json::from_value(value).map_err(|error| {
-                ClientError::InvalidPayload {
-                    message: format!("result of `{method}` does not match the expected type: {error}"),
-                }
-            }),
-            Ok(Err(error)) => {
-                Err(ClientError::Server { code: error.code, message: error.message })
+            Ok(Ok(value)) => {
+                serde_json::from_value(value).map_err(|error| ClientError::InvalidPayload {
+                    message: format!(
+                        "result of `{method}` does not match the expected type: {error}"
+                    ),
+                })
             }
+            Ok(Err(error)) => Err(ClientError::Server {
+                code: error.code,
+                message: error.message,
+            }),
             // The sender was dropped: the connection ended or `close` failed it.
             Err(_cancelled) => Err(self.close_error()),
         }

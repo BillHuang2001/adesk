@@ -16,7 +16,6 @@ repository.workspace = true
 [dependencies]
 adesk-core.workspace = true
 adesk-proto.workspace = true
-base64.workspace = true
 futures.workspace = true
 image.workspace = true
 serde.workspace = true
@@ -26,4 +25,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+# Test-only: `tests/images.rs` builds base64 payloads; `src/` decodes through
+# `ImagePayload::decode_data`, so the crate itself does not depend on base64.
+base64.workspace = true
 tempfile.workspace = true

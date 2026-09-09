@@ -56,7 +56,9 @@ async fn many_requests_in_flight_get_distinct_ids() {
 
             // A distinct marker per request id.
             for id in 1..=N as u64 {
-                server.respond(id, json!({"windows": [], "active_window_id": id})).await;
+                server
+                    .respond(id, json!({"windows": [], "active_window_id": id}))
+                    .await;
             }
         })
     })
@@ -68,7 +70,10 @@ async fn many_requests_in_flight_get_distinct_ids() {
         .map(|result| {
             let list = result.expect("list_windows succeeds");
             assert!(list.windows.is_empty());
-            u64::from(list.active_window_id.expect("the marker is the active window id"))
+            u64::from(
+                list.active_window_id
+                    .expect("the marker is the active window id"),
+            )
         })
         .collect();
     markers.sort_unstable();
@@ -98,14 +103,25 @@ async fn out_of_order_responses_match_by_id() {
 
     let (id1, method1, _) = server.next_request().await;
     let (id2, method2, _) = server.next_request().await;
-    assert_eq!((method1.as_str(), method2.as_str()), ("list_windows", "list_windows"));
+    assert_eq!(
+        (method1.as_str(), method2.as_str()),
+        ("list_windows", "list_windows")
+    );
     assert_ne!(id1, id2, "concurrent requests get distinct ids");
-    assert_eq!((id1, id2), (1, 2), "per-connection ids start at 1 and increase");
+    assert_eq!(
+        (id1, id2),
+        (1, 2),
+        "per-connection ids start at 1 and increase"
+    );
 
     // Answer the second request first.
-    server.respond(id2, json!({"windows": [], "active_window_id": 2})).await;
+    server
+        .respond(id2, json!({"windows": [], "active_window_id": 2}))
+        .await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut first).await.is_err(),
+        tokio::time::timeout(Duration::from_millis(50), &mut first)
+            .await
+            .is_err(),
         "the first caller must not resolve before its own response arrives"
     );
     let second_list = tokio::time::timeout(Duration::from_secs(5), &mut second)
@@ -115,7 +131,9 @@ async fn out_of_order_responses_match_by_id() {
     assert_eq!(second_list.active_window_id, Some(WindowId(2)));
 
     // Now the first request, which arrived second.
-    server.respond(id1, json!({"windows": [], "active_window_id": 1})).await;
+    server
+        .respond(id1, json!({"windows": [], "active_window_id": 1}))
+        .await;
     let first_list = tokio::time::timeout(Duration::from_secs(5), &mut first)
         .await
         .expect("the first caller resolves once its response arrives")

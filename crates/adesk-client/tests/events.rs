@@ -10,7 +10,8 @@ mod common;
 use std::time::Duration;
 
 use adesk_client::{
-    AgpEvent, Client, ClientError, ConnectOptions, EventFilter, EventKind, EventStream, ImagePayload,
+    AgpEvent, Client, ClientError, ConnectOptions, EventFilter, EventKind, EventStream,
+    ImagePayload,
 };
 use adesk_core::{Rect, RuntimeEvent, WindowId};
 use common::MockServer;
@@ -29,7 +30,9 @@ const EVENT_CHANNEL_CAPACITY: usize = 4096;
 /// Connect without the handshake ping and accept the connection on the server.
 async fn connect(server: &mut MockServer) -> Client {
     let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options).await.expect("connect to the mock server");
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
     server.accept().await;
     client
 }
@@ -46,7 +49,9 @@ async fn subscribe(
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "subscribe_events");
-            server.respond(id, json!({ "subscription_id": subscription_id })).await;
+            server
+                .respond(id, json!({ "subscription_id": subscription_id }))
+                .await;
         })
     })
     .await
@@ -74,7 +79,11 @@ async fn subscribe_yields_typed_runtime_events() {
     let mut server = MockServer::start().await;
     let client = connect(&mut server).await;
     let mut stream = subscribe(&mut server, &client, EventFilter::all(), 1).await;
-    assert_eq!(stream.subscription_id(), 1, "the server-assigned id is kept");
+    assert_eq!(
+        stream.subscription_id(),
+        1,
+        "the server-assigned id is kept"
+    );
 
     // Envelope carries seq/ts_ms; `data` carries the variant fields (§5.6).
     server
@@ -90,8 +99,17 @@ async fn subscribe_yields_typed_runtime_events() {
         )
         .await;
 
-    match next_event(&mut stream).await.expect("the surface_commit event is typed") {
-        RuntimeEvent::SurfaceCommit { seq, ts_ms, window_id, commit_seq, damage } => {
+    match next_event(&mut stream)
+        .await
+        .expect("the surface_commit event is typed")
+    {
+        RuntimeEvent::SurfaceCommit {
+            seq,
+            ts_ms,
+            window_id,
+            commit_seq,
+            damage,
+        } => {
             assert_eq!(seq, 41, "the envelope seq is preserved");
             assert_eq!(ts_ms, 1200, "the envelope ts_ms is preserved");
             assert_eq!(window_id, WindowId(17));
@@ -101,10 +119,19 @@ async fn subscribe_yields_typed_runtime_events() {
         other => panic!("expected RuntimeEvent::SurfaceCommit, got {other:?}"),
     }
 
-    server.emit_event("focus_changed", 42, 1300, json!({ "window_id": 17 })).await;
+    server
+        .emit_event("focus_changed", 42, 1300, json!({ "window_id": 17 }))
+        .await;
 
-    match next_event(&mut stream).await.expect("the focus_changed event is typed") {
-        RuntimeEvent::FocusChanged { seq, ts_ms, window_id } => {
+    match next_event(&mut stream)
+        .await
+        .expect("the focus_changed event is typed")
+    {
+        RuntimeEvent::FocusChanged {
+            seq,
+            ts_ms,
+            window_id,
+        } => {
             assert_eq!(seq, 42);
             assert_eq!(ts_ms, 1300);
             assert_eq!(window_id, Some(WindowId(17)));
@@ -124,8 +151,13 @@ async fn subscribe_yields_typed_runtime_events() {
 async fn local_kind_filter_is_applied() {
     let mut server = MockServer::start().await;
     let client = connect(&mut server).await;
-    let mut stream =
-        subscribe(&mut server, &client, EventFilter::kinds([EventKind::WindowCreated]), 2).await;
+    let mut stream = subscribe(
+        &mut server,
+        &client,
+        EventFilter::kinds([EventKind::WindowCreated]),
+        2,
+    )
+    .await;
 
     // The server ignores the filter and sends a commit the client never asked
     // for; only the window_created frame may reach the stream.
@@ -152,9 +184,20 @@ async fn local_kind_filter_is_applied() {
         )
         .await;
 
-    match next_event(&mut stream).await.expect("the window_created event is typed") {
-        RuntimeEvent::WindowCreated { seq, ts_ms, window_id, .. } => {
-            assert_eq!(seq, 8, "the earlier surface_commit was filtered out locally");
+    match next_event(&mut stream)
+        .await
+        .expect("the window_created event is typed")
+    {
+        RuntimeEvent::WindowCreated {
+            seq,
+            ts_ms,
+            window_id,
+            ..
+        } => {
+            assert_eq!(
+                seq, 8,
+                "the earlier surface_commit was filtered out locally"
+            );
             assert_eq!(ts_ms, 110);
             assert_eq!(window_id, WindowId(17));
         }
@@ -171,8 +214,13 @@ async fn local_kind_filter_is_applied() {
 async fn local_window_filter_is_applied() {
     let mut server = MockServer::start().await;
     let client = connect(&mut server).await;
-    let mut stream =
-        subscribe(&mut server, &client, EventFilter::all().window(WindowId(17)), 4).await;
+    let mut stream = subscribe(
+        &mut server,
+        &client,
+        EventFilter::all().window(WindowId(17)),
+        4,
+    )
+    .await;
 
     // Window 18 is emitted first, so yielding 17 first proves it was skipped.
     server
@@ -192,10 +240,21 @@ async fn local_window_filter_is_applied() {
         )
         .await;
 
-    let event = next_event(&mut stream).await.expect("the window-17 event is typed");
-    assert_eq!(event.window_id(), Some(WindowId(17)), "only window 17 is delivered");
+    let event = next_event(&mut stream)
+        .await
+        .expect("the window-17 event is typed");
+    assert_eq!(
+        event.window_id(),
+        Some(WindowId(17)),
+        "only window 17 is delivered"
+    );
     match event {
-        RuntimeEvent::SurfaceCommit { seq, window_id, commit_seq, .. } => {
+        RuntimeEvent::SurfaceCommit {
+            seq,
+            window_id,
+            commit_seq,
+            ..
+        } => {
             assert_eq!(seq, 12, "the window-18 event was filtered out locally");
             assert_eq!(window_id, WindowId(17));
             assert_eq!(commit_seq, 6);
@@ -234,7 +293,12 @@ async fn subscribe_frames_yields_inspect_and_other() {
     let image = ImagePayload::from_rgba8(1, 1, &[0x11, 0x22, 0x33, 0xff], 1.0)
         .expect("build a 1x1 rgba8 payload");
     server
-        .emit_event("inspect_frame", 21, 300, json!({ "subscription_id": 9, "image": image.clone() }))
+        .emit_event(
+            "inspect_frame",
+            21,
+            300,
+            json!({ "subscription_id": 9, "image": image.clone() }),
+        )
         .await;
 
     let event = tokio::time::timeout(STEP_TIMEOUT, stream.next())
@@ -253,7 +317,9 @@ async fn subscribe_frames_yields_inspect_and_other() {
 
     // Unknown kind: the lenient wire path must preserve name/seq/ts_ms/data.
     let data = json!({ "future_field": [1, 2, 3], "nested": { "ok": true } });
-    server.emit_event("future_kind", 22, 310, data.clone()).await;
+    server
+        .emit_event("future_kind", 22, 310, data.clone())
+        .await;
 
     let event = tokio::time::timeout(STEP_TIMEOUT, stream.next())
         .await
@@ -261,7 +327,12 @@ async fn subscribe_frames_yields_inspect_and_other() {
         .expect("the stream is still open")
         .expect("an unknown kind is not an error");
     match event {
-        AgpEvent::Other { name, seq, ts_ms, data: got } => {
+        AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data: got,
+        } => {
             assert_eq!(name, "future_kind");
             assert_eq!(seq, 22);
             assert_eq!(ts_ms, 310);
@@ -296,7 +367,10 @@ async fn dropping_stream_sends_unsubscribe() {
         json!({ "subscription_id": 3 }),
         "the dropped stream cancels exactly its own subscription"
     );
-    assert!(!client.is_closed(), "unsubscribe-on-drop happens on a live connection");
+    assert!(
+        !client.is_closed(),
+        "unsubscribe-on-drop happens on a live connection"
+    );
 }
 
 /// A lagging subscriber gets `ClientError::Lagged`.
@@ -335,7 +409,9 @@ async fn lag_reports_skipped_events() {
         tokio::join!(sync, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
-            server.respond(id, json!({ "windows": [], "active_window_id": null })).await;
+            server
+                .respond(id, json!({ "windows": [], "active_window_id": null }))
+                .await;
         })
     })
     .await
@@ -344,15 +420,23 @@ async fn lag_reports_skipped_events() {
 
     match next_event(&mut stream).await {
         Err(ClientError::Lagged { skipped }) => {
-            assert!(skipped > 0, "the overflow is counted, not hidden: {skipped}");
+            assert!(
+                skipped > 0,
+                "the overflow is counted, not hidden: {skipped}"
+            );
         }
         other => panic!("expected ClientError::Lagged as the first item, got {other:?}"),
     }
 
     // The stream stays usable: one buffered item frees a queue slot, so the next
     // event is delivered rather than dropped.
-    let buffered = next_event(&mut stream).await.expect("the buffered backlog is still delivered");
-    assert!(buffered.seq() <= emitted as u64, "the backlog is the pre-overflow events");
+    let buffered = next_event(&mut stream)
+        .await
+        .expect("the buffered backlog is still delivered");
+    assert!(
+        buffered.seq() <= emitted as u64,
+        "the backlog is the pre-overflow events"
+    );
 
     let marker_seq = 999_999;
     server
@@ -372,7 +456,10 @@ async fn lag_reports_skipped_events() {
             Ok(RuntimeEvent::SurfaceCommit { commit_seq, .. }) if commit_seq == marker_seq => break,
             Ok(_) => {
                 drained += 1;
-                assert!(drained <= emitted, "the marker event is delivered, not lost");
+                assert!(
+                    drained <= emitted,
+                    "the marker event is delivered, not lost"
+                );
             }
             Err(error) => panic!("unexpected error while draining the backlog: {error:?}"),
         }
@@ -401,6 +488,9 @@ async fn connection_close_ends_stream_with_closed() {
     let end = tokio::time::timeout(STEP_TIMEOUT, stream.next())
         .await
         .expect("the stream ends instead of hanging");
-    assert!(end.is_none(), "the stream ends after reporting Closed once, got {end:?}");
+    assert!(
+        end.is_none(),
+        "the stream ends after reporting Closed once, got {end:?}"
+    );
     assert!(client.is_closed(), "the connection reports the close");
 }
