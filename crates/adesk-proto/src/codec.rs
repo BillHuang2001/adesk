@@ -1,0 +1,91 @@
+//! Wire codec: NDJSON today, a binary framing later (§1, §7).
+//!
+//! [`Codec`] is deliberately payload-oriented (bytes, no terminator) so a future
+//! binary framing can be added without touching any method definition; the
+//! NDJSON-specific string conveniences are [`NdjsonCodec::encode_str`],
+//! [`NdjsonCodec::decode_str`], [`encode_frame`] and [`decode_frame`].
+
+use crate::{Frame, Result};
+
+/// A wire codec: one frame ↔ one transport payload.
+///
+/// For NDJSON a payload is one UTF-8 JSON line; a binary codec would use one
+/// packet. Implementations must never include a terminator in [`Codec::encode`]
+/// output — the transport adds it.
+pub trait Codec: std::fmt::Debug + Send + Sync {
+    /// Codec name, for diagnostics.
+    fn name(&self) -> &'static str;
+
+    /// Encodes one frame into a transport payload without a terminator.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProtoError`](crate::ProtoError) when the frame cannot be encoded.
+    fn encode(&self, frame: &Frame) -> Result<Vec<u8>>;
+
+    /// Decodes one transport payload into a frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProtoError`](crate::ProtoError) when the payload is not a
+    /// well-formed frame.
+    fn decode(&self, payload: &[u8]) -> Result<Frame>;
+}
+
+/// The NDJSON codec (§1): one UTF-8 JSON object per line, no embedded newlines.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NdjsonCodec;
+
+impl NdjsonCodec {
+    /// Encodes a frame as a JSON string **without** a trailing newline (the
+    /// transport adds the `\n`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::Json`](crate::ProtoError::Json) on serialization failure.
+    pub fn encode_str(&self, frame: &Frame) -> Result<String> {
+        todo!()
+    }
+
+    /// Decodes one JSON line.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ProtoError`](crate::ProtoError) for malformed JSON, unknown
+    /// methods/kinds, or frames that match no frame shape.
+    pub fn decode_str(&self, line: &str) -> Result<Frame> {
+        todo!()
+    }
+}
+
+impl Codec for NdjsonCodec {
+    fn name(&self) -> &'static str {
+        "ndjson"
+    }
+
+    fn encode(&self, frame: &Frame) -> Result<Vec<u8>> {
+        todo!()
+    }
+
+    fn decode(&self, payload: &[u8]) -> Result<Frame> {
+        todo!()
+    }
+}
+
+/// Encodes a frame with the NDJSON codec (no trailing newline).
+///
+/// # Errors
+///
+/// See [`NdjsonCodec::encode_str`].
+pub fn encode_frame(frame: &Frame) -> Result<String> {
+    NdjsonCodec.encode_str(frame)
+}
+
+/// Decodes one NDJSON line with the NDJSON codec.
+///
+/// # Errors
+///
+/// See [`NdjsonCodec::decode_str`].
+pub fn decode_frame(line: &str) -> Result<Frame> {
+    NdjsonCodec.decode_str(line)
+}
