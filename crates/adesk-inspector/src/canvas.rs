@@ -94,10 +94,13 @@ impl<'a> Canvas<'a> {
         if y1 > y0 {
             self.hline(y1, x0, x1, color);
         }
-        if y1 > y0 + 1 {
-            self.vline(x0, y0 + 1, y1 - 1, color);
+        // The columns only exist when the rect is at least three rows tall;
+        // `y1 > y0 + 1` in a saturating form so extreme coordinates cannot wrap.
+        if y1 >= y0.saturating_add(2) {
+            let (top, bottom) = (y0.saturating_add(1), y1 - 1);
+            self.vline(x0, top, bottom, color);
             if x1 > x0 {
-                self.vline(x1, y0 + 1, y1 - 1, color);
+                self.vline(x1, top, bottom, color);
             }
         }
     }
