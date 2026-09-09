@@ -35,18 +35,21 @@
 //! it on whitespace and quotes, so fixture arguments must not contain spaces, quotes or
 //! backslashes. There is no shell and no quoting layer between a fixture and the helper.
 //!
-//! # Phase status
+//! # Bounded process control
 //!
-//! This is the architecture skeleton: the public signatures are final, the trivial
-//! constructors/accessors/writers are implemented, and every behavior body that needs the
-//! real Wayland path is `todo!()` with its exact Phase-2 semantics documented on the item.
+//! [`TestApp`] never waits unbounded: [`TestApp::wait_for_exit`] and [`TestApp::exit`]
+//! kill the helper at their deadline, so a stuck helper fails the test with
+//! [`TestkitError::Timeout`] instead of hanging it.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
+use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
+use adesk_app_registry::desktop_file_id;
 use adesk_core::{AppId, Size};
 use tempfile::TempDir;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Child;
 
 use crate::error::{Result, TestkitError};
@@ -109,26 +112,26 @@ impl FixtureDir {
 
     /// Writes `entry` to `<share root>/applications/<file_stem>.desktop`.
     ///
-    /// Returns the [`AppId`] the registry will report for that file. `file_stem` is the file
-    /// name without the `.desktop` suffix and may contain `/` to create subdirectories; the
-    /// id then joins the components with `.` — the rule of
-    /// `adesk_app_registry::desktop_file_id` (the path relative to the applications dir, with
-    /// `.desktop` stripped and `/` replaced by `.`), replicated here because that function's
-    /// body is still a stub. The id is derived *before* the file is written, so an empty stem
-    /// fails with [`TestkitError::Fixture`] without touching the filesystem.
+    /// Returns the [`AppId`] the registry reports for that file, derived with the registry's
+    /// own [`desktop_file_id`] (the path relative to the applications dir, `.desktop`
+    /// stripped, `/` replaced by `.`). `file_stem` is the file name without the `.desktop`
+    /// suffix and may contain `/` to create subdirectories. The id is derived *before* the
+    /// file is written, so a stem that yields no id (empty, or a path escaping the
+    /// applications dir) fails with [`TestkitError::Fixture`] without touching the
+    /// filesystem.
     ///
     /// The contents come from [`DesktopEntryFixture::to_desktop_file`].
     pub fn write_entry(&self, file_stem: &str, entry: &DesktopEntryFixture) -> Result<AppId> {
         let file_name = format!("{file_stem}.desktop");
-        let app_id = desktop_id_from_rel(&file_name).ok_or_else(|| {
-            TestkitError::Fixture(format!(
-                "desktop file stem {file_stem:?} does not yield a non-empty app id"
-            ))
-        })?;
-        self.write_raw(
-            Path::new("applications").join(&file_name),
-            &entry.to_desktop_file(),
-        )?;
+        let rel = Path::new("applications").join(&file_name);
+        let app_id = desktop_file_id(&self.applications_dir(), &self.path().join(&rel))
+            .ok_or_else(|| {
+                TestkitError::Fixture(format!(
+                    "desktop file stem {file_stem:?} does not yield a non-empty app id under {}",
+                    self.applications_dir().display()
+                ))
+            })?;
+        self.write_raw(&rel, &entry.to_desktop_file())?;
         Ok(app_id)
     }
 
@@ -284,7 +287,7 @@ impl DesktopEntryFixture {
 
     /// Serializes the entry.
     ///
-    /// Exact layout (Phase 2 produces exactly this; the registry's parser must accept it):
+    /// Exact layout (the registry's parser accepts it; tests may assert on the text):
     ///
     /// ```text
     /// [Desktop Entry]
@@ -306,7 +309,37 @@ impl DesktopEntryFixture {
     /// verbatim: `Exec` arguments must not contain whitespace or quoting characters (see the
     /// module docs), and `Categories` items must not contain `;`.
     pub fn to_desktop_file(&self) -> String {
-        todo!("stub: implementation phase — layout documented above")
+        let mut text = String::from("[Desktop Entry]\nType=Application\n");
+        push_key(&mut text, "Name", &self.name);
+        push_key(&mut text, "Exec", &self.exec.join(" "));
+        if let Some(icon) = &self.icon {
+            push_key(&mut text, "Icon", icon);
+        }
+        if self.terminal {
+            text.push_str("Terminal=true\n");
+        }
+        if self.no_display {
+            text.push_str("NoDisplay=true\n");
+        }
+        if self.hidden {
+            text.push_str("Hidden=true\n");
+        }
+        if !self.categories.is_empty() {
+            push_key(&mut text, "Categories", &self.categories.join(";"));
+        }
+        if let Some(class) = &self.startup_wm_class {
+            push_key(&mut text, "StartupWMClass", class);
+        }
+        if let Some(try_exec) = &self.try_exec {
+            push_key(&mut text, "TryExec", try_exec);
+        }
+        if let Some(comment) = &self.comment {
+            push_key(&mut text, "Comment", comment);
+        }
+        for (key, value) in &self.extra {
+            push_key(&mut text, key, value);
+        }
+        text
     }
 }
 
@@ -457,12 +490,13 @@ pub struct TestApp {
 impl TestApp {
     /// Spawns `adesk-test-app` for `spec` against `runtime`'s Wayland socket.
     ///
-    /// Phase-2 semantics (exactly this):
+    /// Semantics (exactly this):
     ///
     /// 1. program = [`helper_bin_path`]`("adesk-test-app")`, args = [`TestAppSpec::cli_args`];
     /// 2. environment: `WAYLAND_DISPLAY` = [`TestRuntime::wayland_display`],
-    ///    `XDG_RUNTIME_DIR` = [`TestRuntime::env`]`().runtime_dir()` (the helper must never
-    ///    inherit the host's values);
+    ///    `XDG_RUNTIME_DIR` = [`TestRuntime::env`]`().runtime_dir()`, `XDG_DATA_DIRS` /
+    ///    `XDG_DATA_HOME` = the runtime's own dirs (the helper must never inherit the host's
+    ///    values, so every variable it could read is passed explicitly);
     /// 3. `stdin` piped (the `exit` command channel), `stdout`/`stderr` inherited so helper
     ///    diagnostics show up in the test output;
     /// 4. `kill_on_drop(true)`, then spawn; the returned handle owns the child and the app id
@@ -471,8 +505,24 @@ impl TestApp {
     /// Spawning itself does not wait for the toplevel to appear — use
     /// [`TestRuntime::wait_for_window_app`] for that.
     pub async fn spawn(runtime: &TestRuntime, spec: &TestAppSpec) -> Result<TestApp> {
-        let _ = (runtime, spec);
-        todo!("stub: implementation phase — semantics documented above")
+        let program = helper_bin_path(HELPER_APP)?;
+        let env = runtime.env();
+        let mut command = tokio::process::Command::new(&program);
+        command
+            .args(spec.cli_args())
+            .env("WAYLAND_DISPLAY", runtime.wayland_display())
+            .env("XDG_RUNTIME_DIR", env.runtime_dir())
+            .env("XDG_DATA_DIRS", env.data_dir())
+            .env("XDG_DATA_HOME", env.data_home())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .kill_on_drop(true);
+        let child = command.spawn().map_err(|e| io_at(&program, e))?;
+        Ok(TestApp {
+            child,
+            app_id: spec.app_id().clone(),
+        })
     }
 
     /// The app id the helper was started with.
@@ -487,47 +537,92 @@ impl TestApp {
 
     /// Whether the helper is still running.
     ///
-    /// Phase-2 semantics: `tokio::process::Child::try_wait` — `Ok(None)` means running,
-    /// `Ok(Some(_))` means it exited and the status was reaped (tokio caches it, so a later
+    /// Uses `tokio::process::Child::try_wait` — `Ok(None)` means running, `Ok(Some(_))` means
+    /// it exited and the status was reaped (tokio caches it, so a later
     /// [`TestApp::wait_for_exit`] still returns it).
     pub fn is_running(&mut self) -> Result<bool> {
-        todo!("stub: implementation phase — try_wait semantics documented above")
+        Ok(self.child.try_wait().map_err(TestkitError::Io)?.is_none())
     }
 
     /// Waits up to `timeout` for the helper to exit.
     ///
-    /// Phase-2 semantics: bounded `Child::wait`; on expiry the child is killed and
+    /// Bounded `Child::wait`; on expiry the child is killed and
     /// [`TestkitError::Timeout`] is returned with `what = "adesk-test-app exit"` (a killed
     /// helper reports no status here — that is what makes a stuck helper a test failure).
     pub async fn wait_for_exit(&mut self, timeout: Duration) -> Result<ExitStatus> {
-        let _ = timeout;
-        todo!("stub: implementation phase — bounded wait semantics documented above")
+        if let Some(status) = self.wait_within(timeout).await? {
+            return Ok(status);
+        }
+        // The helper outlived its deadline. SIGKILL it so a stuck helper cannot leak into
+        // the rest of the test run; a failed kill means it exited in the race between the
+        // deadline and this call, which does not change the outcome.
+        if let Err(error) = self.child.start_kill() {
+            tracing::debug!(%error, "killing the helper after its exit deadline failed");
+        }
+        Err(TestkitError::Timeout {
+            what: "adesk-test-app exit",
+            timeout,
+        })
     }
 
     /// Asks the helper to exit gracefully and waits (bounded) for it.
     ///
-    /// Phase-2 semantics: write `"exit\n"` to the child's stdin and close the pipe (the
-    /// helper's graceful command), then wait up to 5 s. If the deadline expires the child is
-    /// killed and the resulting signal status is returned, so a helper that ignored `exit`
-    /// fails the caller's `status.success()` assertion instead of hanging the test.
+    /// Writes `"exit\n"` to the child's stdin and closes the pipe (the helper's graceful
+    /// command), then waits up to 5 s. If the deadline expires the child is killed and the
+    /// resulting signal status is returned, so a helper that ignored `exit` fails the
+    /// caller's `status.success()` assertion instead of hanging the test.
     pub async fn exit(mut self) -> Result<ExitStatus> {
-        let _ = &mut self;
-        todo!("stub: implementation phase — graceful-exit semantics documented above")
+        /// How long the helper may take to honour the `exit` command.
+        const EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+        if let Some(mut stdin) = self.child.stdin.take() {
+            stdin
+                .write_all(b"exit\n")
+                .await
+                .map_err(|e| io_child("writing the exit command", e))?;
+            stdin
+                .flush()
+                .await
+                .map_err(|e| io_child("flushing the exit command", e))?;
+            // Dropping the handle closes the pipe; the helper reads the command and exits.
+            drop(stdin);
+        }
+        if let Some(status) = self.wait_within(EXIT_TIMEOUT).await? {
+            return Ok(status);
+        }
+        self.child.start_kill().map_err(TestkitError::Io)?;
+        self.wait_within(EXIT_TIMEOUT).await?.ok_or({
+            // The process is SIGKILLed, so this only happens if the OS never reaps it.
+            TestkitError::Timeout {
+                what: "adesk-test-app to be reaped after SIGKILL",
+                timeout: EXIT_TIMEOUT,
+            }
+        })
     }
 
     /// Kills the helper without waiting for it.
     ///
-    /// Phase-2 semantics: `tokio::process::Child::start_kill` (SIGKILL on Unix). The OS error
-    /// is surfaced as [`TestkitError::Io`] — including the error reported when the child has
-    /// already exited.
+    /// Uses `tokio::process::Child::start_kill` (SIGKILL on Unix). The OS error is surfaced
+    /// as [`TestkitError::Io`] — including the error reported when the child has already
+    /// exited.
     pub fn kill(&mut self) -> Result<()> {
-        todo!("stub: implementation phase — start_kill semantics documented above")
+        self.child.start_kill().map_err(TestkitError::Io)
+    }
+
+    /// Waits up to `timeout` for the child, returning `None` when the deadline expires.
+    async fn wait_within(&mut self, timeout: Duration) -> Result<Option<ExitStatus>> {
+        match tokio::time::timeout(timeout, self.child.wait()).await {
+            Ok(status) => status
+                .map(Some)
+                .map_err(|e| io_child("waiting for the helper to exit", e)),
+            Err(_) => Ok(None),
+        }
     }
 }
 
 /// Resolves a helper binary shipped by this package (e.g. `adesk-test-app`).
 ///
-/// Phase-2 semantics — the first existing regular file wins, in this order:
+/// The first existing regular file wins, in this order:
 ///
 /// 1. `<dir>/<name>`, where `<dir>` is the directory of `std::env::current_exe()`;
 /// 2. `<dir>/../<name>` — a test binary lives in `target/debug/deps/`, the helper in
@@ -542,22 +637,53 @@ impl TestApp {
 /// package that declares the `[[bin]]`; this package's own integration tests may use
 /// `env!("CARGO_BIN_EXE_adesk-test-app")` at compile time instead.
 pub fn helper_bin_path(name: &str) -> Result<PathBuf> {
-    let _ = name;
-    todo!("stub: implementation phase — search order documented above")
+    let exe = std::env::current_exe()?;
+    let dir = exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if let Some(found) =
+        find_next_to(&dir, name).or_else(|| find_on_path(name, std::env::var_os("PATH").as_deref()))
+    {
+        return Ok(found);
+    }
+    Err(TestkitError::HelperNotFound {
+        name: name.to_string(),
+        searched_from: dir,
+    })
 }
 
-/// Derives an app id from a path relative to the applications dir.
-///
-/// Mirrors `adesk_app_registry::desktop_file_id`: drop the `.desktop` suffix and replace `/`
-/// with `.`. Returns `None` when the remainder is empty or the suffix is missing. Replicated
-/// (not called) because the registry function's body is still `todo!()`; keep the two in sync
-/// and switch to it once it lands.
-fn desktop_id_from_rel(rel: &str) -> Option<AppId> {
-    let stem = rel.strip_suffix(".desktop")?;
-    if stem.is_empty() {
-        return None;
+/// `<dir>/<name>`, then `<dir>/../<name>` (a test binary lives in `target/debug/deps/`, the
+/// helper in `target/debug/`). Only regular files are accepted.
+fn find_next_to(dir: &Path, name: &str) -> Option<PathBuf> {
+    let candidate = dir.join(name);
+    if candidate.is_file() {
+        return Some(candidate);
     }
-    Some(AppId::from(stem.replace('/', ".")))
+    let candidate = dir.parent()?.join(name);
+    candidate.is_file().then_some(candidate)
+}
+
+/// Joins `name` onto every entry of a `PATH`-style variable, skipping empty entries.
+fn find_on_path(name: &str, path: Option<&OsStr>) -> Option<PathBuf> {
+    for entry in std::env::split_paths(path?) {
+        if entry.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = entry.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Appends one `Key=Value` line.
+fn push_key(text: &mut String, key: &str, value: &str) {
+    text.push_str(key);
+    text.push('=');
+    text.push_str(value);
+    text.push('\n');
 }
 
 /// Wraps an IO error with the path it happened on, preserving the error kind.
@@ -568,11 +694,19 @@ fn io_at(path: &Path, error: std::io::Error) -> TestkitError {
     ))
 }
 
-/// Unit tests for the parts of this module that are implemented in Phase 1.
+/// Wraps an IO error from a child-process operation with what was being done.
+fn io_child(action: &str, error: std::io::Error) -> TestkitError {
+    TestkitError::Io(std::io::Error::new(
+        error.kind(),
+        format!("{action} (adesk-test-app): {error}"),
+    ))
+}
+
+/// Unit tests for the parts of this module that need no runtime.
 ///
-/// Everything that needs the real Wayland path (`to_desktop_file`, `helper_bin_path`,
-/// `TestApp`) stays untested until its body lands; `TestAppSpec::cli_args` also depends on
-/// `FillPattern::to_cli_arg` and therefore on Phase 2.
+/// [`TestApp`] needs a live runtime (and the helper binary) and is covered by
+/// `tests/fixtures.rs`; [`TestAppSpec::cli_args`] and [`TestAppSpec::desktop_entry`] also
+/// depend on `FillPattern::to_cli_arg`.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -602,17 +736,33 @@ mod tests {
     }
 
     #[test]
-    fn desktop_ids_follow_the_registry_rule() {
-        let id = |rel: &str| desktop_id_from_rel(rel).map(|id| id.as_str().to_string());
-        assert_eq!(
-            id("org.mozilla.firefox.desktop").as_deref(),
-            Some("org.mozilla.firefox")
-        );
-        assert_eq!(id("code.desktop").as_deref(), Some("code"));
-        assert_eq!(id("kde/kate.desktop").as_deref(), Some("kde.kate"));
-        assert_eq!(id("foo/bar.baz.desktop").as_deref(), Some("foo.bar.baz"));
-        assert_eq!(id("no-extension"), None);
-        assert_eq!(id(".desktop"), None);
+    fn write_entry_ids_follow_the_registry_rule() {
+        let dir = FixtureDir::new().expect("temp dir");
+        let entry = DesktopEntryFixture::new("Demo", ["/bin/true"]);
+        for (stem, expected) in [
+            ("org.mozilla.firefox", "org.mozilla.firefox"),
+            ("code", "code"),
+            ("kde/kate", "kde.kate"),
+            ("foo/bar.baz", "foo.bar.baz"),
+        ] {
+            let id = dir.write_entry(stem, &entry).expect("write");
+            assert_eq!(id.as_str(), expected, "{stem}");
+            let path = dir.applications_dir().join(format!("{stem}.desktop"));
+            assert!(path.is_file(), "{}", path.display());
+            assert_eq!(
+                desktop_file_id(&dir.applications_dir(), &path),
+                Some(id.clone()),
+                "the returned id is the registry's own for {}",
+                path.display()
+            );
+        }
+
+        // A stem that yields no id is rejected before anything is written.
+        for stem in ["", "../escape", "/tmp/adesk-escape"] {
+            let error = dir.write_entry(stem, &entry).expect_err(stem);
+            assert!(matches!(error, TestkitError::Fixture(_)), "{stem}: {error}");
+        }
+        assert!(!dir.path().join("escape.desktop").exists());
     }
 
     #[test]
@@ -687,6 +837,134 @@ mod tests {
                 exit_after: Some(Duration::from_millis(250)),
                 extra_args: vec!["--verbose".to_string()],
             }
+        );
+    }
+
+    #[test]
+    fn to_desktop_file_writes_the_documented_layout() {
+        let full = DesktopEntryFixture::new("Fixture Demo", ["/bin/true", "--fixture"])
+            .with_icon("demo")
+            .with_terminal(true)
+            .with_no_display(true)
+            .with_hidden(true)
+            .with_category("Utility")
+            .with_category("Test")
+            .with_startup_wm_class("org.example.fixture")
+            .with_try_exec("/bin/true")
+            .with_comment("written by adesk-testkit")
+            .with_extra("X-Testkit", "1");
+        assert_eq!(
+            full.to_desktop_file(),
+            "[Desktop Entry]\n\
+             Type=Application\n\
+             Name=Fixture Demo\n\
+             Exec=/bin/true --fixture\n\
+             Icon=demo\n\
+             Terminal=true\n\
+             NoDisplay=true\n\
+             Hidden=true\n\
+             Categories=Utility;Test\n\
+             StartupWMClass=org.example.fixture\n\
+             TryExec=/bin/true\n\
+             Comment=written by adesk-testkit\n\
+             X-Testkit=1\n"
+        );
+
+        // Every optional key is omitted unless set; no blank lines, trailing newline.
+        let minimal = DesktopEntryFixture::new("Demo", ["/bin/true"]);
+        assert_eq!(
+            minimal.to_desktop_file(),
+            "[Desktop Entry]\nType=Application\nName=Demo\nExec=/bin/true\n"
+        );
+        assert!(!minimal.to_desktop_file().contains("\n\n"));
+    }
+
+    #[test]
+    fn serialized_entries_round_trip_through_the_registry_parser() {
+        let entry = DesktopEntryFixture::new("Fixture Demo", ["/bin/true", "--fixture"])
+            .with_category("Utility")
+            .with_startup_wm_class("org.example.fixture")
+            .with_comment("written by adesk-testkit");
+        let raw = adesk_app_registry::parse_str(&entry.to_desktop_file()).expect("parses");
+        let parsed = adesk_app_registry::DesktopEntry::from_raw(
+            AppId::from("org.example.fixture"),
+            PathBuf::from("/fixtures/org.example.fixture.desktop"),
+            &raw,
+            None,
+        )
+        .expect("is an Application entry");
+        assert_eq!(parsed.name, "Fixture Demo");
+        assert_eq!(parsed.exec.as_deref(), Some("/bin/true --fixture"));
+        assert_eq!(parsed.categories, ["Utility"]);
+        assert_eq!(
+            parsed.startup_wm_class.as_deref(),
+            Some("org.example.fixture")
+        );
+        assert!(!parsed.terminal && !parsed.hidden && !parsed.no_display);
+    }
+
+    #[test]
+    fn find_next_to_prefers_the_test_binary_directory() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let bin_dir = root.path().join("deps");
+        std::fs::create_dir_all(&bin_dir).expect("create deps");
+
+        // `<dir>/<name>` wins over `<dir>/../<name>`.
+        std::fs::write(bin_dir.join("helper"), "direct").expect("write");
+        std::fs::write(root.path().join("helper"), "sibling").expect("write");
+        assert_eq!(
+            find_next_to(&bin_dir, "helper"),
+            Some(bin_dir.join("helper"))
+        );
+
+        // Without a direct hit, the directory one level up is searched.
+        std::fs::remove_file(bin_dir.join("helper")).expect("remove");
+        assert_eq!(
+            find_next_to(&bin_dir, "helper"),
+            Some(root.path().join("helper"))
+        );
+
+        // Directories are not helper binaries.
+        std::fs::remove_file(root.path().join("helper")).expect("remove");
+        std::fs::create_dir(bin_dir.join("helper")).expect("create dir");
+        assert_eq!(find_next_to(&bin_dir, "helper"), None);
+        assert_eq!(find_next_to(&bin_dir, "missing"), None);
+    }
+
+    #[test]
+    fn find_on_path_skips_empty_entries_and_directories() {
+        let root = tempfile::tempdir().expect("temp dir");
+        let program = root.path().join("helper");
+        std::fs::write(&program, "#!/bin/sh\n").expect("write");
+        // A leading empty entry must not make the current directory searchable.
+        let mut path = std::ffi::OsString::from(":");
+        path.push(root.path());
+        assert_eq!(find_on_path("helper", Some(&path)), Some(program.clone()));
+        assert_eq!(find_on_path("missing", Some(&path)), None);
+        assert_eq!(find_on_path("helper", None), None);
+
+        std::fs::remove_file(&program).expect("remove");
+        std::fs::create_dir(&program).expect("create dir");
+        assert_eq!(find_on_path("helper", Some(&path)), None);
+    }
+
+    #[test]
+    fn helper_bin_path_reports_where_it_searched() {
+        let exe_dir = std::env::current_exe()
+            .expect("current exe")
+            .parent()
+            .expect("exe has a parent")
+            .to_path_buf();
+        let error = helper_bin_path("adesk-testkit-definitely-missing-helper")
+            .expect_err("no such helper exists");
+        assert!(
+            matches!(
+                error,
+                TestkitError::HelperNotFound { ref name, ref searched_from }
+                    if name == "adesk-testkit-definitely-missing-helper"
+                        && searched_from == &exe_dir
+            ),
+            "{error}"
         );
     }
 }
