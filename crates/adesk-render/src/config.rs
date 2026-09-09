@@ -118,3 +118,133 @@ impl RenderConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn source() -> Rect {
+        Rect::new(10, 20, 64, 48)
+    }
+
+    #[test]
+    fn new_config_has_no_post_processing_and_default_color() {
+        let config = RenderConfig::new(source());
+        assert_eq!(config.source, source());
+        assert_eq!(config.crop, None);
+        assert_eq!(config.max_dimension, None);
+        assert_eq!(config.clear_color, DEFAULT_CLEAR_COLOR);
+        assert_eq!(DEFAULT_CLEAR_COLOR, [0, 0, 0, 0xff]);
+    }
+
+    #[test]
+    fn builders_set_fields() {
+        let config = RenderConfig::new(source())
+            .with_crop(Rect::new(12, 22, 8, 8))
+            .with_max_dimension(4)
+            .with_clear_color([1, 2, 3, 4]);
+        assert_eq!(config.crop, Some(Rect::new(12, 22, 8, 8)));
+        assert_eq!(config.max_dimension, Some(4));
+        assert_eq!(config.clear_color, [1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn validate_accepts_valid_config() {
+        assert!(RenderConfig::new(source()).validate().is_ok());
+        assert!(RenderConfig::new(source())
+            .with_crop(source())
+            .with_max_dimension(16)
+            .validate()
+            .is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_empty_source() {
+        let err = RenderConfig::new(Rect::new(3, 4, 0, 5)).validate();
+        assert!(matches!(err, Err(RenderError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn validate_rejects_empty_crop() {
+        let err = RenderConfig::new(source())
+            .with_crop(Rect::new(11, 21, 0, 4))
+            .validate();
+        assert!(matches!(err, Err(RenderError::InvalidConfig { .. })));
+    }
+
+    #[test]
+    fn validate_rejects_crop_outside_source() {
+        // Starts before the source origin.
+        assert!(RenderConfig::new(source())
+            .with_crop(Rect::new(9, 20, 4, 4))
+            .validate()
+            .is_err());
+        // Extends past the source's right edge.
+        assert!(RenderConfig::new(source())
+            .with_crop(Rect::new(70, 20, 8, 4))
+            .validate()
+            .is_err());
+        // Disjoint from the source.
+        assert!(RenderConfig::new(source())
+            .with_crop(Rect::new(200, 200, 4, 4))
+            .validate()
+            .is_err());
+    }
+
+    #[test]
+    fn target_size_is_the_source_size() {
+        let config = RenderConfig::new(source());
+        assert_eq!(config.target_size(), Size::new(64, 48));
+        // Crop and downscale only affect the output, never the target.
+        let config = config.with_crop(Rect::new(10, 20, 8, 8)).with_max_dimension(2);
+        assert_eq!(config.target_size(), Size::new(64, 48));
+    }
+
+    #[test]
+    fn output_size_without_post_processing_is_the_target_size() {
+        let config = RenderConfig::new(source());
+        assert_eq!(config.output_size(), Size::new(64, 48));
+    }
+
+    #[test]
+    fn output_size_with_crop_is_the_crop_size() {
+        let config = RenderConfig::new(source()).with_crop(Rect::new(12, 22, 8, 6));
+        assert_eq!(config.output_size(), Size::new(8, 6));
+    }
+
+    #[test]
+    fn output_size_with_max_dimension_preserves_aspect_ratio() {
+        // 64x48 (4:3) -> longest edge 16.
+        let config = RenderConfig::new(source()).with_max_dimension(16);
+        assert_eq!(config.output_size(), Size::new(16, 12));
+        // Non-integer ratio: 64x48 -> longest edge 20.
+        let config = RenderConfig::new(source()).with_max_dimension(20);
+        assert_eq!(config.output_size(), Size::new(20, 15));
+        // Crop first (8x6), then downscale to a longest edge of 3.
+        let config = RenderConfig::new(source())
+            .with_crop(Rect::new(12, 22, 8, 6))
+            .with_max_dimension(3);
+        assert_eq!(config.output_size(), Size::new(3, 2));
+    }
+
+    #[test]
+    fn output_size_never_upscales() {
+        let config = RenderConfig::new(source()).with_max_dimension(1000);
+        assert_eq!(config.output_size(), Size::new(64, 48));
+    }
+
+    #[test]
+    fn output_size_with_max_dimension_zero_disables_scaling() {
+        let config = RenderConfig::new(source()).with_max_dimension(0);
+        assert_eq!(config.output_size(), Size::new(64, 48));
+        let config = config.with_crop(Rect::new(12, 22, 8, 6));
+        assert_eq!(config.output_size(), Size::new(8, 6));
+    }
+
+    #[test]
+    fn target_and_readback_formats_are_rgba8() {
+        assert_eq!(TARGET_FORMAT, Fourcc::Abgr8888);
+        assert_eq!(READBACK_FORMAT, Fourcc::Abgr8888);
+        assert_eq!(TARGET_FORMAT, READBACK_FORMAT);
+    }
+}
