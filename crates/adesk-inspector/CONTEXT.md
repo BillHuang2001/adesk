@@ -62,13 +62,15 @@ public too.
 | `app_ids` | label `app <app_id>` (or `app ?`) in slot 1 |
 | `focus` | `focus` 1 px border on the active window plus label `focus` in slot 2 |
 | `cursor` | crosshair with 4 px arms in `cursor` colour |
-| `actions` | positioned: plus glyph + `"{kind} #{id} +{age}ms"` label; positionless: HUD lines at the top-left |
+| `actions` | positioned: plus glyph (3x3 centre + 4 px arms) + `"{kind} #{id} +{age}ms"` label; positionless: HUD lines at the top-left |
 | `commit_timing` | right-aligned HUD `commit <seq> +<age>ms` in the top-right corner |
 
 Window label slots are fixed (0 = ids, 1 = app ids, 2 = focus) so enabling a subset never reflows
 the others.
 A label plate is the text ink inflated by `pad` px with a 1 px border; labels are elided to the
 window's inner width with `..` and clipped to `window.geometry ∩ canvas.clip()`.
+Accent overlays colour their label text from their own palette entry (`focus`, `action`, `timing`)
+while keeping the standard plate fill/border.
 Painters preserve input order for windows, damage rects and action markers.
 
 ## Constraints
@@ -122,6 +124,18 @@ Painters preserve input order for windows, damage rects and action markers.
   every overlay pixel assertion is exact.
 - Text is monospace: 5x7 ink, 6 px advance, 8 px line height at scale 1; the ink width of `n`
   characters is `n * advance - 1`. Printable ASCII only; every other character draws `?`.
+- `text::draw_label` takes the **ink** top-left; the plate is the ink rect inflated by `pad`
+  (`label_rect`). `paint::labels::slot_origin` returns the **plate** top-left, so label painters add
+  `pad` before calling `draw_label`.
+- Because labels elide to `window.w - 2*pad`, a plate never exceeds its window horizontally; the
+  window clip only ever trims a plate vertically (window shorter than the slot stack) or at frame edges.
+- HUD overlays anchor their plate to `canvas.clip()` (actions HUD top-left, commit HUD top-right);
+  `Inspector::render_into` always uses the full-buffer clip, so clip-relative and buffer-relative
+  coincide today.
+- Action markers are opaque and identically coloured, so marker draw order is observable only
+  through overlapping labels; `overlay_timing.rs` asserts input order that way.
+- The default plate `rgba(0,0,0,160)` blended over the opaque black base frame is a no-op, so label
+  pixel assertions reduce to outline/text colours.
 - `ActionKind` mirrors the AGP methods; the server maps its action-registry kind onto it. If a
   shared kind appears later in `adesk-observer`/`adesk-proto`, the mapping is one `From` impl.
 - `OverlayStyle::default` uses stable debug colours (white outlines/text, translucent red damage,
@@ -153,9 +167,10 @@ post-processing to the server and drop the dependency.
 - Composition: canonical order vs caller order, dedup, identity/empty sets, determinism
   (byte-identical renders), `render_into` size mismatch/overwrite, `region`/`max_dimension`
   (crop, downscale, order, invalid values), `render_from_source`, dimension preservation.
+  `crop`/`downscale` from `adesk-render` are the spec oracle for the request path.
 - Unit level: blend formula, clipping, `with_clip` restore, text metrics/elision, font coverage.
-- Current state: 52 named tests whose `todo!()` bodies state the expected assertion; Phase 2
-  replaces each `todo!()` with the assertion.
+- Current state: all 52 tests are implemented and green (`canvas_primitives` 12, `composition` 14,
+  `overlay_geometry` 8, `overlay_labels` 12, `overlay_timing` 6) plus the lib doctest.
 - Run with `./scripts/dev.sh cargo test -p adesk-inspector` (bare `cargo` cannot link outside the
   Nix dev shell).
 
@@ -173,14 +188,9 @@ post-processing to the server and drop the dependency.
   3. `inspect_subscribe`: the same call per frame, throttled by `min_interval_ms`, pushed as
      `inspect_frame` events; reuse one `Inspector` per subscription.
   4. Convert `Error` with `adesk_core::Error::from` (→ `invalid_request` / `render_failed`).
-- **Status**: Phase 1 architecture. Implemented: types, constructors, normalization, canonical
-  order, request plumbing and the post-processing adapter. `todo!()` remains in all drawing/layout
-  code (`canvas`, `text`, `font::glyph`, `paint/*`, `Inspector::render_into`) and in every test body.
-- **Validation in this worktree**: the workspace `members = ["crates/*"]` glob fails while sibling
-  crates have no `Cargo.toml`, so `cargo check -p adesk-inspector` cannot run here. Validate by
-  copying `adesk-core` + `adesk-inspector` into a temp workspace with a stub `adesk-render`
-  exposing `crop`/`downscale`, then run `nix develop <repo> -c cargo check --manifest-path <tmp>
-  --all-targets`. Phase 1 sign-off: check, `clippy -D warnings` and the doctest are all clean.
-- `./src/paint/labels.rs` is `#[allow(dead_code)]` until the painter bodies land; remove the allow
-  then.
+- **Status**: Phase 2 complete. Zero `todo!()`; all drawing, text, painters and `render_into` are
+  implemented; `cargo check`/`clippy --all-targets` are warning-free for this crate.
+- **Validation**: `./scripts/dev.sh cargo test -p adesk-inspector`; targeted suites with
+  `--test <name>`. `tests/common/mod.rs` keeps `#![allow(dead_code)]` because each test binary uses
+  a subset of the shared helpers — do not remove it.
 - Do not add serde to this crate: overlays are debug-only and never wire-facing.
