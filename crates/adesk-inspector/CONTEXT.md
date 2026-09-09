@@ -153,7 +153,7 @@ post-processing to the server and drop the dependency. `adesk_render::Error` mus
   (byte-identical renders), `render_into` size mismatch/overwrite, `region`/`max_dimension`
   (crop, downscale, order, invalid values), `render_from_source`, dimension preservation.
 - Unit level: blend formula, clipping, `with_clip` restore, text metrics/elision, font coverage.
-- Current state: 51 named tests whose `todo!()` bodies state the expected assertion; Phase 2
+- Current state: 52 named tests whose `todo!()` bodies state the expected assertion; Phase 2
   replaces each `todo!()` with the assertion.
 - Run with `./scripts/dev.sh cargo test -p adesk-inspector` (bare `cargo` cannot link outside the
   Nix dev shell).
