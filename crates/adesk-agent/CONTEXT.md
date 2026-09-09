@@ -69,7 +69,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Context cap tests | `./tests/context_budget.rs` |
 | Metrics semantics tests | `./tests/metrics.rs` |
 | Scenario tests | `./tests/scenarios.rs` |
-| E2E plan against a real runtime (feature `e2e`; no bodies until `adesk-testkit` lands) | `./tests/e2e_runtime.rs` |
+| E2E plan against a real runtime (feature `e2e`; no bodies yet) | `./tests/e2e_runtime.rs` |
 
 ## Design Decisions
 - Two seams, one direction: `AgentLoop` depends only on `AgentClient` (runtime) and `LlmProvider` (LLM); both are object-safe-ish traits so tests replace either side, and `AgpClient`/`OpenAiCompatProvider` are the only concrete adapters.
