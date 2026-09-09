@@ -65,6 +65,9 @@ where
 }
 
 /// Builds the canonical timeout error for `what`.
+// Not yet called: the Phase 1 waiters are `todo!()` stubs; Phase 2 uses this in
+// `wait_until`, `poll_until` and `block_until`.
+#[allow(dead_code)]
 pub(crate) fn timeout_error(what: &'static str, timeout: Duration) -> TestkitError {
     TestkitError::Timeout { what, timeout }
 }

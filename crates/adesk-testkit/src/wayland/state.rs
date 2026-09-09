@@ -193,19 +193,16 @@ impl Dispatch<wl_shm::WlShm, ()> for ClientState {
         _qhandle: &QueueHandle<ClientState>,
     ) {
         let _ = state;
-        match event {
-            // `Format { format: WEnum<wl_shm::Format> }`.
-            //
-            // Phase 2: record known formats in `state.shm_formats` (`WEnum::Value` only;
-            // unknown numeric codes are ignored) so `supports_argb8888` reflects the
-            // runtime instead of an assumption.
-            wl_shm::Event::Format { .. } => {
-                todo!("Phase 2: record the advertised SHM format in state.shm_formats")
-            }
-            // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
-            // versions are ignored rather than rejected.
-            _ => {}
+        // `Format { format: WEnum<wl_shm::Format> }`.
+        //
+        // Phase 2: record known formats in `state.shm_formats` (`WEnum::Value` only;
+        // unknown numeric codes are ignored) so `supports_argb8888` reflects the
+        // runtime instead of an assumption.
+        if let wl_shm::Event::Format { .. } = event {
+            todo!("Phase 2: record the advertised SHM format in state.shm_formats")
         }
+        // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
+        // versions fall through and are ignored rather than rejected.
     }
 }
 
@@ -213,16 +210,13 @@ impl Dispatch<wl_shm_pool::WlShmPool, ()> for ClientState {
     fn event(
         _state: &mut ClientState,
         _proxy: &wl_shm_pool::WlShmPool,
-        event: wl_shm_pool::Event,
+        _event: wl_shm_pool::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        // `wl_shm_pool` has no events; the wildcard is required because the generated enum
-        // is `#[non_exhaustive]`.
-        match event {
-            _ => {}
-        }
+        // `wl_shm_pool` has no events (the generated enum is `#[non_exhaustive]`, so it
+        // cannot be matched exhaustively); the event is intentionally ignored.
     }
 }
 
@@ -236,20 +230,17 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
         _qhandle: &QueueHandle<ClientState>,
     ) {
         let _ = state;
-        match event {
-            // `Release`.
-            //
-            // Phase 2: the compositor is done reading the buffer. Return its bytes to the
-            // owning pool's free list (`ShmPool::free`) so repeated frames reuse one
-            // allocation instead of growing the pool. The pool is found through the
-            // window slot that holds the buffer.
-            wl_buffer::Event::Release => {
-                todo!("Phase 2: return the released buffer to its pool's free list")
-            }
-            // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
-            // versions are ignored rather than rejected.
-            _ => {}
+        // `Release`.
+        //
+        // Phase 2: the compositor is done reading the buffer. Return its bytes to the
+        // owning pool's free list (`ShmPool::free`) so repeated frames reuse one
+        // allocation instead of growing the pool. The pool is found through the
+        // window slot that holds the buffer.
+        if let wl_buffer::Event::Release = event {
+            todo!("Phase 2: return the released buffer to its pool's free list")
         }
+        // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
+        // versions fall through and are ignored rather than rejected.
     }
 }
 
@@ -257,16 +248,13 @@ impl Dispatch<wl_compositor::WlCompositor, ()> for ClientState {
     fn event(
         _state: &mut ClientState,
         _proxy: &wl_compositor::WlCompositor,
-        event: wl_compositor::Event,
+        _event: wl_compositor::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        // `wl_compositor` has no events; the wildcard is required because the generated
-        // enum is `#[non_exhaustive]`.
-        match event {
-            _ => {}
-        }
+        // `wl_compositor` has no events (the generated enum is `#[non_exhaustive]`, so it
+        // cannot be matched exhaustively); the event is intentionally ignored.
     }
 }
 
@@ -320,16 +308,15 @@ impl Dispatch<xdg_wm_base::XdgWmBase, ()> for ClientState {
         _qhandle: &QueueHandle<ClientState>,
     ) {
         let _ = proxy;
-        match event {
-            // `Ping { serial: u32 }`.
-            //
-            // Phase 2: `proxy.pong(serial)` — the compositor disconnects unresponsive
-            // clients, so the test client must answer immediately.
-            xdg_wm_base::Event::Ping { .. } => todo!("Phase 2: proxy.pong(serial)"),
-            // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
-            // versions are ignored rather than rejected.
-            _ => {}
+        // `Ping { serial: u32 }`.
+        //
+        // Phase 2: `proxy.pong(serial)` — the compositor disconnects unresponsive
+        // clients, so the test client must answer immediately.
+        if let xdg_wm_base::Event::Ping { .. } = event {
+            todo!("Phase 2: proxy.pong(serial)")
         }
+        // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
+        // versions fall through and are ignored rather than rejected.
     }
 }
 
@@ -343,20 +330,17 @@ impl Dispatch<xdg_surface::XdgSurface, WindowSlot> for ClientState {
         _qhandle: &QueueHandle<ClientState>,
     ) {
         let _ = (state, data);
-        match event {
-            // `Configure { serial: u32 }`.
-            //
-            // Phase 2: complete the configure sequence — take the role event stored by
-            // `xdg_toplevel.configure`/`xdg_popup.configure`, set its `serial`, move it to
-            // `last_configure`, set `pending_serial = Some(serial)` and send a copy on
-            // `configure_tx` (ignore `SendError`: the window was dropped).
-            xdg_surface::Event::Configure { .. } => {
-                todo!("Phase 2: complete the pending configure with this serial and notify the window")
-            }
-            // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
-            // versions are ignored rather than rejected.
-            _ => {}
+        // `Configure { serial: u32 }`.
+        //
+        // Phase 2: complete the configure sequence — take the role event stored by
+        // `xdg_toplevel.configure`/`xdg_popup.configure`, set its `serial`, move it to
+        // `last_configure`, set `pending_serial = Some(serial)` and send a copy on
+        // `configure_tx` (ignore `SendError`: the window was dropped).
+        if let xdg_surface::Event::Configure { .. } = event {
+            todo!("Phase 2: complete the pending configure with this serial and notify the window")
         }
+        // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
+        // versions fall through and are ignored rather than rejected.
     }
 }
 
@@ -411,16 +395,13 @@ impl Dispatch<xdg_positioner::XdgPositioner, ()> for ClientState {
     fn event(
         _state: &mut ClientState,
         _proxy: &xdg_positioner::XdgPositioner,
-        event: xdg_positioner::Event,
+        _event: xdg_positioner::Event,
         _data: &(),
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        // `xdg_positioner` has no events; the wildcard is required because the generated
-        // enum is `#[non_exhaustive]`.
-        match event {
-            _ => {}
-        }
+        // `xdg_positioner` has no events (the generated enum is `#[non_exhaustive]`, so it
+        // cannot be matched exhaustively); the event is intentionally ignored.
     }
 }
 
@@ -474,18 +455,15 @@ impl Dispatch<wl_callback::WlCallback, ()> for ClientState {
         _qhandle: &QueueHandle<ClientState>,
     ) {
         let _ = state;
-        match event {
-            // `Done { callback_data: u32 }` (the object is a destructor).
-            //
-            // Phase 2: mark the matching `wl_display.sync` as complete so
-            // `roundtrip` can wait for a *specific* server roundtrip rather than for the
-            // next arbitrary reader cycle, and record the callback watermark.
-            wl_callback::Event::Done { .. } => {
-                todo!("Phase 2: mark the sync callback complete")
-            }
-            // Generated event enums are `#[non_exhaustive]`; unknown future events are
-            // ignored.
-            _ => {}
+        // `Done { callback_data: u32 }` (the object is a destructor).
+        //
+        // Phase 2: mark the matching `wl_display.sync` as complete so
+        // `roundtrip` can wait for a *specific* server roundtrip rather than for the
+        // next arbitrary reader cycle, and record the callback watermark.
+        if let wl_callback::Event::Done { .. } = event {
+            todo!("Phase 2: mark the sync callback complete")
         }
+        // Generated event enums are `#[non_exhaustive]`; unknown future events fall
+        // through and are ignored.
     }
 }
