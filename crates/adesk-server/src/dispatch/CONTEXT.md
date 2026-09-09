@@ -61,7 +61,6 @@ Shared internal helpers (not public API):
 - `apps.rs` stamps `AppLaunched.seq` from a server-private `AtomicU64` raised above the observed `QueryState` watermark because the compositor exposes no sequence allocator; a compositor-side allocator would remove the chance of a duplicate seq with the compositor's own next event.
 - `double_click`'s interval (100 ms, 50 ms gap) and `drag`'s post-move sleep are local server policy — protocol §5.5 specifies no interval.
 - `inspect_subscribe` with `min_interval_ms == 0` re-renders continuously (yielding between iterations); it is client-controlled and protocol-legal but CPU-hungry.
-- The unit test `dispatch::tests::error_response_carries_the_request_id_and_payload_code` fails while the parallel-owned `src/error.rs::ServerError::payload()` is `todo!()`; it passes as soon as that module lands.
 
 ## Test Strategy
 
