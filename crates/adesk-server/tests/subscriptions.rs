@@ -11,6 +11,7 @@
 //! | `unsubscribe_events_is_idempotent_for_unknown_ids` | cancelling an unknown/already-cancelled id is a success, not an error. |
 //! | `disconnect_removes_subscriptions` | a dropped connection takes its subscriptions out of both registries. |
 //! | `two_subscriptions_get_distinct_ids` | ids are unique per registry and survive repeated unsubscribes. |
+//! | `window_created_event_carries_the_correlated_launch_id` | the event pump stamps `launch_id` on a `WindowCreated` the correlator matched, so the fanned-out frame carries it even though the compositor's own broadcast does not. |
 //!
 //! ## How the assertions read server state
 //!
@@ -26,12 +27,15 @@
 use std::time::Duration;
 
 use adesk_client::{EventFilter, EventKind};
-use adesk_core::WindowId;
+use adesk_core::{AppId, RuntimeEvent, WindowId};
+use adesk_proto::EventFrame;
 use serde_json::{json, Value};
 
 mod common;
 
-use common::{eventually, expect_ok, RawClient, TestRuntime, REQUEST_TIMEOUT};
+use common::{
+    eventually, expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT,
+};
 
 /// How long a test waits for a server-side registry effect to settle.
 ///
@@ -340,4 +344,116 @@ fn two_subscriptions_get_distinct_ids() {
             "repeated unsubscribe_events({id}) must succeed: {response}"
         );
     }
+}
+
+/// A `.desktop` entry for the launch fixture. `Exec` spawns `true` from `PATH`
+/// (there is no `/bin` on the Nix dev shell), so the test needs no installed
+/// application — only a recorded `LaunchRecord`.
+const CORRELATION_ENTRY: &str = "\
+[Desktop Entry]
+Type=Application
+Name=Correlation Fixture
+Exec=true
+StartupWMClass=CorrelationFixture
+";
+
+#[test]
+fn window_created_event_carries_the_correlated_launch_id() {
+    let dir = tempfile::TempDir::new().expect("create the fixture temp dir");
+    write_desktop_entry(
+        dir.path(),
+        "org.example.correlation.desktop",
+        CORRELATION_ENTRY,
+    );
+    let t = TestRuntime::start_with_app_dirs(vec![dir.path().to_path_buf()]);
+    let client = t.connect();
+
+    // A tap on the compositor's raw broadcast: `launch_app` emits `AppLaunched`
+    // there, and the compositor publishes its own `WindowCreated` there. Waiting
+    // for the pump's subscription makes the injected event deterministic — a
+    // broadcast channel does not replay, so an early send would be lost.
+    let events = t.context().compositor.events().clone();
+    let mut compositor_tap = events.subscribe();
+    assert!(
+        eventually(SETTLE, || events.receiver_count() >= 2),
+        "the event pump must be subscribed before the event is sent ({} subscriber(s))",
+        events.receiver_count()
+    );
+
+    // The AGP subscriber receives the server's projection of the same event.
+    let mut raw = t.connect_raw();
+    let response = raw_request(&t, &mut raw, 1, "subscribe_events", json!({}));
+    let _subscription = subscription_id(&response, "subscribe_events({})");
+
+    let app_id = AppId::from("org.example.correlation");
+    let launched = expect_ok(
+        t.block_on_timeout(client.launch_app(&app_id, &[])),
+        "launch_app(org.example.correlation)",
+    );
+    assert_eq!(launched.app_id, app_id);
+
+    // A `WindowCreated` with `launch_id: None`, exactly as the compositor emits
+    // it (no AGP command feeds its local `WmBridge::note_launch`). The pid
+    // matches the recorded launch, so the correlator's first tier applies.
+    let window_id = WindowId(4242);
+    let event = RuntimeEvent::WindowCreated {
+        seq: 1_000_000,
+        ts_ms: t.context().now_ms(),
+        window_id,
+        app_id: Some(app_id.clone()),
+        pid: launched.pid,
+        launch_id: None,
+        title: Some("Correlation Fixture".into()),
+    };
+    events
+        .send(event)
+        .expect("the pump and the tap are subscribed");
+
+    // 1. The compositor's own broadcast is not rewritten: the server cannot
+    //    change what the compositor already published. `launch_app`'s
+    //    `AppLaunched` is skipped.
+    let published = t.block_on_timeout(async {
+        loop {
+            match compositor_tap.recv().await {
+                Ok(RuntimeEvent::WindowCreated {
+                    window_id: id,
+                    launch_id,
+                    ..
+                }) if id == window_id => break launch_id,
+                Ok(_) => continue,
+                Err(error) => panic!("compositor tap closed before the event: {error}"),
+            }
+        }
+    });
+    assert_eq!(
+        published, None,
+        "the compositor's raw broadcast carries no launch_id; only the server projection does"
+    );
+
+    // 2. The fanned-out frame carries the correlator's verdict, so the observer,
+    //    the inspection cache and the AGP subscriber all agree on `launch_id`.
+    let frame = t.block_on_timeout(async {
+        raw.expect_json_matching(REQUEST_TIMEOUT, |value| {
+            value.get("event") == Some(&json!("window_created"))
+                && value.pointer("/data/window_id") == Some(&json!(4242))
+        })
+        .await
+    });
+    let frame: EventFrame = serde_json::from_value(frame)
+        .unwrap_or_else(|error| panic!("window_created frame must decode: {error}"));
+    let runtime = frame
+        .to_runtime()
+        .expect("window_created has a RuntimeEvent counterpart");
+    let RuntimeEvent::WindowCreated {
+        launch_id,
+        app_id: reported,
+        pid,
+        ..
+    } = runtime
+    else {
+        panic!("expected a window_created event, got {runtime:?}");
+    };
+    assert_eq!(launch_id, Some(launched.launch_id));
+    assert_eq!(reported, Some(app_id));
+    assert_eq!(pid, launched.pid);
 }

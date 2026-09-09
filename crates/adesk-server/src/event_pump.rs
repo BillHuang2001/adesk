@@ -7,6 +7,10 @@
 //! and calls `ObserverService::resync` so missed events become *uncertainty*
 //! rather than silent loss.
 
+use std::borrow::Cow;
+use std::sync::Mutex;
+
+use adesk_app_registry::{CorrelationOutcome, Correlator, WindowCandidate};
 use adesk_compositor::RuntimeCommand;
 use adesk_core::RuntimeEvent;
 use adesk_inspector::CommitInfo;
@@ -52,12 +56,75 @@ pub fn spawn(context: ServerContext) -> tokio::task::JoinHandle<()> {
 /// Never blocks: the fan-out uses non-blocking sends and drops frames for
 /// slow consumers.
 pub fn handle_event(context: &ServerContext, event: &RuntimeEvent) {
+    // The matching half of the launch → window correlation: `launch_app`
+    // records the launch, the pump attributes a mapping to it.
+    let event = correlate_window(&context.correlator, event);
+    let event = event.as_ref();
+
     // The observer is the only writer of the event history; feed it first so
     // any waiter woken by the fan-out already sees the event.
     context.observer.handle_event(event);
     update_inspection(context, event);
     context.subscriptions.fan_out(event);
     prune_inspect_streams(context);
+}
+
+/// Stamps `launch_id` onto a `WindowCreated` event that does not carry one yet
+/// (`docs/architecture.md` §7).
+///
+/// `launch_app` registers the [`adesk_app_registry::LaunchRecord`] with the
+/// correlator ([`crate::dispatch::apps::launch_app`]); this is the matching
+/// side. The rewritten event is handed to *every* downstream consumer
+/// (observer, inspection cache, fan-out), so the AGP event, the observer state
+/// and the inspection snapshot agree. A window no pending launch matches is
+/// passed through unchanged — correlation is reported, never guessed — and
+/// events other than `WindowCreated` are never inspected.
+///
+/// Never blocks: the correlator lock is held only for the in-memory match, and
+/// a poisoned lock is recovered (no panic on the event path).
+fn correlate_window<'a>(
+    correlator: &Mutex<Correlator>,
+    event: &'a RuntimeEvent,
+) -> Cow<'a, RuntimeEvent> {
+    let RuntimeEvent::WindowCreated {
+        window_id,
+        pid,
+        app_id,
+        launch_id: None,
+        title,
+        ..
+    } = event
+    else {
+        return Cow::Borrowed(event);
+    };
+
+    let candidate = WindowCandidate {
+        window_id: *window_id,
+        pid: *pid,
+        app_id: app_id.as_ref().map(|id| id.as_str()),
+        title: title.as_deref(),
+    };
+    let outcome = correlator
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .correlate(&candidate);
+
+    let CorrelationOutcome::Correlated(correlation) = outcome else {
+        return Cow::Borrowed(event);
+    };
+
+    tracing::debug!(
+        window_id = window_id.0,
+        launch_id = correlation.launch.launch_id.0,
+        evidence = ?correlation.evidence,
+        "window correlated with a pending launch"
+    );
+
+    let mut stamped = event.clone();
+    if let RuntimeEvent::WindowCreated { launch_id, .. } = &mut stamped {
+        *launch_id = Some(correlation.launch.launch_id);
+    }
+    Cow::Owned(stamped)
 }
 
 /// Folds a single event into the cached inspection snapshot, when primed.
@@ -156,4 +223,206 @@ pub async fn resync(context: &ServerContext) -> Result<()> {
         cached.ts_ms = now_ms;
     });
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use adesk_app_registry::{LaunchRecord, MonotonicClock};
+    use adesk_core::{AppId, LaunchId, WindowId};
+
+    use super::*;
+
+    fn correlator() -> Mutex<Correlator> {
+        Mutex::new(Correlator::new(Arc::new(MonotonicClock::new())))
+    }
+
+    fn app(id: &str, name: &str, startup_wm_class: Option<&str>) -> adesk_core::AppInfo {
+        adesk_core::AppInfo {
+            id: AppId::from(id),
+            name: name.into(),
+            icon: None,
+            exec: Some("/bin/true".into()),
+            terminal: false,
+            categories: Vec::new(),
+            startup_wm_class: startup_wm_class.map(str::to_owned),
+            dbus_activatable: false,
+            hidden: false,
+            no_display: false,
+            try_exec: None,
+        }
+    }
+
+    fn launch(launch_id: u64, app_id: &str, pid: Option<i32>) -> LaunchRecord {
+        LaunchRecord {
+            launch_id: LaunchId(launch_id),
+            app_id: AppId::from(app_id),
+            pid,
+            started_at_ms: 0,
+        }
+    }
+
+    fn window_created(launch_id: Option<LaunchId>) -> RuntimeEvent {
+        RuntimeEvent::WindowCreated {
+            seq: 7,
+            ts_ms: 70,
+            window_id: WindowId(3),
+            app_id: Some(AppId::from("org.example.launched")),
+            pid: Some(4242),
+            launch_id,
+            title: Some("Launched Fixture".into()),
+        }
+    }
+
+    #[test]
+    fn window_created_without_launch_id_is_stamped_by_the_correlator() {
+        let correlator = correlator();
+        correlator
+            .lock()
+            .unwrap()
+            .record_launch(
+                launch(1, "org.example.launched", Some(4242)),
+                &app("org.example.launched", "Launched Fixture", None),
+            );
+
+        let event = window_created(None);
+        let rewritten = correlate_window(&correlator, &event);
+
+        let RuntimeEvent::WindowCreated {
+            seq,
+            ts_ms,
+            window_id,
+            app_id,
+            pid,
+            launch_id,
+            title,
+        } = rewritten.as_ref()
+        else {
+            panic!("correlated WindowCreated must stay a WindowCreated");
+        };
+        assert_eq!(launch_id, &Some(LaunchId(1)));
+        // The rest of the event is preserved verbatim.
+        assert_eq!(seq, &7);
+        assert_eq!(ts_ms, &70);
+        assert_eq!(window_id, &WindowId(3));
+        assert_eq!(app_id.as_ref(), Some(&AppId::from("org.example.launched")));
+        assert_eq!(pid, &Some(4242));
+        assert_eq!(title.as_deref(), Some("Launched Fixture"));
+        assert_eq!(
+            correlator.lock().unwrap().pending(),
+            1,
+            "a launch stays pending: several windows of one launch may correlate"
+        );
+    }
+
+    #[test]
+    fn uncorrelated_window_created_is_passed_through_unchanged() {
+        let correlator = correlator();
+        let event = window_created(None);
+
+        let rewritten = correlate_window(&correlator, &event);
+
+        assert!(
+            matches!(rewritten, Cow::Borrowed(_)),
+            "an unmatched window must not be rewritten (never guess)"
+        );
+        assert_eq!(rewritten.as_ref(), &event);
+    }
+
+    #[test]
+    fn window_created_with_a_launch_id_is_never_re_correlated() {
+        let correlator = correlator();
+        correlator
+            .lock()
+            .unwrap()
+            .record_launch(
+                launch(9, "org.example.launched", Some(4242)),
+                &app("org.example.launched", "Launched Fixture", None),
+            );
+        let event = window_created(Some(LaunchId(1)));
+
+        let rewritten = correlate_window(&correlator, &event);
+
+        assert!(
+            matches!(rewritten, Cow::Borrowed(_)),
+            "an event that already carries a launch id is left alone"
+        );
+        assert_eq!(rewritten.as_ref(), &event);
+    }
+
+    #[test]
+    fn events_other_than_window_created_are_never_correlated() {
+        let correlator = correlator();
+        correlator
+            .lock()
+            .unwrap()
+            .record_launch(
+                launch(1, "org.example.launched", Some(4242)),
+                &app("org.example.launched", "Launched Fixture", None),
+            );
+
+        let events = [
+            RuntimeEvent::WindowDestroyed {
+                seq: 8,
+                ts_ms: 80,
+                window_id: WindowId(3),
+            },
+            RuntimeEvent::TitleChanged {
+                seq: 9,
+                ts_ms: 90,
+                window_id: WindowId(3),
+                title: Some("renamed".into()),
+            },
+            RuntimeEvent::WindowActivated {
+                seq: 10,
+                ts_ms: 100,
+                window_id: WindowId(3),
+                previous: None,
+            },
+        ];
+        for event in &events {
+            let rewritten = correlate_window(&correlator, event);
+            assert!(matches!(rewritten, Cow::Borrowed(_)), "{event:?}");
+            assert_eq!(rewritten.as_ref(), event);
+        }
+        assert_eq!(
+            correlator.lock().unwrap().pending(),
+            1,
+            "non-`WindowCreated` events must not consume a pending launch"
+        );
+    }
+
+    #[test]
+    fn a_poisoned_correlator_lock_still_correlates() {
+        let correlator = correlator();
+        correlator
+            .lock()
+            .unwrap()
+            .record_launch(
+                launch(1, "org.example.launched", Some(4242)),
+                &app("org.example.launched", "Launched Fixture", None),
+            );
+
+        // Poison the lock the way a panicking request handler would.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = correlator.lock().unwrap();
+            panic!("poison the correlator lock");
+        }));
+        assert!(correlator.is_poisoned(), "the lock must be poisoned");
+
+        let event = window_created(None);
+        let rewritten = correlate_window(&correlator, &event);
+
+        assert!(
+            matches!(
+                rewritten.as_ref(),
+                RuntimeEvent::WindowCreated {
+                    launch_id: Some(LaunchId(1)),
+                    ..
+                }
+            ),
+            "the event path recovers the poisoned lock instead of panicking: {rewritten:?}"
+        );
+    }
 }
