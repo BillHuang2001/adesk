@@ -100,7 +100,7 @@ impl Expected {
 
     /// Whether `event` satisfies this expectation.
     ///
-    /// Exact mapping (Phase 2 implements exactly this):
+    /// Exact mapping:
     ///
     /// | Expectation | Matches |
     /// |---|---|

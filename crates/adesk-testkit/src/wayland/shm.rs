@@ -63,10 +63,6 @@ pub(crate) struct ShmBuffer {
     /// Allocated length in bytes: `stride * height` rounded up to a 64-byte multiple, so
     /// `free(offset, len)` returns exactly the range `alloc` reserved.
     pub(crate) len: usize,
-    /// Pixel size the buffer was allocated for.
-    size: Size,
-    /// Pattern written into the buffer.
-    fill: FillPattern,
 }
 
 impl ShmPool {
@@ -165,8 +161,6 @@ impl ShmPool {
             buffer,
             offset,
             len,
-            size,
-            fill,
         })
     }
 
@@ -243,30 +237,12 @@ impl ShmPool {
             self.next_offset, self.capacity
         ))
     }
-
-    /// Total size of the backing file in bytes (record-only accessor; unused by the harness).
-    #[allow(dead_code)]
-    pub(crate) fn capacity(&self) -> usize {
-        self.capacity
-    }
 }
 
 impl ShmBuffer {
     /// The protocol buffer object.
     pub(crate) fn buffer(&self) -> &wl_buffer::WlBuffer {
         &self.buffer
-    }
-
-    /// The pattern the buffer was filled with (record-only accessor; unused by the harness).
-    #[allow(dead_code)]
-    pub(crate) fn fill(&self) -> FillPattern {
-        self.fill
-    }
-
-    /// The pixel size the buffer was allocated for (record-only accessor; unused by the harness).
-    #[allow(dead_code)]
-    pub(crate) fn size(&self) -> Size {
-        self.size
     }
 }
 

@@ -432,7 +432,6 @@ impl WaylandTestClient {
             popup,
             slot,
             configure_rx,
-            spec,
             Arc::clone(&self.state),
             self.conn.clone(),
         ))

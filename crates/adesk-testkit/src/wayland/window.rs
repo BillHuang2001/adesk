@@ -439,6 +439,14 @@ impl TestWindow {
         lock_window(&self.state).destroyed
     }
 
+    /// Whether the compositor sent `xdg_toplevel.close` for this window.
+    ///
+    /// The client deliberately keeps the surface alive after `close`, so a test can
+    /// observe the request here and only then call [`destroy`](TestWindow::destroy).
+    pub fn close_requested(&self) -> bool {
+        lock_window(&self.state).close_requested
+    }
+
     /// The configure waiting for [`apply_configure`](TestWindow::apply_configure).
     pub fn pending_configure(&self) -> Option<ConfiguredSize> {
         lock_window(&self.state).pending_configure.clone()
@@ -488,10 +496,6 @@ pub struct TestPopup {
     state: WindowSlot,
     /// Configures published by the reader thread.
     configure_rx: Mutex<mpsc::Receiver<ConfiguredSize>>,
-    /// The immutable description this popup was created from (record-only; unused by the
-    /// harness).
-    #[allow(dead_code)]
-    spec: PopupSpec,
     /// Client state shared with the reader thread; used to deregister the slot on
     /// [`destroy`](TestPopup::destroy).
     client: Arc<Mutex<ClientState>>,
@@ -502,14 +506,12 @@ pub struct TestPopup {
 
 impl TestPopup {
     /// Wires a new popup handle to its protocol objects (client-internal).
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         surface: WlSurface,
         xdg_surface: xdg_surface::XdgSurface,
         popup: xdg_popup::XdgPopup,
         state: WindowSlot,
         configure_rx: mpsc::Receiver<ConfiguredSize>,
-        spec: PopupSpec,
         client: Arc<Mutex<ClientState>>,
         conn: Connection,
     ) -> TestPopup {
@@ -519,7 +521,6 @@ impl TestPopup {
             popup,
             state,
             configure_rx: Mutex::new(configure_rx),
-            spec,
             client,
             conn,
         }

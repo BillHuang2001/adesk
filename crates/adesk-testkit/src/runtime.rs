@@ -472,7 +472,9 @@ impl Drop for TestRuntime {
     fn drop(&mut self) {
         if let Some(running) = self.running.take() {
             let (reply, _rx) = tokio::sync::oneshot::channel();
-            let _ = running.compositor().send(RuntimeCommand::Shutdown { reply });
+            let _ = running
+                .compositor()
+                .send(RuntimeCommand::Shutdown { reply });
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 let timeout = self.config.shutdown_timeout;
                 handle.spawn(async move {

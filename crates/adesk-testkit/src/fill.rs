@@ -78,7 +78,7 @@ impl FillPattern {
 
     /// The expected RGBA pixel at `(x, y)` for an image of `size`.
     ///
-    /// Exact semantics (Phase 2 implements exactly this; do not "improve" it):
+    /// Exact semantics (do not "improve" it):
     ///
     /// - `Solid(c)` → `c` everywhere, even outside `size`.
     /// - `Checker { size: s, a, b }` → `a` when `((x / max(s,1)) + (y / max(s,1))) % 2 == 0`,
