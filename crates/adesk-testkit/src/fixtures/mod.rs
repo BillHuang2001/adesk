@@ -567,3 +567,126 @@ fn io_at(path: &Path, error: std::io::Error) -> TestkitError {
         format!("{}: {error}", path.display()),
     ))
 }
+
+/// Unit tests for the parts of this module that are implemented in Phase 1.
+///
+/// Everything that needs the real Wayland path (`to_desktop_file`, `helper_bin_path`,
+/// `TestApp`) stays untested until its body lands; `TestAppSpec::cli_args` also depends on
+/// `FillPattern::to_cli_arg` and therefore on Phase 2.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fixture_dir_layout_is_a_share_root() {
+        let dir = FixtureDir::new().expect("temp dir");
+        assert_eq!(dir.path(), dir.search_dir());
+        assert_eq!(dir.applications_dir(), dir.path().join("applications"));
+        assert!(dir.applications_dir().is_dir());
+    }
+
+    #[test]
+    fn write_raw_creates_parents_and_rejects_absolute_paths() {
+        let dir = FixtureDir::new().expect("temp dir");
+        let path = dir
+            .write_raw("icons/hicolor/48x48/app.png", "png")
+            .expect("write");
+        assert_eq!(path, dir.path().join("icons/hicolor/48x48/app.png"));
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "png");
+
+        let error = dir
+            .write_raw("/tmp/adesk-escape", "x")
+            .expect_err("absolute");
+        assert!(matches!(error, TestkitError::Fixture(_)), "{error}");
+        assert!(!dir.path().join("tmp").exists());
+    }
+
+    #[test]
+    fn desktop_ids_follow_the_registry_rule() {
+        let id = |rel: &str| desktop_id_from_rel(rel).map(|id| id.as_str().to_string());
+        assert_eq!(
+            id("org.mozilla.firefox.desktop").as_deref(),
+            Some("org.mozilla.firefox")
+        );
+        assert_eq!(id("code.desktop").as_deref(), Some("code"));
+        assert_eq!(id("kde/kate.desktop").as_deref(), Some("kde.kate"));
+        assert_eq!(id("foo/bar.baz.desktop").as_deref(), Some("foo.bar.baz"));
+        assert_eq!(id("no-extension"), None);
+        assert_eq!(id(".desktop"), None);
+    }
+
+    #[test]
+    fn remove_entry_targets_the_applications_dir() {
+        let dir = FixtureDir::new().expect("temp dir");
+        let path = dir
+            .write_raw("applications/demo.desktop", "[Desktop Entry]\n")
+            .expect("write");
+        dir.remove_entry("demo").expect("remove");
+        assert!(!path.exists());
+        let error = dir.remove_entry("demo").expect_err("removed twice");
+        assert!(matches!(error, TestkitError::Io(_)), "{error}");
+    }
+
+    #[test]
+    fn desktop_entry_fixture_builders_set_fields() {
+        let entry = DesktopEntryFixture::new("Demo", ["adesk-test-app", "--app-id", "demo"])
+            .with_icon("demo")
+            .with_terminal(true)
+            .with_no_display(true)
+            .with_hidden(true)
+            .with_category("Utility")
+            .with_category("Test")
+            .with_startup_wm_class("demo")
+            .with_try_exec("adesk-test-app")
+            .with_comment("fixture")
+            .with_extra("X-Testkit", "1");
+        assert_eq!(entry.name, "Demo");
+        assert_eq!(entry.exec, ["adesk-test-app", "--app-id", "demo"]);
+        assert_eq!(entry.icon.as_deref(), Some("demo"));
+        assert!(entry.terminal && entry.no_display && entry.hidden);
+        assert_eq!(entry.categories, ["Utility", "Test"]);
+        assert_eq!(entry.startup_wm_class.as_deref(), Some("demo"));
+        assert_eq!(entry.try_exec.as_deref(), Some("adesk-test-app"));
+        assert_eq!(entry.comment.as_deref(), Some("fixture"));
+        assert_eq!(entry.extra, [("X-Testkit".to_string(), "1".to_string())]);
+
+        let defaults = DesktopEntryFixture::new("Demo", ["adesk-test-app"]);
+        assert!(defaults.icon.is_none() && defaults.categories.is_empty());
+        assert!(!defaults.terminal && !defaults.no_display && !defaults.hidden);
+    }
+
+    #[test]
+    fn test_app_spec_defaults_and_builders() {
+        let spec = TestAppSpec::new("org.example.demo");
+        assert_eq!(spec.app_id().as_str(), "org.example.demo");
+        assert_eq!(
+            spec,
+            TestAppSpec {
+                app_id: AppId::from("org.example.demo"),
+                title: "org.example.demo".to_string(),
+                size: Size::new(640, 480),
+                fill: FillPattern::default(),
+                exit_after: None,
+                extra_args: Vec::new(),
+            }
+        );
+
+        let built = TestAppSpec::new("org.example.other")
+            .with_title("Other")
+            .with_size(Size::new(320, 200))
+            .with_fill(FillPattern::solid_rgb(1, 2, 3))
+            .with_exit_after(Duration::from_millis(250))
+            .with_arg("--verbose");
+        assert_eq!(
+            built,
+            TestAppSpec {
+                app_id: AppId::from("org.example.other"),
+                title: "Other".to_string(),
+                size: Size::new(320, 200),
+                fill: FillPattern::solid_rgb(1, 2, 3),
+                exit_after: Some(Duration::from_millis(250)),
+                extra_args: vec!["--verbose".to_string()],
+            }
+        );
+    }
+}
