@@ -6,7 +6,7 @@ It is a prototype: its purpose is to demonstrate and *measure* the agent loop (a
 Invariants it upholds: runtime-native operations are never synthesized input; observations carry causal history via `after_action`; pixels are fetched only on demand; the LLM never receives a frame history.
 Status: Phase 2 complete — zero `todo!()`, zero `#[ignore]`, zero skeleton `#[allow]`; crate-wide `cargo fmt --check` and `clippy -D warnings` clean.
 Tests: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` = 80 passed / 0 failed / 0 ignored (60 with default features; the loop and scenario suites are feature-gated).
-The only unimplemented surface is `tests/e2e_runtime.rs`: a feature-gated (`e2e`) plan with no test bodies, waiting on the not-yet-landed `adesk-testkit` (Phase 3/4).
+The only unimplemented surface is `tests/e2e_runtime.rs`: a feature-gated (`e2e`) plan with no test bodies yet; `adesk-testkit` is implemented and available as a workspace dev-dependency.
 
 ## API Surface
 Flat re-exports at the crate root; the module list below is the authoritative surface.
