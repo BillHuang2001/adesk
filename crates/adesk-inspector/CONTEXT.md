@@ -49,7 +49,7 @@ public too.
   `GLYPH_COUNT = 95`, `MAX_SCALE = 8`, `clamp_scale`, `Glyph { rows }` + `row`/`ink`,
   `glyph(char)`, `fallback()`, `glyph_width`/`glyph_height`/`advance`/`line_height`.
 - `text`: `measure`, `draw`, `elide`, `label_rect`, `draw_label`.
-- `Error { InvalidFrame, InvalidRequest, Render(adesk_render::Error) }`, `Result<T>`,
+- `Error { InvalidFrame, InvalidRequest, Render(adesk_render::RenderError) }`, `Result<T>`,
   `From<Error> for adesk_core::Error` (`invalid_request` / `render_failed`).
 
 ## Overlay semantics
