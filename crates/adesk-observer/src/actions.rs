@@ -11,13 +11,8 @@
 //! records an action and the event pump task that reads the watermark share one
 //! registry without additional plumbing.
 
-// Phase 1 architecture skeleton: method bodies are `todo!()`, so the fields they
-// will read look unused. Remove this allow together with the last `todo!()` in
-// this file (see `CONTEXT.md` → Status).
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use adesk_core::{ActionId, Position, WindowId};
 
@@ -153,6 +148,24 @@ impl ActionRegistry {
         Self::default()
     }
 
+    /// Read-locks the registry, ignoring poisoning.
+    ///
+    /// The registry is a counter plus a map, so a poisoned lock (another thread
+    /// panicked while holding it) still leaves usable data; panicking on every
+    /// later request would be far worse than reading it.
+    fn read(&self) -> RwLockReadGuard<'_, RegistryState> {
+        self.inner
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Write-locks the registry, ignoring poisoning (see [`ActionRegistry::read`]).
+    fn write(&self) -> RwLockWriteGuard<'_, RegistryState> {
+        self.inner
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     /// Records an action and returns its freshly allocated id.
     ///
     /// `seq`/`ts_ms` come from the caller (the service supplies its watermark and
@@ -165,32 +178,46 @@ impl ActionRegistry {
         seq: u64,
         ts_ms: u64,
     ) -> ActionId {
-        let _ = (self, kind, window_id, position, seq, ts_ms);
-        todo!("Phase 2: allocate last_id + 1, insert ActionRecord, return ActionId")
+        let mut state = self.write();
+        // Monotonic from 1, never reused: `after_action` references stay stable.
+        let raw_id = state.last_id + 1;
+        state.last_id = raw_id;
+        let id = ActionId(raw_id);
+        state.records.insert(
+            raw_id,
+            ActionRecord {
+                id,
+                kind,
+                window_id,
+                position,
+                seq,
+                ts_ms,
+            },
+        );
+        id
     }
 
     /// Looks up an action record.
     pub fn get(&self, action_id: ActionId) -> Option<ActionRecord> {
-        let _ = (self, action_id);
-        todo!("Phase 2: read-lock and clone the record")
+        self.read().records.get(&action_id.0).cloned()
     }
 
     /// The event watermark stored with an action (the `after_action` filter point).
     pub fn seq_of(&self, action_id: ActionId) -> Option<u64> {
-        let _ = (self, action_id);
-        todo!("Phase 2: read-lock and return record.seq")
+        self.read()
+            .records
+            .get(&action_id.0)
+            .map(|record| record.seq)
     }
 
     /// `true` when the id was allocated by this registry.
     pub fn contains(&self, action_id: ActionId) -> bool {
-        let _ = (self, action_id);
-        todo!("Phase 2: read-lock and check the map")
+        self.read().records.contains_key(&action_id.0)
     }
 
     /// Number of recorded actions.
     pub fn len(&self) -> usize {
-        let _ = self;
-        todo!("Phase 2: read-lock and return the map length")
+        self.read().records.len()
     }
 
     /// `true` when no action has been recorded.
@@ -200,13 +227,191 @@ impl ActionRegistry {
 
     /// The most recently recorded action.
     pub fn last(&self) -> Option<ActionRecord> {
-        let _ = self;
-        todo!("Phase 2: read-lock and clone the highest id record")
+        // The map is keyed by id, so the last key-value pair is the highest id.
+        self.read().records.last_key_value().map(|(_, r)| r.clone())
     }
 
     /// All records in ascending id order (for the inspector overlay).
     pub fn records(&self) -> Vec<ActionRecord> {
-        let _ = self;
-        todo!("Phase 2: read-lock and clone the values in id order")
+        self.read().records.values().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+    use std::thread;
+
+    use super::*;
+
+    fn position() -> Position {
+        Position::Normalized { x: 0.25, y: 0.75 }
+    }
+
+    #[test]
+    fn empty_registry_has_no_records() {
+        let registry = ActionRegistry::new();
+        assert!(registry.is_empty());
+        assert_eq!(registry.len(), 0);
+        assert!(registry.last().is_none());
+        assert!(registry.records().is_empty());
+        assert!(!registry.contains(ActionId(1)));
+        assert!(registry.get(ActionId(1)).is_none());
+        assert!(registry.seq_of(ActionId(1)).is_none());
+    }
+
+    #[test]
+    fn ids_start_at_one_and_are_strictly_monotonic() {
+        let registry = ActionRegistry::new();
+        for expected in 1..=5_u64 {
+            let id = registry.record(ActionKind::Click, None, None, 0, 0);
+            assert_eq!(id, ActionId(expected));
+            assert_eq!(registry.len(), expected as usize);
+            assert!(!registry.is_empty());
+        }
+        assert_eq!(registry.last().map(|record| record.id), Some(ActionId(5)));
+    }
+
+    #[test]
+    fn record_stores_every_field() {
+        let registry = ActionRegistry::new();
+        let id = registry.record(
+            ActionKind::Drag,
+            Some(WindowId(7)),
+            Some(position()),
+            42,
+            1_337,
+        );
+        let record = registry.get(id).expect("recorded");
+        assert_eq!(
+            record,
+            ActionRecord {
+                id,
+                kind: ActionKind::Drag,
+                window_id: Some(WindowId(7)),
+                position: Some(position()),
+                seq: 42,
+                ts_ms: 1_337,
+            }
+        );
+    }
+
+    #[test]
+    fn record_accepts_absent_window_and_position() {
+        let registry = ActionRegistry::new();
+        let id = registry.record(ActionKind::TypeText, None, None, 0, 0);
+        let record = registry.get(id).expect("recorded");
+        assert_eq!(record.window_id, None);
+        assert_eq!(record.position, None);
+    }
+
+    #[test]
+    fn lookup_and_seq_of_reject_unknown_ids() {
+        let registry = ActionRegistry::new();
+        let id = registry.record(ActionKind::Scroll, Some(WindowId(3)), None, 42, 7);
+
+        assert_eq!(registry.seq_of(id), Some(42));
+        assert!(registry.contains(id));
+        assert_eq!(registry.get(id).map(|record| record.ts_ms), Some(7));
+
+        let unknown = ActionId(id.0 + 1);
+        assert!(!registry.contains(unknown));
+        assert!(registry.get(unknown).is_none());
+        assert!(registry.seq_of(unknown).is_none());
+        assert!(!registry.contains(ActionId(0)));
+    }
+
+    #[test]
+    fn records_are_in_ascending_id_order_and_last_is_newest() {
+        let registry = ActionRegistry::new();
+        let kinds = [
+            ActionKind::PointerMove,
+            ActionKind::Click,
+            ActionKind::Keypress,
+        ];
+        let ids: Vec<ActionId> = kinds
+            .iter()
+            .enumerate()
+            .map(|(index, kind)| registry.record(*kind, None, None, index as u64, index as u64))
+            .collect();
+
+        let records = registry.records();
+        assert_eq!(records.len(), ids.len());
+        assert_eq!(
+            records.iter().map(|record| record.id).collect::<Vec<_>>(),
+            ids
+        );
+        assert_eq!(
+            records.iter().map(|record| record.kind).collect::<Vec<_>>(),
+            kinds.to_vec()
+        );
+        assert_eq!(registry.last(), Some(records[records.len() - 1].clone()));
+    }
+
+    #[test]
+    fn clones_share_one_id_space_and_one_record_set() {
+        let registry = ActionRegistry::new();
+        let clone = registry.clone();
+
+        let first = registry.record(ActionKind::Click, None, None, 0, 0);
+        let second = clone.record(ActionKind::Click, None, None, 1, 1);
+
+        assert_eq!(first, ActionId(1));
+        assert_eq!(second, ActionId(2));
+        assert_eq!(registry.len(), 2);
+        assert_eq!(clone.len(), 2);
+        assert_eq!(registry.get(second), clone.get(second));
+        assert_eq!(registry.records(), clone.records());
+        assert_eq!(clone.last().map(|record| record.id), Some(second));
+    }
+
+    #[test]
+    fn concurrent_records_allocate_unique_contiguous_ids() {
+        const THREADS: u64 = 8;
+        const PER_THREAD: u64 = 250;
+
+        let registry = ActionRegistry::new();
+        let handles: Vec<_> = (0..THREADS)
+            .map(|thread_index| {
+                let registry = registry.clone();
+                thread::spawn(move || {
+                    (0..PER_THREAD)
+                        .map(|offset| {
+                            let seq = thread_index * PER_THREAD + offset;
+                            registry.record(ActionKind::Click, None, None, seq, seq)
+                        })
+                        .collect::<Vec<ActionId>>()
+                })
+            })
+            .collect();
+
+        let mut ids = Vec::new();
+        for handle in handles {
+            ids.extend(handle.join().expect("recording thread panicked"));
+        }
+
+        let total = (THREADS * PER_THREAD) as usize;
+        assert_eq!(ids.len(), total);
+        assert_eq!(registry.len(), total);
+
+        let unique: HashSet<ActionId> = ids.iter().copied().collect();
+        assert_eq!(unique.len(), total, "ids must be unique across threads");
+        for raw in 1..=total as u64 {
+            assert!(
+                unique.contains(&ActionId(raw)),
+                "id {raw} was never handed out"
+            );
+        }
+
+        let records = registry.records();
+        assert_eq!(records.len(), total);
+        assert!(
+            records.windows(2).all(|pair| pair[0].id < pair[1].id),
+            "records() must stay ordered by id"
+        );
+        assert_eq!(
+            registry.last().map(|record| record.id),
+            Some(ActionId(total as u64))
+        );
     }
 }
