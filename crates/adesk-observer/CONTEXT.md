@@ -99,7 +99,6 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Run: `./scripts/dev.sh cargo test -p adesk-observer` (the root workspace loads; every sibling has a manifest).
 
 ## Known Issues
-- **The root workspace cannot load yet**: `members = ["crates/*"]` fails while any sibling crate directory lacks `Cargo.toml`, so `./scripts/dev.sh cargo check -p adesk-observer --all-targets` fails at manifest load (not in this crate). Use `./check-standalone.sh` (temp workspace mirroring root `[workspace.dependencies]`) until every sibling has a manifest; delete the script then. Reported to root.
 - `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); the affected windows are flagged `state_uncertain`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
 - The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
