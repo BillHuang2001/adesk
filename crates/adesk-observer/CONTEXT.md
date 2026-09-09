@@ -47,7 +47,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 | `WaitSpec`/`QuietSpec`/`ObserveSpec`/`Condition` | `./src/spec.rs` |
 | `WindowTemporalState`, snapshots, resync types | `./src/state.rs` |
 | Crate error + `adesk_core::Error` mapping | `./src/error.rs` |
-| Behaviour test suites (33/34 frozen specs green; 1 protocol-contradicting spec ignored) | `./tests/waits.rs`, `./tests/filters.rs`, `./tests/concurrency.rs`, `./tests/resync.rs`, `./tests/actions.rs` |
+| Behaviour test suites (34/34 frozen specs green) | `./tests/waits.rs`, `./tests/filters.rs`, `./tests/concurrency.rs`, `./tests/resync.rs`, `./tests/actions.rs` |
 | Public API smoke test | `./tests/api_surface.rs` |
 | Event fixtures for tests | `./tests/common/mod.rs` |
 | Consumer: AGP dispatch, event pump, rendering after waits | `../adesk-server/` (sibling — read-only, escalate changes) |
@@ -81,21 +81,19 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - **`quiet` event subscriptions** (AGP §5.6) are a server loop over `wait_for_quiet` per subscription — the observer has no push API of its own.
 ## Test Strategy
 - Unit tests live inline in modules for the pure pieces (filters, condition predicates, journal eviction, registry allocation, clock anchoring, service state machine) — `#[cfg(test)]`, 85 total; tokio needed only for the service/waiter tests.
-- Integration tests are the protocol-level scenarios in `./tests/`: `waits.rs` (10 specs, 9 green), `filters.rs` (8), `concurrency.rs` (5), `resync.rs` (5), `actions.rs` (6). All bodies are implemented; one `waits.rs` spec stays `#[ignore]`d because it contradicts `docs/protocol.md` §5.4 (see Known Issues).
+- Integration tests are the protocol-level scenarios in `./tests/`: `waits.rs` (10 specs), `filters.rs` (8), `concurrency.rs` (5), `resync.rs` (5), `actions.rs` (6). All bodies are implemented and green; no spec is ignored.
 - Determinism: `#[tokio::test(start_paused = true)]` + events with explicit `seq`/`ts_ms` from `./tests/common/mod.rs`; time only moves via `tokio::time::advance`. No real sleeps, no display, no GPU, no network, no installed apps.
 - Do **not** un-ignore a failing spec to "fix" it: a wrong implementation makes paused-time waits hang forever. Assertions in `./tests/*.rs` are frozen — behaviour must be argued against `docs/protocol.md`, never against the specs.
 - `./tests/api_surface.rs` pins the public API shape (builders, enum mappings, snapshot structs) without running a service.
 - Run: `./scripts/dev.sh cargo test -p adesk-observer`.
 ## Known Issues
-- **`tests/waits.rs::wait_for_change_timeout_reports_accumulated_events` is unsatisfiable and stays `#[ignore]`d.** It expects `timed_out == true` / `elapsed_ms == 400` after two counted surface commits (50 ms, 120 ms), but `docs/protocol.md` §5.4 says `change` "returns on the first counted surface commit (or window lifecycle event)" — any protocol-conforming implementation resolves at the first commit (`timed_out == false`, `elapsed_ms == 120`, `commits == 2`, matching the spec's other expectations). The frozen body and assertions are untouched; do not weaken the implementation to satisfy it. The timeout path is covered by `tests/waits.rs::wait_for_change_times_out_without_events` and `service.rs::wait_for_change_times_out_with_an_observation`.
 - `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); the affected windows are flagged `state_uncertain`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
 - The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
 - `Clock::now_ms()` truncates to whole milliseconds, so a deadline can fire up to ~1 ms early — inherent to the event-ts domain, consistent with "quiet is evidence, never a promise".
 ## Status
 Phase 2 (implementation) complete — zero `todo!()` in the crate; every module body, wait loop, resync path and frozen spec body is implemented.
-Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets -- -D warnings` clean; `cargo test -p adesk-observer` → 124 passed, 0 failed, 1 ignored (85 lib unit + 5 api_surface + 33 frozen specs + 1 doctest).
-The one ignored test is the frozen spec that contradicts `docs/protocol.md` §5.4 (see Known Issues); its body and assertions are intact and its `#[ignore]` reason states the contradiction.
+Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets -- -D warnings` clean; `cargo test -p adesk-observer` → 125 passed, 0 failed, 0 ignored (85 lib unit + 5 api_surface + 34 frozen specs + 1 doctest).
 Skeleton-phase module-level `#![allow(dead_code)]` blocks are gone; only `tests/common/mod.rs` keeps one (shared fixture module, each test binary uses a subset) plus two item-level test-only allows (see Notes for Agents).
 ## Notes for Agents
 - `src/service.rs` is ~838 production lines plus a ~990-line cohesive inline test module; the single-file layout is deliberate (one state machine, one lock, tests next to the code they pin). Do not split it to satisfy the ~1000-line soft threshold.
