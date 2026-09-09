@@ -137,6 +137,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
 - **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions and input delivery still need the `adesk-testkit` wave. Launch correlation *is* covered by injecting a synthetic `WindowCreated` into the compositor's broadcast.
+- **No E2E case exercises keyboard methods without `window_id`** (the no-focus path that must answer `invalid_request`, `input.rs::activate_if_needed` returns early and the compositor reports "no window has keyboard focus"), and no case exercises a *successful* injection — every §5.5 E2E call targets an unknown window.
 - **`adesk_client::default_socket_path()` diverges from this crate's third fallback** (`/tmp/adesk.sock` vs `std::env::temp_dir()/adesk.sock`; equal only when `TMPDIR` is `/tmp`). Pass an explicit socket path in tests and tooling; the client crate is outside this node's scope and the divergence is flagged to the parent.
 
 ## Test Strategy
