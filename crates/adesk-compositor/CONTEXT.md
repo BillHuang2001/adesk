@@ -145,7 +145,7 @@ Event loop:
 Crate-local decisions:
 - `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding. The `adesk-render` dependency is declared but unused in Phase 1.
-- `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model; the assumed `adesk-wm` surface is documented at the top of that file: `WindowManager::new(Size)`, `resolve_position(&self, WindowId, &Position) -> Result<Point, adesk_wm::Error: Display>`, `WmAction` opaque. Reconcile in Phase 2 if the landed API differs.
+- `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model; the landed `adesk-wm` surface it is written against is documented at the top of that file: `WindowManager::new(PolicyConfig)`, `PolicyConfig::new(Size)`, `resolve_position(&self, WindowId, Position) -> Option<Point>` (unknown window → `CompositorError::WindowManagement`), `WmAction` opaque.
 - Popups are tracked manually (`PopupAppeared`/`PopupDisappeared` with owner `window_id` + `popup_id`) because Smithay's element walker skips them.
 - `src/dispatch.rs` is declared from `src/run.rs` with `#[path = "dispatch.rs"] pub(crate) mod dispatch;` (module path `crate::run::dispatch`).
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
