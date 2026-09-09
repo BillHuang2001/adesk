@@ -106,11 +106,69 @@ impl CursorTracker {
 
     /// Records a pointer position.
     pub fn set(&self, position: Point) {
-        *self.position.write().unwrap_or_else(|error| error.into_inner()) = Some(position);
+        *self
+            .position
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(position);
     }
 
     /// The most recent pointer position, if any.
     pub fn get(&self) -> Option<Point> {
-        *self.position.read().unwrap_or_else(|error| error.into_inner())
+        *self
+            .position
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    // `ServerContext` is deliberately not unit-tested here: `ServerContext::new`
+    // requires a live `CompositorHandle`/`ObserverService`, so its clock and
+    // connection-id accessors (`now_ms`, `uptime_ms`, `next_connection_id`) are
+    // covered at the E2E level by `adesk-testkit`.
+    use super::*;
+
+    #[test]
+    fn cursor_tracker_starts_empty() {
+        assert_eq!(CursorTracker::new().get(), None);
+        assert_eq!(CursorTracker::default().get(), None);
+    }
+
+    #[test]
+    fn cursor_tracker_remembers_the_last_position() {
+        let tracker = CursorTracker::new();
+        tracker.set(Point { x: 10, y: 20 });
+        assert_eq!(tracker.get(), Some(Point { x: 10, y: 20 }));
+
+        // Later positions overwrite earlier ones.
+        tracker.set(Point { x: -5, y: 0 });
+        assert_eq!(tracker.get(), Some(Point { x: -5, y: 0 }));
+        tracker.set(Point::ORIGIN);
+        assert_eq!(tracker.get(), Some(Point::ORIGIN));
+    }
+
+    #[test]
+    fn cursor_tracker_clones_share_state() {
+        let tracker = CursorTracker::new();
+        let clone = tracker.clone();
+        assert_eq!(clone.get(), None);
+
+        clone.set(Point { x: 3, y: 4 });
+        assert_eq!(tracker.get(), Some(Point { x: 3, y: 4 }));
+        tracker.set(Point { x: 9, y: 9 });
+        assert_eq!(clone.get(), Some(Point { x: 9, y: 9 }));
+    }
+
+    #[test]
+    fn cursor_tracker_default_behaves_like_new() {
+        let default = CursorTracker::default();
+        let fresh = CursorTracker::new();
+        assert_eq!(default.get(), fresh.get());
+
+        // Two trackers are independent, not shared behind a global.
+        default.set(Point { x: 1, y: 2 });
+        assert_eq!(default.get(), Some(Point { x: 1, y: 2 }));
+        assert_eq!(fresh.get(), None);
     }
 }

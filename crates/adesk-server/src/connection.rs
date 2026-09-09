@@ -6,19 +6,33 @@
 //! response and the connection stays open. Every request gets exactly one
 //! response.
 
+use std::sync::Arc;
+
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tokio::sync::mpsc;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::sync::{mpsc, Semaphore};
+use tracing::Instrument;
 
 use adesk_proto::{Frame, NdjsonCodec};
 
 use crate::context::ServerContext;
+use crate::dispatch::Dispatcher;
 use crate::error::{Result, ServerError};
+use crate::session::Session;
 
 /// Capacity of the per-connection outbound frame queue.
 ///
 /// Responses and subscription events share this queue; when it fills, event
 /// frames are dropped (the client sees gaps) while responses await capacity.
 pub const OUTBOUND_QUEUE_CAPACITY: usize = 1024;
+
+/// Upper bound on requests dispatched concurrently for one connection.
+///
+/// Requests run concurrently so a slow `wait_for_*` cannot block `ping`
+/// (`docs/architecture.md` §9); the semaphore keeps a flooding client from
+/// spawning unbounded tasks.
+const MAX_IN_FLIGHT_REQUESTS: usize = 64;
 
 /// Serves one connection until the peer disconnects or the server shuts down.
 pub struct Connection {
@@ -44,8 +58,120 @@ impl Connection {
     /// Returns [`ServerError::Io`] only for socket failures; protocol errors are
     /// per-connection and end the loop with `Ok(())`.
     pub async fn run(self) -> Result<(), ServerError> {
-        todo!()
+        let Connection { stream, context } = self;
+        let session_id = context.next_connection_id();
+        let session = Session::new(session_id);
+        let span = tracing::info_span!("connection", id = session_id);
+
+        let (read_half, write_half) = stream.into_split();
+        let (frames_tx, frames_rx) = mpsc::channel::<Frame>(OUTBOUND_QUEUE_CAPACITY);
+        let writer = ConnectionWriter::new(frames_tx);
+        let writer_task =
+            tokio::spawn(write_loop(write_half, frames_rx, NdjsonCodec).instrument(span.clone()));
+
+        let result = read_loop(read_half, &context, &session, &writer)
+            .instrument(span.clone())
+            .await;
+
+        // Drop the connection's subscriptions and close the outbound queue so
+        // the writer task finishes; the peer then observes a clean EOF.
+        context.subscriptions.remove_connection(session_id);
+        context.inspect_subscriptions.remove_connection(session_id);
+        drop(writer);
+        let _ = writer_task.await;
+        result
     }
+}
+
+/// Drains the outbound queue into the socket, one NDJSON line per frame.
+async fn write_loop(mut half: OwnedWriteHalf, mut frames: mpsc::Receiver<Frame>, codec: NdjsonCodec) {
+    while let Some(frame) = frames.recv().await {
+        let mut line = match codec.encode_str(&frame) {
+            Ok(line) => line,
+            Err(error) => {
+                tracing::warn!(%error, "dropping an unencodable outbound frame");
+                continue;
+            }
+        };
+        line.push('\n');
+        if let Err(error) = half.write_all(line.as_bytes()).await {
+            tracing::debug!(%error, "connection write failed");
+            break;
+        }
+    }
+    let _ = half.shutdown().await;
+}
+
+/// Reads NDJSON requests, dispatching each on its own task so slow requests do
+/// not block the connection (`docs/architecture.md` §9).
+///
+/// A malformed frame (bad UTF-8, undecodable JSON, or a non-request frame)
+/// closes only this connection; every accepted request is answered exactly once
+/// by its dispatch task.
+async fn read_loop(
+    read_half: OwnedReadHalf,
+    context: &ServerContext,
+    session: &Session,
+    writer: &ConnectionWriter,
+) -> Result<(), ServerError> {
+    let dispatcher = Arc::new(Dispatcher::new(context.clone()));
+    let in_flight = Arc::new(Semaphore::new(MAX_IN_FLIGHT_REQUESTS));
+    let mut reader = BufReader::new(read_half);
+    let mut line = Vec::with_capacity(1024);
+
+    loop {
+        line.clear();
+        let read = tokio::select! {
+            biased;
+            () = context.shutdown.cancelled() => break,
+            read = reader.read_until(b'\n', &mut line) => read?,
+        };
+        if read == 0 {
+            break; // peer closed
+        }
+
+        let Ok(text) = std::str::from_utf8(&line) else {
+            tracing::warn!("malformed frame (invalid utf-8); closing connection");
+            break;
+        };
+        let text = text.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let frame = match NdjsonCodec.decode_str(text) {
+            Ok(frame) => frame,
+            Err(error) => {
+                tracing::warn!(%error, "malformed frame; closing connection");
+                break;
+            }
+        };
+        let Frame::Request(request) = frame else {
+            tracing::warn!("client sent a non-request frame; closing connection");
+            break;
+        };
+
+        let permit = Arc::clone(&in_flight)
+            .acquire_owned()
+            .await
+            .map_err(|_| ServerError::ShuttingDown)?;
+        let dispatcher = Arc::clone(&dispatcher);
+        let session = session.clone();
+        let writer = writer.clone();
+        let span =
+            tracing::info_span!("request", id = request.id, method = request.method.method_name());
+        tokio::spawn(
+            async move {
+                let _permit = permit;
+                let response = dispatcher.dispatch(&session, request).await;
+                if let Err(error) = writer.send(Frame::Response(response)).await {
+                    tracing::debug!(%error, "failed to deliver response");
+                }
+            }
+            .instrument(span),
+        );
+    }
+
+    Ok(())
 }
 
 /// Outbound half of a connection: frames for responses and subscription events.
@@ -67,7 +193,7 @@ impl ConnectionWriter {
     ///
     /// Returns [`ServerError::ShuttingDown`] when the writer task is gone.
     pub async fn send(&self, frame: Frame) -> Result<()> {
-        todo!()
+        self.tx.send(frame).await.map_err(|_| ServerError::ShuttingDown)
     }
 
     /// Queues one frame without waiting.
@@ -75,11 +201,61 @@ impl ConnectionWriter {
     /// Returns `false` when the queue is full or the connection is gone; used
     /// by the event fan-out, which must never block the pump.
     pub fn try_send(&self, frame: Frame) -> bool {
-        todo!()
+        self.tx.try_send(frame).is_ok()
     }
 
     /// The NDJSON codec used for this connection.
     pub fn codec(&self) -> &NdjsonCodec {
         &self.codec
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adesk_core::ErrorCode;
+    use adesk_proto::{ErrorPayload, ResponseFrame};
+
+    fn response(id: u64) -> Frame {
+        Frame::Response(ResponseFrame::error(
+            id,
+            ErrorPayload::new(ErrorCode::Internal, "test"),
+        ))
+    }
+
+    #[tokio::test]
+    async fn send_awaits_capacity_and_delivers_frames() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let writer = ConnectionWriter::new(tx);
+        writer.send(response(1)).await.unwrap();
+        writer.send(response(2)).await.unwrap();
+        assert_eq!(rx.recv().await, Some(response(1)));
+        assert_eq!(rx.recv().await, Some(response(2)));
+    }
+
+    #[tokio::test]
+    async fn send_reports_shutting_down_when_the_writer_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        let writer = ConnectionWriter::new(tx);
+        drop(rx);
+        let error = writer.send(response(1)).await.expect_err("writer gone");
+        assert!(matches!(error, ServerError::ShuttingDown));
+    }
+
+    #[tokio::test]
+    async fn try_send_drops_frames_when_the_queue_is_full() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let writer = ConnectionWriter::new(tx);
+        assert!(writer.try_send(response(1)));
+        assert!(!writer.try_send(response(2)), "full queue must drop, not block");
+        assert_eq!(rx.recv().await, Some(response(1)));
+    }
+
+    #[tokio::test]
+    async fn try_send_reports_failure_when_the_writer_is_gone() {
+        let (tx, rx) = mpsc::channel(1);
+        let writer = ConnectionWriter::new(tx);
+        drop(rx);
+        assert!(!writer.try_send(response(1)));
     }
 }

@@ -3,14 +3,11 @@
 //! Every flag has an `ADESK_*` environment fallback (`clap`'s `env`), so the
 //! binary is usable both from a shell and from a service unit.
 
-// Phase-1 skeleton only: `main`/`build_config`/`init_tracing` are `todo!()`, so
-// they neither call each other nor read the CLI yet. This mirrors the crate-root
-// allowance in `lib.rs` and is **removed in Phase 2**.
-#![allow(dead_code, unused_variables, unused_imports)]
 use std::path::PathBuf;
 
 use clap::Parser;
 
+use adesk_compositor::XkbSettings;
 use adesk_server::Server;
 use adesk_server::config::{ServerConfig, parse_renderer, parse_size};
 
@@ -47,16 +44,142 @@ struct Cli {
     log: String,
 }
 
-fn main() -> anyhow::Result<()> {
-    todo!()
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    init_tracing(&cli.log);
+    let config = build_config(&cli)?;
+    tracing::info!(socket = %config.socket_path().display(), "starting adesk-server");
+    let server = Server::start(config).await?;
+    tracing::info!(socket = %server.socket_path().display(), "adesk-server ready");
+    server.wait().await?;
+    tracing::info!("adesk-server stopped");
+    Ok(())
 }
 
 /// Builds a [`ServerConfig`] from parsed CLI flags (pure, unit-testable).
 fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
-    todo!()
+    let mut config = ServerConfig::default();
+    if let Some(socket) = &cli.socket {
+        config = config.with_socket_path(socket);
+    }
+    if let Some(output) = &cli.output {
+        let size = parse_size(output)
+            .map_err(|message| anyhow::anyhow!("invalid --output: {message}"))?;
+        config = config.with_output_size(size);
+    }
+    if let Some(renderer) = &cli.renderer {
+        let kind = parse_renderer(renderer)
+            .map_err(|message| anyhow::anyhow!("invalid --renderer: {message}"))?;
+        config = config.with_renderer(kind);
+    }
+    if cli.xkb_layout.is_some()
+        || cli.xkb_variant.is_some()
+        || cli.xkb_model.is_some()
+        || cli.xkb_rules.is_some()
+    {
+        let mut xkb = XkbSettings::us();
+        if let Some(layout) = &cli.xkb_layout {
+            xkb.layout = layout.clone();
+        }
+        if let Some(variant) = &cli.xkb_variant {
+            xkb.variant = variant.clone();
+        }
+        if let Some(model) = &cli.xkb_model {
+            xkb.model = model.clone();
+        }
+        if let Some(rules) = &cli.xkb_rules {
+            xkb.rules = rules.clone();
+        }
+        config = config.with_xkb(xkb);
+    }
+    if !cli.apps_dir.is_empty() {
+        config = config.with_app_dirs(cli.apps_dir.clone());
+    }
+    Ok(config)
 }
 
 /// Installs the global `tracing-subscriber` with the given filter.
+///
+/// An invalid directive falls back to `info`; a subscriber that is already
+/// installed is left alone (never panics).
 fn init_tracing(filter: &str) {
-    todo!()
+    let filter = tracing_subscriber::EnvFilter::try_new(filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use adesk_compositor::RendererKind;
+    use adesk_core::Size;
+
+    fn cli() -> Cli {
+        Cli {
+            socket: None,
+            output: None,
+            renderer: None,
+            xkb_layout: None,
+            xkb_variant: None,
+            xkb_model: None,
+            xkb_rules: None,
+            apps_dir: Vec::new(),
+            log: "info".to_owned(),
+        }
+    }
+
+    #[test]
+    fn no_flags_keeps_the_environment_defaults() {
+        let config = build_config(&cli()).unwrap();
+        assert_eq!(config.socket_path(), adesk_server::default_socket_path());
+        assert_eq!(config.compositor.output_size, Size::new(1280, 800));
+        assert_eq!(config.compositor.renderer, RendererKind::Auto);
+        assert!(config.app_dirs.is_none());
+    }
+
+    #[test]
+    fn flags_override_the_compositor_settings() {
+        let mut cli = cli();
+        cli.socket = Some(PathBuf::from("/tmp/cli.sock"));
+        cli.output = Some("800x600".to_owned());
+        cli.renderer = Some("pixman".to_owned());
+        cli.xkb_layout = Some("de,us".to_owned());
+        cli.xkb_variant = Some("nodeadkeys".to_owned());
+        cli.xkb_model = Some("pc104".to_owned());
+        cli.xkb_rules = Some("evdev".to_owned());
+
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.socket_path(), std::path::Path::new("/tmp/cli.sock"));
+        assert_eq!(config.compositor.output_size, Size::new(800, 600));
+        assert_eq!(config.compositor.renderer, RendererKind::Pixman);
+        assert_eq!(config.compositor.xkb.layout, "de,us");
+        assert_eq!(config.compositor.xkb.variant, "nodeadkeys");
+        assert_eq!(config.compositor.xkb.model, "pc104");
+        assert_eq!(config.compositor.xkb.rules, "evdev");
+    }
+
+    #[test]
+    fn invalid_flag_values_are_reported_with_the_flag_name() {
+        let mut bad_output = cli();
+        bad_output.output = Some("wide".to_owned());
+        let error = build_config(&bad_output).unwrap_err().to_string();
+        assert!(error.contains("--output"), "{error}");
+
+        let mut bad_renderer = cli();
+        bad_renderer.renderer = Some("vulkan".to_owned());
+        let error = build_config(&bad_renderer).unwrap_err().to_string();
+        assert!(error.contains("--renderer"), "{error}");
+    }
+
+    #[test]
+    fn app_directories_are_passed_through() {
+        let mut cli = cli();
+        cli.apps_dir = vec![PathBuf::from("/opt/apps"), PathBuf::from("/srv/apps")];
+        let config = build_config(&cli).unwrap();
+        assert_eq!(
+            config.app_dirs,
+            Some(vec![PathBuf::from("/opt/apps"), PathBuf::from("/srv/apps")])
+        );
+    }
 }
