@@ -29,11 +29,18 @@
 //! does not define it outside the owning package), which is exactly what [`helper_bin_path`]
 //! is for.
 //!
-//! # Fixture arguments must not need shell quoting
+//! # `Exec` arguments are quoted automatically
 //!
-//! A `.desktop` `Exec` value is written as space-joined arguments and the registry tokenizes
-//! it on whitespace and quotes, so fixture arguments must not contain spaces, quotes or
-//! backslashes. There is no shell and no quoting layer between a fixture and the helper.
+//! A `.desktop` `Exec` value is a single line that the registry splits with
+//! `adesk_app_registry::ExecExpander` (see its module docs): ASCII whitespace separates
+//! arguments, double quotes group and are removed, `\"`/`\\` are resolved inside and outside
+//! quotes, single quotes are literal, and an unterminated quote is an error. There is no shell
+//! between a fixture and the helper.
+//!
+//! [`DesktopEntryFixture::to_desktop_file`] therefore quotes an argument whenever it is empty
+//! or contains ASCII whitespace, `"` or `\`, escaping `\` as `\\` and `"` as `\"` inside the
+//! quoted form (an empty argument is written `""`). Every other argument is written verbatim,
+//! so simple entries keep their exact text.
 //!
 //! # Bounded process control
 //!
@@ -187,7 +194,8 @@ impl FixtureDir {
 pub struct DesktopEntryFixture {
     /// `Name` (the displayed name).
     pub name: String,
-    /// `Exec` argument vector, written space-joined.
+    /// `Exec` argument vector, serialized by [`exec_arg`] so the registry's tokenizer returns
+    /// it unchanged.
     pub exec: Vec<String>,
     /// `Icon` name or path.
     pub icon: Option<String>,
@@ -293,7 +301,7 @@ impl DesktopEntryFixture {
     /// [Desktop Entry]
     /// Type=Application
     /// Name=<name>
-    /// Exec=<exec joined by single spaces>
+    /// Exec=<exec arguments, quoted when needed>
     /// Icon=<icon>                     # only when Some
     /// Terminal=true                   # only when true
     /// NoDisplay=true                  # only when true
@@ -305,13 +313,20 @@ impl DesktopEntryFixture {
     /// <extra key>=<extra value>       # in insertion order, verbatim
     /// ```
     ///
-    /// The text ends with a trailing newline and contains no blank lines. Values are written
-    /// verbatim: `Exec` arguments must not contain whitespace or quoting characters (see the
-    /// module docs), and `Categories` items must not contain `;`.
+    /// The text ends with a trailing newline and contains no blank lines. `Exec` arguments are
+    /// single-space separated and quoted by [`exec_arg`], so the registry's tokenizer returns
+    /// them unchanged; every other value is verbatim (`Categories` items must not contain `;`).
     pub fn to_desktop_file(&self) -> String {
         let mut text = String::from("[Desktop Entry]\nType=Application\n");
         push_key(&mut text, "Name", &self.name);
-        push_key(&mut text, "Exec", &self.exec.join(" "));
+        let exec = self
+            .exec
+            .iter()
+            .map(String::as_str)
+            .map(exec_arg)
+            .collect::<Vec<_>>()
+            .join(" ");
+        push_key(&mut text, "Exec", &exec);
         if let Some(icon) = &self.icon {
             push_key(&mut text, "Icon", icon);
         }
@@ -686,6 +701,34 @@ fn push_key(text: &mut String, key: &str, value: &str) {
     text.push('\n');
 }
 
+/// Serializes one `Exec` argument, double-quoted when the registry's tokenizer needs it.
+///
+/// `adesk_app_registry::ExecExpander::tokenize` splits on ASCII whitespace, groups on `"` and
+/// resolves `\"`/`\\`, so an argument is quoted exactly when it is empty or contains ASCII
+/// whitespace, `"` or `\`; inside the quotes `\` becomes `\\` and `"` becomes `\"`, and an empty
+/// argument must be written `""`. Every other argument stays byte-identical to a plain
+/// space-joined `Exec` line.
+fn exec_arg(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|ch| ch.is_ascii_whitespace() || matches!(ch, '"' | '\\'));
+    if plain {
+        return arg.to_string();
+    }
+    let mut quoted = String::with_capacity(arg.len() + 2);
+    quoted.push('"');
+    for ch in arg.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            _ => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// Wraps an IO error with the path it happened on, preserving the error kind.
 fn io_at(path: &Path, error: std::io::Error) -> TestkitError {
     TestkitError::Io(std::io::Error::new(
@@ -877,6 +920,45 @@ mod tests {
             "[Desktop Entry]\nType=Application\nName=Demo\nExec=/bin/true\n"
         );
         assert!(!minimal.to_desktop_file().contains("\n\n"));
+    }
+
+    /// Argument vectors whose serialized `Exec` value must tokenize back unchanged.
+    const ROUND_TRIP_SETS: &[&[&str]] = &[
+        &["/bin/true", "--fixture"],
+        &["Launched Fixture", "a\"b", "a\\b", "", "tab\targ"],
+        &["two  spaces", " ", "a$b", "a`b", "single'quote"],
+    ];
+
+    #[test]
+    fn exec_arguments_round_trip_through_the_registry_tokenizer() {
+        for set in ROUND_TRIP_SETS {
+            let args: Vec<String> = set.iter().map(|arg| arg.to_string()).collect();
+            let text = DesktopEntryFixture::new("Round Trip", args.clone()).to_desktop_file();
+            // `RawEntry::get` is the value the registry sees (stage-1 unescaped already).
+            let raw = adesk_app_registry::parse_str(&text).expect("parses");
+            assert_eq!(
+                adesk_app_registry::ExecExpander::new()
+                    .tokenize(raw.get("Exec").expect("the entry has an Exec line"))
+                    .expect("tokenizes"),
+                args,
+                "{text}"
+            );
+        }
+
+        // Plain arguments stay byte-identical, and `TestAppSpec::cli_args()` survives verbatim.
+        let entry = DesktopEntryFixture::new("Demo", ["/bin/true", "--fixture"]);
+        let text = entry.to_desktop_file();
+        assert!(text.contains("Exec=/bin/true --fixture\n"));
+        let spec = TestAppSpec::new("org.example.launched").with_title("Launched Fixture");
+        let mut exec = vec!["/path/to/adesk-test-app".to_string()];
+        exec.extend(spec.cli_args());
+        let text = DesktopEntryFixture::new("Launched Fixture", exec).to_desktop_file();
+        assert!(text.contains("--title \"Launched Fixture\""), "{text}");
+        let raw = adesk_app_registry::parse_str(&text).expect("parses");
+        let tokens = adesk_app_registry::ExecExpander::new()
+            .tokenize(raw.get("Exec").expect("the entry has an Exec line"))
+            .expect("tokenizes");
+        assert_eq!(&tokens[1..], spec.cli_args().as_slice());
     }
 
     #[test]
