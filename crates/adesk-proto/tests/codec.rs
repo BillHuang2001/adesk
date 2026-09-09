@@ -12,8 +12,6 @@ use adesk_core::{
 use adesk_proto::*;
 use serde_json::json;
 
-const PHASE2: &str = "phase 2: codec bodies are todo!() stubs";
-
 fn damage() -> Region {
     let mut region = Region::empty();
     region.push(Rect::new(630, 220, 410, 180));
