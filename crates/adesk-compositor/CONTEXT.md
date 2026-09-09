@@ -172,6 +172,7 @@ Unit tests (colocated `#[cfg(test)]`; 82 tests pass today):
 - `input::injector`: logical buttons → evdev codes.
 - `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors.
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
+- `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
 - `snapshot`: lookup/helpers, frame size.
