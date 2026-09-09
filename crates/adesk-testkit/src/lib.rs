@@ -20,7 +20,7 @@
 //!
 //! ```no_run
 //! # async fn demo() -> adesk_testkit::Result<()> {
-//! use adesk_testkit::{EventAssert, FillPattern, TestRuntime, ToplevelSpec};
+//! use adesk_testkit::{EventAssert, FillPattern, ImageAssert, TestRuntime, ToplevelSpec};
 //!
 //! let runtime = TestRuntime::start().await?;
 //! let wayland = runtime.wayland_client()?;

@@ -76,7 +76,9 @@ pub struct TestRuntimeConfig {
     pub event_channel_capacity: usize,
     /// Bound for [`TestRuntime::shutdown`] (default [`DEFAULT_SHUTDOWN_TIMEOUT`]).
     pub shutdown_timeout: Duration,
-    /// Wayland socket name override; `None` uses the env's unique name.
+    /// Wayland socket name override; `None` pins the env's unique display name (the
+    /// runtime always names the socket explicitly so [`TestRuntime::wayland_display`]
+    /// matches what the compositor bound).
     pub socket_name: Option<String>,
     /// Whether to apply [`TestEnv::apply`] for the runtime's lifetime (default `true`).
     /// Required for app-registry launch tests; see the [`crate::env`] hazard note.
@@ -190,9 +192,14 @@ impl TestRuntime {
             .with_output_size(config.output_size)
             .with_renderer(config.renderer)
             .with_event_channel_capacity(config.event_channel_capacity);
-        if let Some(name) = &config.socket_name {
-            compositor = compositor.with_socket_name(name.clone());
-        }
+        // Pin the socket name to the env's display name: smithay's auto-naming would
+        // otherwise bind `wayland-1..32`, and `wayland_display()` must always name the
+        // socket the compositor actually bound.
+        let socket_name = config
+            .socket_name
+            .clone()
+            .unwrap_or_else(|| env.wayland_display().to_string());
+        compositor = compositor.with_socket_name(socket_name);
 
         // An empty app_dirs list means "isolated fixture dir only", never the host's XDG dirs.
         let app_dirs = if config.app_dirs.is_empty() {
