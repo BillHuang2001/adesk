@@ -5,15 +5,31 @@
 //! `XDG_DATA_HOME`, a unique Wayland socket name and the AGP socket path. Nothing in a
 //! test ever touches the host's real `$XDG_RUNTIME_DIR`, `$XDG_DATA_DIRS` or `$HOME`.
 //!
-//! ## Process environment hazard
+//! ## Process environment: one scoped runtime at a time
 //!
-//! The process environment is global. Child processes launched by the runtime's app
-//! registry receive `LaunchEnv::from_process()`, i.e. whatever `XDG_RUNTIME_DIR` /
-//! `WAYLAND_DISPLAY` this *test process* has — so launch tests need
-//! [`TestEnv::apply`], which sets those variables and restores them when the returned
-//! [`EnvScope`] drops. Two runtimes applying different envs in parallel will race:
-//! launch tests must not run concurrently with other runtimes in the same test binary
-//! (put them in one test function or run that binary with `--test-threads=1`).
+//! The process environment is global, and two parts of a runtime read it directly:
+//! `adesk-compositor` binds its Wayland listening socket under the process
+//! `XDG_RUNTIME_DIR`, and the app registry launches children with
+//! `LaunchEnv::from_process()`, i.e. whatever `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` this
+//! *test process* has at launch time.
+//!
+//! [`TestRuntime::start_with`](crate::TestRuntime::start_with) therefore serializes every
+//! env mutation on the process-wide [`lock_process_env`] guard and always scopes the
+//! process env to the runtime's own [`TestEnv`] across `Server::start`, so a compositor can
+//! never bind into another runtime's — or the ambient, possibly read-only — runtime dir.
+//! When [`TestRuntimeConfig::apply_env`](crate::TestRuntimeConfig::apply_env) is `true` the
+//! [`EnvScope`] *and* the lock stay held for the runtime's lifetime, because registry
+//! children inherit the process env at launch time; that also serializes env-scoped
+//! runtimes in one test binary, so plain `cargo test` needs no `--test-threads=1`.
+//! With `apply_env == false` the env is restored as soon as the server is up, and the lock
+//! is released with it.
+//!
+//! An env-scoped runtime holds the lock for its whole lifetime, so a second env-scoped
+//! runtime started *inside the same test* cannot make progress; the bounded acquire fails
+//! with [`TestkitError::Timeout`](crate::TestkitError::Timeout) instead of hanging the test
+//! binary. Code that mutates the process env itself should hold the same lock (or run in
+//! its own test binary).
+//!
 //! The Wayland test client does *not* depend on the process env: it connects to an
 //! absolute socket path ([`TestEnv::wayland_socket_path`]).
 
@@ -21,10 +37,12 @@ use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use tempfile::TempDir;
+use tokio::sync::{Mutex, MutexGuard};
 
-use crate::error::Result;
+use crate::error::{Result, TestkitError};
 
 /// Monotonic counter making Wayland display names unique within a process.
 static NEXT_ENV: AtomicU64 = AtomicU64::new(1);
@@ -122,7 +140,8 @@ impl TestEnv {
     ///
     /// Sets `XDG_RUNTIME_DIR`, `WAYLAND_DISPLAY`, `XDG_DATA_DIRS`, `XDG_DATA_HOME` and
     /// `ADESK_SOCKET`; dropping the guard restores every previous value (or removes the
-    /// variable if it was unset). See the module docs for the parallel-test hazard.
+    /// variable if it was unset). The process env is global: see the module docs and hold
+    /// the process-wide environment lock while a runtime starts.
     pub fn apply(&self) -> EnvScope {
         EnvScope::set(&[
             ("XDG_RUNTIME_DIR", Some(self.runtime_dir.clone().into())),
@@ -174,3 +193,58 @@ impl Drop for EnvScope {
         }
     }
 }
+
+// --- process-wide environment lock ---
+
+/// The lock that serializes every change to the process environment.
+///
+/// A `tokio` mutex rather than `std`'s: the guard is held across
+/// `Server::start(..).await` (and, for env-scoped runtimes, for the runtime's whole
+/// lifetime), so it must never block an executor thread and must be `Send`.
+static PROCESS_ENV_LOCK: Mutex<()> = Mutex::const_new(());
+
+/// How long [`lock_process_env`] waits for [`PROCESS_ENV_LOCK`].
+///
+/// Generous on purpose: an env-scoped runtime holds the lock for its whole lifetime, so
+/// parallel tests in one binary queue behind each other. The bound exists so that a harness
+/// mistake — a second env-scoped runtime inside one test — fails with a
+/// [`TestkitError::Timeout`](crate::TestkitError::Timeout) instead of hanging the test
+/// binary forever.
+pub(crate) const PROCESS_ENV_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Proof that this task holds [`PROCESS_ENV_LOCK`]; the lock is released on drop.
+///
+/// Droppable from synchronous code (so [`crate::TestRuntime`]'s `Drop` stays non-blocking)
+/// and `Send` (so the runtime handle and the startup future stay `Send`).
+pub(crate) struct ProcessEnvLock {
+    _guard: MutexGuard<'static, ()>,
+}
+
+impl std::fmt::Debug for ProcessEnvLock {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ProcessEnvLock")
+    }
+}
+
+/// Acquires the process-wide environment lock, bounded by [`PROCESS_ENV_LOCK_TIMEOUT`].
+///
+/// # Errors
+///
+/// Returns [`TestkitError::Timeout`](crate::TestkitError::Timeout) if another runtime in
+/// this process holds the lock for longer than the bound.
+pub(crate) async fn lock_process_env() -> Result<ProcessEnvLock> {
+    match tokio::time::timeout(PROCESS_ENV_LOCK_TIMEOUT, PROCESS_ENV_LOCK.lock()).await {
+        Ok(guard) => Ok(ProcessEnvLock { _guard: guard }),
+        Err(_elapsed) => Err(TestkitError::Timeout {
+            what: "process environment lock",
+            timeout: PROCESS_ENV_LOCK_TIMEOUT,
+        }),
+    }
+}
+
+// The guard is stored in `TestRuntime` and inside the `start_with` future, so it must stay
+// `Send`; this fails to compile if the guard ever loses that property.
+const _: fn() = || {
+    fn assert_send<T: Send>() {}
+    assert_send::<ProcessEnvLock>();
+};

@@ -13,7 +13,8 @@
 //!
 //! ```text
 //! ServerConfig::new(socket_path: impl Into<PathBuf>, compositor: CompositorConfig) -> ServerConfig
-//! ServerConfig::with_app_dirs(self, dirs: Vec<PathBuf>) -> ServerConfig      // XDG_DATA_DIRS-style share roots
+//! ServerConfig::with_app_dirs(self, dirs: Vec<PathBuf>) -> ServerConfig   // dirs passed verbatim
+//!                                                                        // to RegistryOptions::with_search_dirs
 //! Server::start(ServerConfig) -> impl Future<Output = Result<RunningServer, _>>   // server spawns the compositor
 //! RunningServer::socket_path(&self) -> &Path
 //! RunningServer::compositor(&self) -> &CompositorHandle
@@ -21,6 +22,16 @@
 //! RunningServer::registry(&self) -> &Arc<AppRegistry>          // derefs to &AppRegistry
 //! RunningServer::shutdown(self) -> impl Future<Output = Result<(), _>>
 //! ```
+//!
+//! Two landed-server behaviours [`TestRuntime::start_with`] compensates for, and nowhere
+//! else in the harness does:
+//!
+//! - The compositor binds its Wayland socket under the *process* `XDG_RUNTIME_DIR`, so the
+//!   env is scoped to the runtime's [`TestEnv`] for the whole of `Server::start` (serialized
+//!   on the process-wide lock in [`crate::env`]) even when `apply_env` is `false`.
+//! - `ServerConfig::with_app_dirs` is documented as XDG_DATA_DIRS-style share roots, but the
+//!   registry derives app ids relative to the dirs it is given, so each configured share
+//!   root is translated to `<root>/applications`.
 //!
 //! If the landed server differs, adapt only [`TestRuntime::start_with`] and
 //! [`TestRuntime::shutdown`]; the rest of the harness is independent of it.
@@ -37,7 +48,7 @@ use adesk_server::{RunningServer, Server, ServerConfig};
 use tokio::sync::broadcast;
 
 use crate::assert::{EventAssert, Expected};
-use crate::env::{EnvScope, TestEnv};
+use crate::env::{lock_process_env, EnvScope, ProcessEnvLock, TestEnv};
 use crate::error::{Result, TestkitError};
 use crate::fixtures::FixtureDir;
 use crate::wayland::WaylandTestClient;
@@ -72,6 +83,10 @@ pub struct TestRuntimeConfig {
     pub renderer: RendererKind,
     /// Registry search dirs (XDG_DATA_DIRS-style share roots). Empty means "the runtime's
     /// isolated fixture dir only" — the host's `/usr/share` is never scanned.
+    ///
+    /// [`TestRuntime::start_with`] translates each share root to `<root>/applications`
+    /// before handing it to the server, which derives app ids relative to the dirs it is
+    /// given; see that method's docs.
     pub app_dirs: Vec<PathBuf>,
     /// Event broadcast capacity (default [`DEFAULT_EVENT_CHANNEL_CAPACITY`]).
     pub event_channel_capacity: usize,
@@ -81,8 +96,14 @@ pub struct TestRuntimeConfig {
     /// runtime always names the socket explicitly so [`TestRuntime::wayland_display`]
     /// matches what the compositor bound).
     pub socket_name: Option<String>,
-    /// Whether to apply [`TestEnv::apply`] for the runtime's lifetime (default `true`).
-    /// Required for app-registry launch tests; see the [`crate::env`] hazard note.
+    /// Whether to keep [`TestEnv::apply`] in force for the runtime's lifetime (default
+    /// `true`). Required for app-registry launch tests, whose children inherit the process
+    /// env at launch time; it also serializes env-scoped runtimes in one test binary.
+    ///
+    /// The process env is *always* scoped to this runtime's [`TestEnv`] across
+    /// `Server::start` (the compositor binds its Wayland socket under the process
+    /// `XDG_RUNTIME_DIR`), and always restored afterwards when this is `false`; see
+    /// [`crate::env`].
     pub apply_env: bool,
 }
 
@@ -165,6 +186,9 @@ pub struct TestRuntime {
     config: TestRuntimeConfig,
     env: TestEnv,
     env_scope: Option<EnvScope>,
+    /// Held for the runtime's lifetime only when `apply_env` is set; released *after*
+    /// `env_scope` (see `Drop`) so a waiting runtime never sees a half-restored env.
+    env_lock: Option<ProcessEnvLock>,
     running: Option<RunningServer>,
     socket_path: PathBuf,
     display_name: String,
@@ -178,16 +202,35 @@ impl TestRuntime {
 
     /// Starts a runtime with the given configuration.
     ///
-    /// Steps: create [`TestEnv`] → apply the process env (unless disabled) → build
-    /// `CompositorConfig` → build `ServerConfig` → `Server::start` (the server spawns the
-    /// compositor thread and binds the AGP socket).
+    /// Steps: create [`TestEnv`] → acquire the process-wide environment lock → apply the
+    /// process env → build `CompositorConfig` → build `ServerConfig` → `Server::start` (the
+    /// server spawns the compositor thread and binds the AGP socket) → restore the env
+    /// unless [`TestRuntimeConfig::apply_env`] keeps it for the runtime's lifetime.
+    ///
+    /// # Process environment
+    ///
+    /// The env is applied for the whole of `Server::start` *unconditionally*, because the
+    /// compositor binds its Wayland listening socket under the process `XDG_RUNTIME_DIR`;
+    /// without it a runtime would bind into the ambient (possibly read-only) runtime dir.
+    /// Env mutation is serialized on the process-wide lock in [`crate::env`], so parallel
+    /// runtimes in one test binary cannot race. With `apply_env == false` both the env and
+    /// the lock are released as soon as the server is up (the Wayland client connects by
+    /// absolute path); with `apply_env == true` both are kept, because registry-launched
+    /// children inherit the process env at launch time.
+    ///
+    /// # App dirs
+    ///
+    /// [`TestRuntimeConfig::app_dirs`] is XDG_DATA_DIRS-style *share roots*, but the server
+    /// derives app ids relative to each dir it is given, so each root is translated to
+    /// `<root>/applications` here (the adaptation point for the `adesk-server` contract).
     pub async fn start_with(config: TestRuntimeConfig) -> Result<TestRuntime> {
         let env = TestEnv::new()?;
-        let env_scope = if config.apply_env {
-            Some(env.apply())
-        } else {
-            None
-        };
+        // Serialize all env mutation: the compositor binds under the process
+        // `XDG_RUNTIME_DIR`, so two runtimes applying different envs concurrently would
+        // bind into each other's runtime dirs.
+        let env_lock = lock_process_env().await?;
+        // Always scoped across startup, even when the caller does not need it afterwards.
+        let startup_scope = env.apply();
 
         let mut compositor = CompositorConfig::new()
             .with_output_size(config.output_size)
@@ -208,21 +251,42 @@ impl TestRuntime {
         } else {
             config.app_dirs.clone()
         };
+        // Share root → applications dir: the server passes the dirs verbatim to the
+        // registry, which derives ids relative to them (`org.example.app`, not
+        // `applications.org.example.app`).
+        let app_dirs = app_dirs
+            .into_iter()
+            .map(|root| root.join("applications"))
+            .collect::<Vec<_>>();
 
         let server_config =
             ServerConfig::new(env.agp_socket().to_path_buf(), compositor).with_app_dirs(app_dirs);
 
-        let running = Server::start(server_config)
-            .await
-            .map_err(|e| TestkitError::Startup(e.to_string()))?;
+        let running = match Server::start(server_config).await {
+            Ok(running) => running,
+            // `startup_scope` and `env_lock` drop on this early return: env restored
+            // first, then the lock released for the next runtime.
+            Err(e) => return Err(TestkitError::Startup(e.to_string())),
+        };
 
         let socket_path = running.socket_path().to_path_buf();
         let display_name = env.wayland_display().to_string();
+
+        // Keep the env (and its lock) only when the caller asked for the runtime's
+        // lifetime; otherwise restore it now, before releasing the lock.
+        let (env_scope, env_lock) = if config.apply_env {
+            (Some(startup_scope), Some(env_lock))
+        } else {
+            drop(startup_scope);
+            drop(env_lock);
+            (None, None)
+        };
 
         Ok(TestRuntime {
             config,
             env,
             env_scope,
+            env_lock,
             running: Some(running),
             socket_path,
             display_name,
@@ -357,8 +421,10 @@ impl TestRuntime {
         };
         let timeout = self.config.shutdown_timeout;
         let outcome = tokio::time::timeout(timeout, running.shutdown()).await;
-        // Restore the process env as soon as the runtime is gone.
+        // Restore the process env as soon as the runtime is gone, then release the
+        // process-wide env lock so a queued runtime may start.
         self.env_scope.take();
+        self.env_lock.take();
         match outcome {
             Ok(Ok(())) => Ok(()),
             Ok(Err(e)) => Err(TestkitError::Shutdown(e.to_string())),
@@ -397,7 +463,8 @@ impl Drop for TestRuntime {
     /// 2. If a tokio runtime is currently driving the test, spawn the graceful server
     ///    shutdown as a detached task with the configured bound. If not (test already
     ///    returned), the process teardown reclaims the rest.
-    /// 3. Restore the process environment.
+    /// 3. Restore the process environment, then release the process-wide env lock (in that
+    ///    order, so a queued runtime never observes a half-restored environment).
     ///
     /// `Drop` deliberately does not block: blocking inside a `#[tokio::test]` body would
     /// deadlock the current-thread executor. Use [`TestRuntime::shutdown`] when the test
@@ -414,5 +481,6 @@ impl Drop for TestRuntime {
             }
         }
         self.env_scope.take();
+        self.env_lock.take();
     }
 }
