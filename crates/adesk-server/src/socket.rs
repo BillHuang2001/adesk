@@ -159,7 +159,10 @@ mod tests {
         let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
         drop(listener);
         assert!(path.exists());
-        assert!(std::fs::symlink_metadata(&path).unwrap().file_type().is_socket());
+        assert!(std::fs::symlink_metadata(&path)
+            .unwrap()
+            .file_type()
+            .is_socket());
 
         prepare_socket_path(&path).unwrap();
         assert!(!path.exists(), "stale socket file must be removed");
@@ -202,7 +205,10 @@ mod tests {
         assert!(server.peer_addr().is_ok() || client.peer_addr().is_ok());
 
         drop(listener);
-        assert!(!path.exists(), "dropping the listener removes the socket file");
+        assert!(
+            !path.exists(),
+            "dropping the listener removes the socket file"
+        );
     }
 
     #[tokio::test]

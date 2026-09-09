@@ -121,12 +121,16 @@ pub fn parse_size(value: &str) -> std::result::Result<Size, String> {
         .trim()
         .parse::<u32>()
         .map_err(|_| format!("invalid size `{value}`: `{}` is not a width", width.trim()))?;
-    let height = height
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| format!("invalid size `{value}`: `{}` is not a height", height.trim()))?;
+    let height = height.trim().parse::<u32>().map_err(|_| {
+        format!(
+            "invalid size `{value}`: `{}` is not a height",
+            height.trim()
+        )
+    })?;
     if width == 0 || height == 0 {
-        return Err(format!("invalid size `{value}`: dimensions must be non-zero"));
+        return Err(format!(
+            "invalid size `{value}`: dimensions must be non-zero"
+        ));
     }
     Ok(Size::new(width, height))
 }
@@ -264,7 +268,10 @@ mod tests {
     fn default_socket_path_falls_back_to_temp_dir() {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
         let _env = EnvGuard::set(&[("ADESK_SOCKET", None), ("XDG_RUNTIME_DIR", None)]);
-        assert_eq!(default_socket_path(), std::env::temp_dir().join("adesk.sock"));
+        assert_eq!(
+            default_socket_path(),
+            std::env::temp_dir().join("adesk.sock")
+        );
     }
 
     #[test]

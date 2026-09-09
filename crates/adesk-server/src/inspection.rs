@@ -58,7 +58,10 @@ impl InspectionCache {
 
     /// Stores a freshly refreshed snapshot.
     pub fn store(&self, snapshot: InspectionSnapshot) {
-        *self.inner.write().unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
+        *self
+            .inner
+            .write()
+            .unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
     }
 
     /// The current snapshot, if the cache has been primed.
@@ -111,9 +114,9 @@ pub(crate) fn damage_to_output(damage: &Region, geometry: Option<Rect>) -> Vec<R
 fn compositor_reply(error: adesk_core::Error) -> ServerError {
     use adesk_core::ErrorCode;
     match error.code {
-        ErrorCode::InvalidRequest => {
-            ServerError::Compositor(adesk_compositor::CompositorError::InvalidRequest(error.message))
-        }
+        ErrorCode::InvalidRequest => ServerError::Compositor(
+            adesk_compositor::CompositorError::InvalidRequest(error.message),
+        ),
         ErrorCode::RenderFailed | ErrorCode::CaptureFailed => {
             ServerError::Compositor(adesk_compositor::CompositorError::Render(error.message))
         }
@@ -125,7 +128,10 @@ fn compositor_reply(error: adesk_core::Error) -> ServerError {
 impl InspectionSource for InspectionCache {
     /// Converts the cached snapshot into an `InspectionInput`, collecting only
     /// the state the requested overlays need.
-    fn inspection_input(&self, overlays: &[OverlayKind]) -> adesk_inspector::Result<InspectionInput> {
+    fn inspection_input(
+        &self,
+        overlays: &[OverlayKind],
+    ) -> adesk_inspector::Result<InspectionInput> {
         let Some(snapshot) = self.snapshot() else {
             return Err(adesk_inspector::Error::InvalidRequest(
                 "inspection cache is not primed; call `inspection::refresh` first".to_owned(),
@@ -185,7 +191,9 @@ pub async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
         .map_err(compositor_reply)?;
 
     let (reply, state) = oneshot::channel();
-    context.compositor.send(RuntimeCommand::QueryState { reply })?;
+    context
+        .compositor
+        .send(RuntimeCommand::QueryState { reply })?;
     let state = state.await.map_err(|_| ServerError::ShuttingDown)?;
 
     let now_ms = context.now_ms();

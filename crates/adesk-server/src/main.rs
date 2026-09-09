@@ -8,8 +8,8 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use adesk_compositor::XkbSettings;
+use adesk_server::config::{parse_renderer, parse_size, ServerConfig};
 use adesk_server::Server;
-use adesk_server::config::{ServerConfig, parse_renderer, parse_size};
 
 /// ADesk — AI-native headless Wayland runtime (AGP server).
 #[derive(Debug, Parser)]
@@ -37,7 +37,12 @@ struct Cli {
     #[arg(long, env = "ADESK_XKB_RULES", value_name = "NAME")]
     xkb_rules: Option<String>,
     /// Extra `.desktop` search directories (repeatable, `:`-separated in the env).
-    #[arg(long = "apps-dir", env = "ADESK_APPS_DIR", value_name = "DIR", value_delimiter = ':')]
+    #[arg(
+        long = "apps-dir",
+        env = "ADESK_APPS_DIR",
+        value_name = "DIR",
+        value_delimiter = ':'
+    )]
     apps_dir: Vec<PathBuf>,
     /// `tracing-subscriber` env-filter directive.
     #[arg(long, env = "ADESK_LOG", value_name = "FILTER", default_value = "info")]
@@ -64,8 +69,8 @@ fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
         config = config.with_socket_path(socket);
     }
     if let Some(output) = &cli.output {
-        let size = parse_size(output)
-            .map_err(|message| anyhow::anyhow!("invalid --output: {message}"))?;
+        let size =
+            parse_size(output).map_err(|message| anyhow::anyhow!("invalid --output: {message}"))?;
         config = config.with_output_size(size);
     }
     if let Some(renderer) = &cli.renderer {

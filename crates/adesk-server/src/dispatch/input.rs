@@ -48,7 +48,10 @@ const DOUBLE_CLICK_INTERVAL_MS: u64 = 100;
 const DOUBLE_CLICK_GAP_MS: u64 = DOUBLE_CLICK_INTERVAL_MS / 2;
 
 /// `pointer_move`: move the pointer (window-relative or normalized).
-pub async fn pointer_move(ctx: &RequestContext<'_>, params: PointerMoveParams) -> Result<ActionResult> {
+pub async fn pointer_move(
+    ctx: &RequestContext<'_>,
+    params: PointerMoveParams,
+) -> Result<ActionResult> {
     let action_id = ctx.server.observer.record_action(
         ActionKind::PointerMove,
         Some(params.window_id),
@@ -82,7 +85,10 @@ pub async fn click(ctx: &RequestContext<'_>, params: ClickParams) -> Result<Acti
 }
 
 /// `double_click`: two clicks within the double-click interval.
-pub async fn double_click(ctx: &RequestContext<'_>, params: DoubleClickParams) -> Result<ActionResult> {
+pub async fn double_click(
+    ctx: &RequestContext<'_>,
+    params: DoubleClickParams,
+) -> Result<ActionResult> {
     let action_id = ctx.server.observer.record_action(
         ActionKind::DoubleClick,
         Some(params.window_id),
@@ -146,10 +152,8 @@ pub async fn scroll(ctx: &RequestContext<'_>, params: ScrollParams) -> Result<Ac
         .run(async {
             move_to(ctx, params.window_id, params.position).await?;
             let (dx, dy) = (params.dx, params.dy);
-            send_unit(ctx, Some(params.window_id), |reply| RuntimeCommand::PointerAxis {
-                dx,
-                dy,
-                reply,
+            send_unit(ctx, Some(params.window_id), |reply| {
+                RuntimeCommand::PointerAxis { dx, dy, reply }
             })
             .await
         })
@@ -189,11 +193,10 @@ pub async fn keypress(ctx: &RequestContext<'_>, params: KeypressParams) -> Resul
     // half-applied.
     let key = KeyCode::parse_chord(params.keys.keys())
         .map_err(|error| command_error(params.window_id, error))?;
-    let action_id = ctx.server.observer.record_action(
-        ActionKind::Keypress,
-        params.window_id,
-        None,
-    );
+    let action_id = ctx
+        .server
+        .observer
+        .record_action(ActionKind::Keypress, params.window_id, None);
     ctx.session
         .input()
         .run(async {
@@ -211,13 +214,12 @@ pub async fn keypress(ctx: &RequestContext<'_>, params: KeypressParams) -> Resul
 
 /// `key_down`: press and hold a key.
 pub async fn key_down(ctx: &RequestContext<'_>, params: KeyDownParams) -> Result<ActionResult> {
-    let key = KeyCode::parse(&params.key)
-        .map_err(|error| command_error(params.window_id, error))?;
-    let action_id = ctx.server.observer.record_action(
-        ActionKind::KeyDown,
-        params.window_id,
-        None,
-    );
+    let key =
+        KeyCode::parse(&params.key).map_err(|error| command_error(params.window_id, error))?;
+    let action_id = ctx
+        .server
+        .observer
+        .record_action(ActionKind::KeyDown, params.window_id, None);
     ctx.session
         .input()
         .run(async {
@@ -235,13 +237,12 @@ pub async fn key_down(ctx: &RequestContext<'_>, params: KeyDownParams) -> Result
 
 /// `key_up`: release a held key.
 pub async fn key_up(ctx: &RequestContext<'_>, params: KeyUpParams) -> Result<ActionResult> {
-    let key = KeyCode::parse(&params.key)
-        .map_err(|error| command_error(params.window_id, error))?;
-    let action_id = ctx.server.observer.record_action(
-        ActionKind::KeyUp,
-        params.window_id,
-        None,
-    );
+    let key =
+        KeyCode::parse(&params.key).map_err(|error| command_error(params.window_id, error))?;
+    let action_id = ctx
+        .server
+        .observer
+        .record_action(ActionKind::KeyUp, params.window_id, None);
     ctx.session
         .input()
         .run(async {
@@ -259,11 +260,10 @@ pub async fn key_up(ctx: &RequestContext<'_>, params: KeyUpParams) -> Result<Act
 
 /// `type_text`: type a string, reporting characters the keymap cannot produce.
 pub async fn type_text(ctx: &RequestContext<'_>, params: TypeTextParams) -> Result<TypeTextResult> {
-    let action_id = ctx.server.observer.record_action(
-        ActionKind::TypeText,
-        params.window_id,
-        None,
-    );
+    let action_id = ctx
+        .server
+        .observer
+        .record_action(ActionKind::TypeText, params.window_id, None);
     let mut skipped = Vec::new();
     ctx.session
         .input()
@@ -366,10 +366,12 @@ async fn button_event(
     button: Button,
     state: ButtonState,
 ) -> Result<()> {
-    send_unit(ctx, Some(window_id), |reply| RuntimeCommand::PointerButton {
-        button,
-        state,
-        reply,
+    send_unit(ctx, Some(window_id), |reply| {
+        RuntimeCommand::PointerButton {
+            button,
+            state,
+            reply,
+        }
     })
     .await
 }
@@ -390,9 +392,8 @@ async fn activate_if_needed(ctx: &RequestContext<'_>, window_id: Option<WindowId
     if snapshot.keyboard_focus.or(snapshot.active_window_id) == Some(window_id) {
         return Ok(());
     }
-    send_unit(ctx, Some(window_id), |reply| RuntimeCommand::ActivateWindow {
-        window_id,
-        reply,
+    send_unit(ctx, Some(window_id), |reply| {
+        RuntimeCommand::ActivateWindow { window_id, reply }
     })
     .await
 }
@@ -510,7 +511,11 @@ mod tests {
             Some(Point { x: 150, y: 100 }),
         ] {
             let position = resolve_pointer_position(None, rect, cursor);
-            assert_eq!(position.resolve(rect), Point { x: 150, y: 75 }, "{cursor:?}");
+            assert_eq!(
+                position.resolve(rect),
+                Point { x: 150, y: 75 },
+                "{cursor:?}"
+            );
         }
     }
 

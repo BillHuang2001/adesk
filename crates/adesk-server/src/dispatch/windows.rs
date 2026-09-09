@@ -208,11 +208,17 @@ mod tests {
     #[test]
     fn render_and_shutdown_failures_keep_their_code() {
         assert!(matches!(
-            command_error(None, adesk_core::Error::new(ErrorCode::RenderFailed, "boom")),
+            command_error(
+                None,
+                adesk_core::Error::new(ErrorCode::RenderFailed, "boom")
+            ),
             ServerError::Compositor(CompositorError::Render(_))
         ));
         assert!(matches!(
-            command_error(None, adesk_core::Error::new(ErrorCode::CaptureFailed, "boom")),
+            command_error(
+                None,
+                adesk_core::Error::new(ErrorCode::CaptureFailed, "boom")
+            ),
             ServerError::Compositor(CompositorError::Render(_))
         ));
         assert!(matches!(

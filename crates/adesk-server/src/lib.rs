@@ -47,7 +47,7 @@ pub mod subscriptions;
 /// Bridges between sibling crates' overlapping types.
 pub mod translate;
 
-pub use config::{ServerConfig, default_socket_path};
+pub use config::{default_socket_path, ServerConfig};
 pub use context::ServerContext;
 pub use error::{Result, ServerError};
 pub use server::{RunningServer, Server};

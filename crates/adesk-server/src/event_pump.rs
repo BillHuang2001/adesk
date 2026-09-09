@@ -131,7 +131,9 @@ fn prune_inspect_streams(context: &ServerContext) {
 /// Returns [`crate::ServerError::ShuttingDown`] when the compositor is gone.
 pub async fn resync(context: &ServerContext) -> Result<()> {
     let (reply, snapshot) = oneshot::channel();
-    context.compositor.send(RuntimeCommand::QueryState { reply })?;
+    context
+        .compositor
+        .send(RuntimeCommand::QueryState { reply })?;
     let snapshot = snapshot.await.map_err(|_| ServerError::ShuttingDown)?;
 
     let report = context

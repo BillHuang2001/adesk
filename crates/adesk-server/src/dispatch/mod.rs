@@ -18,23 +18,23 @@
 //! `unknown_method` AGP code before a request ever reaches this router. The
 //! match in `route` therefore needs no catch-all arm.
 
-/// §5.1 runtime methods (`ping`).
-pub mod runtime;
 /// §5.2 application methods (`list_apps`, `get_app`, `launch_app`).
 pub mod apps;
-/// §5.3 window methods (`list_windows`, `get_window`, `activate_window`,
-/// `close_window`, `get_focus`).
-pub mod windows;
 /// §5.4 capture and observation methods (`capture_window`, `capture_region`,
 /// `observe`, `wait_for_change`, `wait_for_quiet`).
 pub mod capture;
+/// §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`).
+pub mod events;
 /// §5.5 input methods (11 methods, all returning `ActionResult` except
 /// `type_text`).
 pub mod input;
-/// §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`).
-pub mod events;
 /// §5.7 human inspector (`inspect_capture`, `inspect_subscribe`).
 pub mod inspect;
+/// §5.1 runtime methods (`ping`).
+pub mod runtime;
+/// §5.3 window methods (`list_windows`, `get_window`, `activate_window`,
+/// `close_window`, `get_focus`).
+pub mod windows;
 
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};

@@ -9,8 +9,8 @@
 use std::sync::Arc;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::net::UnixStream;
 use tokio::sync::{mpsc, Semaphore};
 use tracing::Instrument;
 
@@ -88,7 +88,11 @@ impl Connection {
 }
 
 /// Drains the outbound queue into the socket, one NDJSON line per frame.
-async fn write_loop(mut half: OwnedWriteHalf, mut frames: mpsc::Receiver<Frame>, codec: NdjsonCodec) {
+async fn write_loop(
+    mut half: OwnedWriteHalf,
+    mut frames: mpsc::Receiver<Frame>,
+    codec: NdjsonCodec,
+) {
     while let Some(frame) = frames.recv().await {
         let mut line = match codec.encode_str(&frame) {
             Ok(line) => line,
@@ -183,8 +187,11 @@ async fn read_loop(
         let session = session.clone();
         let writer = writer.clone();
         let shutdown = context.shutdown.clone();
-        let span =
-            tracing::info_span!("request", id = request.id, method = request.method.method_name());
+        let span = tracing::info_span!(
+            "request",
+            id = request.id,
+            method = request.method.method_name()
+        );
         tokio::spawn(
             async move {
                 let _permit = permit;
@@ -231,7 +238,10 @@ pub struct ConnectionWriter {
 impl ConnectionWriter {
     /// Wraps the queue that feeds the connection's writer task.
     pub fn new(tx: mpsc::Sender<Frame>) -> ConnectionWriter {
-        ConnectionWriter { tx, codec: NdjsonCodec }
+        ConnectionWriter {
+            tx,
+            codec: NdjsonCodec,
+        }
     }
 
     /// Queues one frame, awaiting capacity (backpressure for responses).
@@ -240,7 +250,10 @@ impl ConnectionWriter {
     ///
     /// Returns [`ServerError::ShuttingDown`] when the writer task is gone.
     pub async fn send(&self, frame: Frame) -> Result<()> {
-        self.tx.send(frame).await.map_err(|_| ServerError::ShuttingDown)
+        self.tx
+            .send(frame)
+            .await
+            .map_err(|_| ServerError::ShuttingDown)
     }
 
     /// Queues one frame without waiting.
@@ -294,7 +307,10 @@ mod tests {
         let (tx, mut rx) = mpsc::channel(1);
         let writer = ConnectionWriter::new(tx);
         assert!(writer.try_send(response(1)));
-        assert!(!writer.try_send(response(2)), "full queue must drop, not block");
+        assert!(
+            !writer.try_send(response(2)),
+            "full queue must drop, not block"
+        );
         assert_eq!(rx.recv().await, Some(response(1)));
     }
 

@@ -50,8 +50,8 @@ pub async fn capture_region(
 
 /// `observe`: wait for a condition, then optionally attach an image.
 pub async fn observe(ctx: &RequestContext<'_>, params: ObserveParams) -> Result<ObserveResult> {
-    let mut spec = ObserveSpec::new(translate::observer_condition(params.until))
-        .timeout_ms(params.timeout_ms);
+    let mut spec =
+        ObserveSpec::new(translate::observer_condition(params.until)).timeout_ms(params.timeout_ms);
     if let Some(window_id) = params.window_id {
         spec = spec.window(window_id);
     }

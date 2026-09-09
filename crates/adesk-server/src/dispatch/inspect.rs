@@ -34,7 +34,10 @@ pub async fn inspect_capture(
     // empty set is legal and renders the plain composition.
     let inspector = Inspector::new(params.overlays);
     let snapshot = refresh(ctx.server).await?;
-    let input = ctx.server.inspection.inspection_input(inspector.overlays())?;
+    let input = ctx
+        .server
+        .inspection
+        .inspection_input(inspector.overlays())?;
     let request = InspectionRequest {
         region: params.region,
         max_dimension: params.max_dimension,
@@ -96,7 +99,10 @@ async fn inspect_loop(
                     EventKind::InspectFrame,
                     seq,
                     ts_ms,
-                    EventPayload::InspectFrame(InspectFrameEvent { subscription_id, image }),
+                    EventPayload::InspectFrame(InspectFrameEvent {
+                        subscription_id,
+                        image,
+                    }),
                 ));
                 match sink.try_send(frame) {
                     Ok(()) => {}

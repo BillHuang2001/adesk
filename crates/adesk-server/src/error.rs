@@ -467,7 +467,10 @@ mod tests {
                 },
                 ErrorCode::ProtocolVersionMismatch,
             ),
-            (adesk_proto::ProtoError::Json(json), ErrorCode::InvalidRequest),
+            (
+                adesk_proto::ProtoError::Json(json),
+                ErrorCode::InvalidRequest,
+            ),
             (
                 adesk_proto::ProtoError::Base64(base64),
                 ErrorCode::InvalidRequest,
