@@ -36,6 +36,8 @@ use tokio::sync::oneshot;
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 
+use super::windows::{command_error, state, unknown_window};
+
 /// Server policy for `double_click`.
 ///
 /// `docs/protocol.md` §5.5 leaves the double-click interval to the runtime: the
@@ -186,7 +188,7 @@ pub async fn keypress(ctx: &RequestContext<'_>, params: KeypressParams) -> Resul
     // released chord as `invalid_request`, so the request never reaches the seat
     // half-applied.
     let key = KeyCode::parse_chord(params.keys.keys())
-        .map_err(|error| super::capture::command_error(params.window_id, error))?;
+        .map_err(|error| command_error(params.window_id, error))?;
     let action_id = ctx.server.observer.record_action(
         ActionKind::Keypress,
         params.window_id,
@@ -210,7 +212,7 @@ pub async fn keypress(ctx: &RequestContext<'_>, params: KeypressParams) -> Resul
 /// `key_down`: press and hold a key.
 pub async fn key_down(ctx: &RequestContext<'_>, params: KeyDownParams) -> Result<ActionResult> {
     let key = KeyCode::parse(&params.key)
-        .map_err(|error| super::capture::command_error(params.window_id, error))?;
+        .map_err(|error| command_error(params.window_id, error))?;
     let action_id = ctx.server.observer.record_action(
         ActionKind::KeyDown,
         params.window_id,
@@ -234,7 +236,7 @@ pub async fn key_down(ctx: &RequestContext<'_>, params: KeyDownParams) -> Result
 /// `key_up`: release a held key.
 pub async fn key_up(ctx: &RequestContext<'_>, params: KeyUpParams) -> Result<ActionResult> {
     let key = KeyCode::parse(&params.key)
-        .map_err(|error| super::capture::command_error(params.window_id, error))?;
+        .map_err(|error| command_error(params.window_id, error))?;
     let action_id = ctx.server.observer.record_action(
         ActionKind::KeyUp,
         params.window_id,
@@ -283,11 +285,11 @@ pub async fn type_text(ctx: &RequestContext<'_>, params: TypeTextParams) -> Resu
 /// Window geometry — never a hard-coded origin — is the authority for
 /// window-relative coordinates (§2).
 async fn window_rect(ctx: &RequestContext<'_>, window_id: WindowId) -> Result<Rect> {
-    let snapshot = super::capture::query_state(ctx).await?;
+    let snapshot = state(ctx).await?;
     snapshot
         .window(window_id)
         .map(|window| window.geometry)
-        .ok_or_else(|| super::capture::unknown_window(window_id))
+        .ok_or_else(|| unknown_window(window_id))
 }
 
 /// Applies the §2 default rule for an optional window-relative position.
@@ -381,9 +383,9 @@ async fn activate_if_needed(ctx: &RequestContext<'_>, window_id: Option<WindowId
     let Some(window_id) = window_id else {
         return Ok(());
     };
-    let snapshot = super::capture::query_state(ctx).await?;
+    let snapshot = state(ctx).await?;
     if snapshot.window(window_id).is_none() {
-        return Err(super::capture::unknown_window(window_id));
+        return Err(unknown_window(window_id));
     }
     if snapshot.keyboard_focus.or(snapshot.active_window_id) == Some(window_id) {
         return Ok(());
@@ -438,7 +440,7 @@ fn is_unmappable_key(error: &ServerError) -> bool {
 
 /// Sends one result-bearing compositor command and awaits its reply.
 ///
-/// The reply carries [`adesk_core::Error`]; [`super::capture::command_error`]
+/// The reply carries [`adesk_core::Error`]; `dispatch::windows::command_error`
 /// preserves its AGP code. A dropped reply means the compositor thread is gone,
 /// which is reported as `shutting_down`.
 async fn send_unit(
@@ -450,7 +452,7 @@ async fn send_unit(
     ctx.server.compositor.send(make(reply))?;
     match response.await {
         Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(super::capture::command_error(window_id, error)),
+        Ok(Err(error)) => Err(command_error(window_id, error)),
         Err(_) => Err(ServerError::ShuttingDown),
     }
 }

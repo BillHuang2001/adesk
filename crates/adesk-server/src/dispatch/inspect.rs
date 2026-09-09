@@ -118,9 +118,13 @@ async fn inspect_loop(
                 return;
             }
         }
-        // `0` means "push every refresh" (no throttle).
+        // `0` means "push every refresh" (no throttle); yielding still keeps the
+        // loop cooperative, so a zero-interval subscription cannot starve the
+        // rest of the runtime.
         if min_interval_ms > 0 {
             tokio::time::sleep(Duration::from_millis(min_interval_ms)).await;
+        } else {
+            tokio::task::yield_now().await;
         }
     }
 }

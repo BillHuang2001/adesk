@@ -5,13 +5,13 @@
 //! image matches the observation the client receives (`docs/architecture.md` §6).
 //! Waits time out as *observations* (`timed_out: true`), never as errors.
 //!
-//! The command/state helpers here are shared with the sibling dispatch groups:
-//! [`query_state`] and [`command_error`] by `dispatch::input` (pointer
-//! coordinates and command failures) and [`scale_from`] by `dispatch::inspect`
-//! (the downscale factor reported in `ImagePayload::scale`).
+//! The compositor-bridge helpers live in `dispatch::windows` (`state`,
+//! `command_error`, `unknown_window`); `scale_from` stays here because only this
+//! module and `dispatch::inspect` need the downscale factor reported in
+//! `ImagePayload::scale`.
 
-use adesk_compositor::{CompositorError, RenderedFrame, RuntimeCommand, StateSnapshot};
-use adesk_core::{ErrorCode, ImageBuffer, Rect, Size, WindowId, WindowInfo};
+use adesk_compositor::{RenderedFrame, RuntimeCommand};
+use adesk_core::{ImageBuffer, Rect, Size, WindowId, WindowInfo};
 use adesk_observer::{ObserveSpec, QuietSpec, WaitSpec};
 use adesk_proto::{
     CaptureRegionParams, CaptureResult, CaptureWindowParams, ImageFormat, ObserveParams,
@@ -23,6 +23,8 @@ use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 use crate::images;
 use crate::translate;
+
+use super::windows::{command_error, state, unknown_window};
 
 /// `capture_window`: render a window's current pixels (crop/downscale optional).
 pub async fn capture_window(
@@ -156,7 +158,7 @@ async fn capture_result(
     format: ImageFormat,
     frame: RenderedFrame,
 ) -> Result<CaptureResult> {
-    let snapshot = query_state(ctx).await?;
+    let snapshot = state(ctx).await?;
     let window = snapshot
         .window(window_id)
         .cloned()
@@ -187,7 +189,7 @@ async fn observation_image(
     };
 
     let frame = render_window(ctx, window_id, region, max_dimension).await?;
-    let snapshot = query_state(ctx).await?;
+    let snapshot = state(ctx).await?;
     let scale = match snapshot.window(window_id) {
         Some(window) => scale_from(source_size(window, region), &frame.image),
         // The window disappeared between the render and the state query; the
@@ -208,50 +210,8 @@ async fn observed_window(
     if window_id.is_some() {
         return Ok(window_id);
     }
-    let snapshot = query_state(ctx).await?;
+    let snapshot = state(ctx).await?;
     Ok(snapshot.active_window_id.or(snapshot.keyboard_focus))
-}
-
-/// Current compositor state (window list, focus, sequence watermark).
-///
-/// Shared with `dispatch::input`, which resolves window-relative coordinates
-/// through the window model's geometry.
-pub(super) async fn query_state(ctx: &RequestContext<'_>) -> Result<StateSnapshot> {
-    let (reply, response) = oneshot::channel();
-    ctx.server.compositor.send(RuntimeCommand::QueryState { reply })?;
-    // `QueryState` is infallible: only a vanished compositor can drop the reply.
-    response.await.map_err(|_| ServerError::ShuttingDown)
-}
-
-/// Maps a compositor command failure into [`ServerError`].
-///
-/// Command replies carry [`adesk_core::Error`], which already holds the AGP code
-/// the compositor chose. The server re-wraps it in the [`CompositorError`]
-/// variant that maps back to that code, so `unknown_window`, `invalid_request`
-/// and `render_failed` survive the boundary (`crates/adesk-server/CONTEXT.md`,
-/// error mapping) instead of collapsing into `internal`.
-///
-/// `window_id` is the window the command targeted, used to describe an
-/// `unknown_window` failure; `None` keeps the original message.
-pub(super) fn command_error(window_id: Option<WindowId>, error: adesk_core::Error) -> ServerError {
-    let error = match error.code {
-        ErrorCode::UnknownWindow => match window_id {
-            Some(window_id) => CompositorError::UnknownWindow(window_id),
-            None => CompositorError::Internal(error.message),
-        },
-        ErrorCode::InvalidRequest => CompositorError::InvalidRequest(error.message),
-        ErrorCode::RenderFailed | ErrorCode::CaptureFailed => {
-            CompositorError::Render(error.message)
-        }
-        ErrorCode::ShuttingDown => CompositorError::Stopped,
-        _ => CompositorError::Internal(error.message),
-    };
-    ServerError::Compositor(error)
-}
-
-/// The `unknown_window` failure for a window the compositor does not know.
-pub(super) fn unknown_window(window_id: WindowId) -> ServerError {
-    ServerError::Compositor(CompositorError::UnknownWindow(window_id))
 }
 
 /// The size the compositor rendered from: the requested crop, else the window.
@@ -314,54 +274,5 @@ mod tests {
     #[test]
     fn scale_of_an_empty_source_is_full_resolution() {
         assert!((scale_from(Size::ZERO, &ImageBuffer::new_rgba(0, 0)) - 1.0).abs() < f64::EPSILON);
-    }
-
-    #[test]
-    fn unknown_window_keeps_the_unknown_window_variant() {
-        // `CompositorError::UnknownWindow` is the variant that maps to the AGP
-        // `unknown_window` code; the mapping itself lives in `crate::error`.
-        assert!(matches!(
-            unknown_window(WindowId(99)),
-            ServerError::Compositor(CompositorError::UnknownWindow(WindowId(99)))
-        ));
-    }
-
-    #[test]
-    fn command_errors_keep_the_compositor_variant() {
-        assert!(matches!(
-            command_error(
-                Some(WindowId(99)),
-                adesk_core::Error::new(ErrorCode::UnknownWindow, "unknown window 99"),
-            ),
-            ServerError::Compositor(CompositorError::UnknownWindow(WindowId(99)))
-        ));
-        assert!(matches!(
-            command_error(
-                None,
-                adesk_core::Error::new(ErrorCode::InvalidRequest, "bad key name"),
-            ),
-            ServerError::Compositor(CompositorError::InvalidRequest(_))
-        ));
-        assert!(matches!(
-            command_error(
-                None,
-                adesk_core::Error::new(ErrorCode::RenderFailed, "boom"),
-            ),
-            ServerError::Compositor(CompositorError::Render(_))
-        ));
-        // An unmapped code must not be silently reported as a client error.
-        assert!(matches!(
-            command_error(None, adesk_core::Error::new(ErrorCode::Busy, "busy")),
-            ServerError::Compositor(CompositorError::Internal(_))
-        ));
-    }
-
-    #[test]
-    fn command_error_without_a_window_keeps_the_message() {
-        let error = command_error(
-            None,
-            adesk_core::Error::new(ErrorCode::UnknownWindow, "unknown window 42"),
-        );
-        assert!(error.to_string().contains("unknown window 42"));
     }
 }

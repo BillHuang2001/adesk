@@ -3,6 +3,11 @@
 //! Window state is read from the compositor (`QueryState`); `activate_window`
 //! and `close_window` are runtime-native — they change compositor state
 //! directly and never synthesize input (`docs/protocol.md` §5.3).
+//!
+//! This module is also the canonical home of the compositor-bridge helpers the
+//! sibling dispatch groups share: `state` (§5.2/§5.3/§5.4/§5.5 state reads),
+//! `command_error` (command failures) and `unknown_window`. `capture.rs` and
+//! `input.rs` import them from here so each has exactly one implementation.
 
 use adesk_compositor::{CompositorError, RuntimeCommand, StateSnapshot};
 use adesk_core::{ErrorCode, WindowId};
@@ -18,21 +23,22 @@ use crate::error::{Result, ServerError};
 
 /// Reads the compositor's current state through `QueryState`.
 ///
-/// `pub(super)` so §5.2's `launch_app` can stamp its `app_launched` event with
-/// the compositor's sequence watermark and clock.
+/// The canonical state read of every dispatch group: `pub(super)` so §5.2's
+/// `launch_app` (sequence watermark/clock), §5.4's captures and §5.5's
+/// window-relative coordinates all use this one implementation.
 ///
 /// # Errors
 ///
-/// [`ServerError::ShuttingDown`] when the command channel is closed and
-/// [`ServerError::Internal`] when the compositor drops the reply.
+/// [`ServerError::ShuttingDown`] when the command channel is closed and when the
+/// compositor drops the reply — `QueryState` is infallible, so a dropped reply
+/// can only mean the compositor thread is gone, i.e. the runtime is shutting
+/// down (`crates/adesk-server/CONTEXT.md`, error mapping).
 pub(super) async fn state(ctx: &RequestContext<'_>) -> Result<StateSnapshot> {
     let (reply, answer) = oneshot::channel();
     ctx.server
         .compositor
         .send(RuntimeCommand::QueryState { reply })?;
-    answer
-        .await
-        .map_err(|_| ServerError::Internal("compositor dropped the QueryState reply".to_owned()))
+    answer.await.map_err(|_| ServerError::ShuttingDown)
 }
 
 /// `list_windows`: all live windows plus the active window id.
@@ -80,7 +86,7 @@ pub async fn activate_window(
     })?;
     match answer.await {
         Ok(Ok(())) => Ok(ActionResult { action_id }),
-        Ok(Err(error)) => Err(command_error(params.window_id, error)),
+        Ok(Err(error)) => Err(command_error(Some(params.window_id), error)),
         Err(_) => Err(ServerError::Internal(
             "compositor dropped the activate_window reply".to_owned(),
         )),
@@ -104,7 +110,7 @@ pub async fn close_window(
     })?;
     match answer.await {
         Ok(Ok(())) => Ok(ActionResult { action_id }),
-        Ok(Err(error)) => Err(command_error(params.window_id, error)),
+        Ok(Err(error)) => Err(command_error(Some(params.window_id), error)),
         Err(_) => Err(ServerError::Internal(
             "compositor dropped the close_window reply".to_owned(),
         )),
@@ -123,19 +129,38 @@ pub async fn get_focus(ctx: &RequestContext<'_>, params: GetFocusParams) -> Resu
     })
 }
 
-/// Maps a compositor command failure (`adesk_core::Error`) onto the server error
-/// type, keeping the AGP code of the failures §5.3 can produce.
-fn command_error(window_id: WindowId, error: adesk_core::Error) -> ServerError {
-    match error.code {
-        ErrorCode::UnknownWindow => {
-            ServerError::Compositor(CompositorError::UnknownWindow(window_id))
+/// Maps a compositor command failure into [`ServerError`].
+///
+/// Command replies carry [`adesk_core::Error`], which already holds the AGP code
+/// the compositor chose. The server re-wraps it in the [`CompositorError`]
+/// variant that maps back to that code, so `unknown_window`, `invalid_request`,
+/// `render_failed` and `shutting_down` survive the boundary
+/// (`crates/adesk-server/CONTEXT.md`, error mapping) instead of collapsing into
+/// `internal`. This is the single mapping used by every dispatch group (§5.3,
+/// §5.4, §5.5).
+///
+/// `window_id` is the window the command targeted, used to describe an
+/// `unknown_window` failure; `None` keeps the original message.
+pub(super) fn command_error(window_id: Option<WindowId>, error: adesk_core::Error) -> ServerError {
+    let error = match error.code {
+        ErrorCode::UnknownWindow => match window_id {
+            Some(window_id) => CompositorError::UnknownWindow(window_id),
+            None => CompositorError::Internal(error.message),
+        },
+        ErrorCode::InvalidRequest => CompositorError::InvalidRequest(error.message),
+        ErrorCode::RenderFailed | ErrorCode::CaptureFailed => {
+            CompositorError::Render(error.message)
         }
-        ErrorCode::InvalidRequest => {
-            ServerError::Compositor(CompositorError::InvalidRequest(error.message))
-        }
+        ErrorCode::ShuttingDown => CompositorError::Stopped,
         // Anything else is a runtime fault, not a client error.
-        _ => ServerError::Internal(error.message),
-    }
+        _ => CompositorError::Internal(error.message),
+    };
+    ServerError::Compositor(error)
+}
+
+/// The `unknown_window` failure for a window the compositor does not know.
+pub(super) fn unknown_window(window_id: WindowId) -> ServerError {
+    ServerError::Compositor(CompositorError::UnknownWindow(window_id))
 }
 
 #[cfg(test)]
@@ -144,7 +169,22 @@ mod tests {
 
     #[test]
     fn unknown_window_keeps_the_requested_id() {
-        let error = command_error(WindowId(7), adesk_core::Error::unknown_window(WindowId(7)));
+        // `CompositorError::UnknownWindow` is the variant that maps to the AGP
+        // `unknown_window` code; the mapping itself lives in `crate::error`.
+        for window_id in [WindowId(7), WindowId(99)] {
+            assert!(matches!(
+                unknown_window(window_id),
+                ServerError::Compositor(CompositorError::UnknownWindow(id)) if id == window_id
+            ));
+        }
+    }
+
+    #[test]
+    fn unknown_window_command_failure_keeps_the_requested_id() {
+        let error = command_error(
+            Some(WindowId(7)),
+            adesk_core::Error::unknown_window(WindowId(7)),
+        );
         assert!(matches!(
             error,
             ServerError::Compositor(CompositorError::UnknownWindow(WindowId(7)))
@@ -154,7 +194,7 @@ mod tests {
     #[test]
     fn invalid_request_stays_a_client_error() {
         let error = command_error(
-            WindowId(7),
+            Some(WindowId(7)),
             adesk_core::Error::invalid_request("no focused window"),
         );
         match error {
@@ -166,8 +206,44 @@ mod tests {
     }
 
     #[test]
+    fn render_and_shutdown_failures_keep_their_code() {
+        assert!(matches!(
+            command_error(None, adesk_core::Error::new(ErrorCode::RenderFailed, "boom")),
+            ServerError::Compositor(CompositorError::Render(_))
+        ));
+        assert!(matches!(
+            command_error(None, adesk_core::Error::new(ErrorCode::CaptureFailed, "boom")),
+            ServerError::Compositor(CompositorError::Render(_))
+        ));
+        assert!(matches!(
+            command_error(
+                Some(WindowId(7)),
+                adesk_core::Error::new(ErrorCode::ShuttingDown, "stopping"),
+            ),
+            ServerError::Compositor(CompositorError::Stopped)
+        ));
+    }
+
+    #[test]
     fn other_failures_are_internal() {
-        let error = command_error(WindowId(7), adesk_core::Error::internal("boom"));
-        assert!(matches!(error, ServerError::Internal(message) if message == "boom"));
+        // An unmapped code must not be silently reported as a client error.
+        let error = command_error(Some(WindowId(7)), adesk_core::Error::internal("boom"));
+        assert!(matches!(
+            error,
+            ServerError::Compositor(CompositorError::Internal(message)) if message == "boom"
+        ));
+        assert!(matches!(
+            command_error(None, adesk_core::Error::new(ErrorCode::Busy, "busy")),
+            ServerError::Compositor(CompositorError::Internal(_))
+        ));
+    }
+
+    #[test]
+    fn command_error_without_a_window_keeps_the_message() {
+        let error = command_error(
+            None,
+            adesk_core::Error::new(ErrorCode::UnknownWindow, "unknown window 42"),
+        );
+        assert!(error.to_string().contains("unknown window 42"));
     }
 }
