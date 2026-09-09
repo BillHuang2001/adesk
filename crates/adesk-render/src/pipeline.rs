@@ -7,7 +7,7 @@
 use adesk_core::Rect;
 use smithay::backend::renderer::element::RenderElement;
 use smithay::backend::renderer::{
-    Bind, Color32F, ExportMem, Frame, ImportAll, Renderer, TextureMapping,
+    Bind, Color32F, ExportMem, Frame, ImportAll, Renderer,
 };
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::Resource;
@@ -44,8 +44,9 @@ use crate::scene::Scene;
 /// 6. `frame.finish()` and wait for the returned sync point;
 /// 7. `renderer.copy_framebuffer(&framebuffer, target_rect, READBACK_FORMAT)` →
 ///    mapping, `renderer.map_texture(&mapping)` → bytes,
-///    [`crate::image_from_readback`] (honours `TextureMapping::flipped`, which is
-///    `true` for GL and `false` for pixman);
+///    [`crate::image_from_readback`] (the raw rows are consumed as top-down scene
+///    order on every backend; see the call site for why
+///    `TextureMapping::flipped` is deliberately ignored);
 /// 8. `crop` then `downscale` per [`RenderConfig`] (crop is given in scene
 ///    coordinates and is translated to target coordinates here);
 /// 9. `RenderedFrame { image, commit_seq: scene.commit_seq(), damage }` where
@@ -146,7 +147,6 @@ where
             region: readback_region,
             source: Box::new(err),
         })?;
-    let flipped = mapping.flipped();
     let bytes = renderer
         .map_texture(&mapping)
         .map_err(|err| RenderError::Readback {
@@ -154,12 +154,20 @@ where
             source: Box::new(err),
         })?;
     // `Abgr8888` is four bytes per pixel, so a full-width row is `width * 4`.
+    //
+    // `TextureMapping::flipped()` is deliberately NOT consulted: it describes the
+    // mapping relative to the renderer's *native* origin (lower-left for GL), not
+    // relative to the scene. Both backends already hand back byte-identical rows
+    // that are top-down in scene space — GL's projection applies `flip180`, so
+    // scene `y = 0` lands in framebuffer row 0 and therefore in the first readback
+    // row. Un-flipping here would mirror every GL capture vertically. Smithay's
+    // own readback consumers likewise write the mapped bytes out verbatim.
     let image = image_from_readback(
         bytes,
         target_size.w,
         target_size.h,
         target_size.w.saturating_mul(4),
-        flipped,
+        /* flipped = */ false,
     )?;
 
     let image = match config.crop {

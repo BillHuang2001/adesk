@@ -23,7 +23,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-use adesk_core::{ImageBuffer, Rect, Region, Size as CoreSize};
+use adesk_core::{Rect, Region, Size as CoreSize};
 use adesk_render::{
     create_target, render_scene, RenderConfig, RenderError, RenderedFrame, Scene, SceneNode,
     TARGET_FORMAT,
@@ -554,18 +554,6 @@ fn gl_renderer() -> Option<(EGLDisplay, GlesRenderer)> {
     }
 }
 
-/// Vertical mirror of an image (row `y` becomes row `height - 1 - y`).
-fn vertical_mirror(image: &ImageBuffer) -> ImageBuffer {
-    let (w, h) = (image.width, image.height);
-    let mut data = Vec::with_capacity((w * h * 4) as usize);
-    for y in (0..h).rev() {
-        for x in 0..w {
-            data.extend_from_slice(&image.pixel(x, y).expect("mirror stays in bounds"));
-        }
-    }
-    ImageBuffer::from_rgba(w, h, data).expect("mirrored image is tightly packed")
-}
-
 /// Renders the canonical fixture with the software renderer, returning the frame
 /// and the recorded `draw` arguments.
 fn pixman_reference() -> (Fixture, RenderedFrame) {
@@ -622,29 +610,26 @@ fn gl_renders_canonical_scene() {
     assert_eq!(frame.commit_seq, reference.commit_seq);
     assert_eq!(frame.damage, reference.damage);
 
-    // Pixel orientation is NOT: Smithay's GL renderer maps physical `y = 0` to
-    // the *bottom* of the framebuffer (`flip180` in `GlesRenderer::render`:
-    // `gl_Position.y = 2y/h - 1`), while the pixman renderer maps it to the top
-    // row of the target image. `render_scene` normalises only the readback row
-    // order, via Smithay's documented `TextureMapping::flipped()` (`true` for
-    // `GlesMapping`, `false` for `PixmanMapping`), which is the only
-    // renderer-agnostic signal available. The GL image is therefore the exact
-    // vertical mirror of the software image for identical scene coordinates;
-    // reconciling the two conventions is the compositor's job (Smithay's own
-    // `OutputDamageTracker` is GL-oriented).
+    // Pixel orientation is backend independent too. GL's projection applies
+    // `flip180` (`gl_Position.y = 2y/h - 1`), so physical/scene `y = 0` lands in
+    // framebuffer row 0 and therefore in the *first* row of `glReadPixels`
+    // output — the same top-down scene order pixman writes. The readback rows of
+    // both renderers are byte-identical for identical scene coordinates.
+    // `TextureMapping::flipped()` is renderer-native-relative (GL's native origin
+    // is lower-left), not a canonical-orientation signal, so `render_scene`
+    // deliberately ignores it; un-flipping here would mirror GL captures.
     assert_eq!(
-        frame.image,
-        vertical_mirror(&reference.image),
-        "GL image must be the vertical mirror of the software image"
+        frame.image, reference.image,
+        "GL image must equal the software reference exactly (top-down scene rows)"
     );
 
-    // The mirrored image still shows the canonical layering (blue over green
-    // over red) and never leaks the clear color.
+    // The image shows the canonical layering (blue over green over red) and
+    // never leaks the clear color.
     assert_eq!(pixel(&frame, 0, 0), RED8);
     assert_eq!(pixel(&frame, 2, 2), GREEN8);
     assert_eq!(pixel(&frame, 2, 5), GREEN8, "green still covers scene rows 2..5");
-    assert_eq!(pixel(&frame, 4, 2), BLUE8, "mirror of blue at target (4, 5)");
-    assert_eq!(pixel(&frame, 2, 6), RED8, "mirror of red past the green node");
+    assert_eq!(pixel(&frame, 4, 4), BLUE8, "blue at target (4, 4)");
+    assert_eq!(pixel(&frame, 2, 6), RED8, "red past the green node");
     for y in 0..8 {
         for x in 0..8 {
             assert_ne!(pixel(&frame, x, y), CLEAR, "clear color leaked at ({x},{y})");
@@ -653,6 +638,6 @@ fn gl_renders_canonical_scene() {
 
     eprintln!(
         "GL test ran: surfaceless EGL + GlesRenderer matched the software path \
-         up to the renderer's y convention"
+         exactly (identical pixels)"
     );
 }
