@@ -76,7 +76,6 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 ## Known Issues
 
-- `fixtures::launch_app_starts_helper_window` fails: `RuntimeEvent::WindowCreated.launch_id` is always `None` because no AGP command feeds the compositor's `WmBridge::note_launch` (`crates/adesk-compositor/src/wm.rs`, kept under `#[allow(dead_code)]`) and the server's `Correlator` is never applied to events. Sibling blocker in `adesk-compositor`/`adesk-server`; the capstone correlates launches via pid instead.
 - `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: `adesk-compositor`'s `XdgShellHandler::new_popup` (`crates/adesk-compositor/src/protocols/xdg_shell.rs`) never sends the initial `xdg_popup.configure`. Sibling blocker in `adesk-compositor`.
 
 ## Notes for Agents
