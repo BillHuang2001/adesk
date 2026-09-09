@@ -79,11 +79,7 @@ use std::{
 use adesk_core::{AppId, LaunchId, Point, Position, Rect, Region, Size, WindowId, WindowInfo};
 use adesk_wm::{MapRequest, SurfaceKey, WmAction};
 use smithay::{
-    reexports::wayland_server::{
-        backend::ObjectId,
-        protocol::wl_surface::WlSurface,
-        Resource,
-    },
+    reexports::wayland_server::{backend::ObjectId, protocol::wl_surface::WlSurface, Resource},
     wayland::{
         compositor::with_states,
         shell::xdg::{PopupSurface, ToplevelSurface, XdgToplevelSurfaceData},
@@ -115,20 +111,6 @@ pub(crate) struct WmDecision {
     pub(crate) actions: Vec<WmAction>,
     /// Keyboard focus before the policy call.
     pub(crate) previous_focus: Option<WindowId>,
-}
-
-impl WmDecision {
-    /// A decision with no actions.
-    fn none() -> WmDecision {
-        WmDecision::default()
-    }
-
-    /// Whether the decision actually moves the active window.
-    pub(crate) fn activates(&self) -> bool {
-        self.actions
-            .iter()
-            .any(|action| matches!(action, WmAction::Activate { .. } | WmAction::ActivatePrevious { .. }))
-    }
 }
 
 /// Result of a toplevel map.
@@ -274,13 +256,8 @@ impl<K: Clone + Eq + Hash> SurfaceRegistry<K> {
         }
         let key = SurfaceKey::new(self.next_surface_key);
         self.next_surface_key += 1;
-        self.toplevels.insert(
-            surface,
-            ToplevelSlot {
-                key,
-                window: None,
-            },
-        );
+        self.toplevels
+            .insert(surface, ToplevelSlot { key, window: None });
         key
     }
 
@@ -439,8 +416,9 @@ impl LaunchLedger {
 
     /// Drop launches that are older than the correlation window.
     fn expire(&mut self, now: Instant) {
-        self.pending
-            .retain(|launch| now.saturating_duration_since(launch.noted_at) <= LAUNCH_CORRELATION_TIMEOUT);
+        self.pending.retain(|launch| {
+            now.saturating_duration_since(launch.noted_at) <= LAUNCH_CORRELATION_TIMEOUT
+        });
     }
 
     /// Find the launch a freshly mapped window belongs to.
@@ -463,8 +441,7 @@ impl LaunchLedger {
             if let Some(launch) = self
                 .pending
                 .iter()
-                .filter(|launch| fresh(&launch) && launch.pid == Some(pid))
-                .next_back()
+                .rfind(|launch| fresh(launch) && launch.pid == Some(pid))
             {
                 return Some(launch.launch_id);
             }
@@ -473,8 +450,7 @@ impl LaunchLedger {
             if let Some(launch) = self
                 .pending
                 .iter()
-                .filter(|launch| fresh(&launch) && app_ids_match(&launch.app_id, app_id))
-                .next_back()
+                .rfind(|launch| fresh(launch) && app_ids_match(&launch.app_id, app_id))
             {
                 return Some(launch.launch_id);
             }
@@ -483,8 +459,7 @@ impl LaunchLedger {
             if let Some(launch) = self
                 .pending
                 .iter()
-                .filter(|launch| fresh(&launch) && title_matches(&launch.app_id, title))
-                .next_back()
+                .rfind(|launch| fresh(launch) && title_matches(&launch.app_id, title))
             {
                 return Some(launch.launch_id);
             }
@@ -497,6 +472,9 @@ impl LaunchLedger {
         self.pending.retain(|launch| launch.launch_id != launch_id);
     }
 
+    /// Number of pending launches. Test-only: no production path inspects the
+    /// ledger's size, it only records, correlates and expires.
+    #[cfg(test)]
     fn len(&self) -> usize {
         self.pending.len()
     }
@@ -504,7 +482,11 @@ impl LaunchLedger {
 
 /// The last dot-separated segment of a desktop-file id (`"firefox"`).
 fn app_id_tail(app_id: &AppId) -> &str {
-    app_id.as_str().rsplit('.').next().unwrap_or(app_id.as_str())
+    app_id
+        .as_str()
+        .rsplit('.')
+        .next()
+        .unwrap_or(app_id.as_str())
 }
 
 /// App ids match when they are equal or share their tail (`StartupWMClass`).
@@ -605,7 +587,11 @@ impl WmBridge {
 
     /// All known windows in creation order, for `QueryState`.
     pub(crate) fn windows(&self) -> Vec<WindowInfo> {
-        self.manager.windows().iter().map(|record| record.info()).collect()
+        self.manager
+            .windows()
+            .iter()
+            .map(|record| record.info())
+            .collect()
     }
 
     /// The rect every mapped window is tiled to.
@@ -621,12 +607,16 @@ impl WmBridge {
 
     /// The root `wl_surface` of a window, for keyboard/pointer focus.
     pub(crate) fn surface_of(&self, id: WindowId) -> Option<WlSurface> {
-        self.toplevel_of(id).map(|toplevel| toplevel.wl_surface().clone())
+        self.toplevel_of(id)
+            .map(|toplevel| toplevel.wl_surface().clone())
     }
 
     /// Per-window commit counter of the last observed commit.
     pub(crate) fn last_commit_seq(&self, id: WindowId) -> u64 {
-        self.manager.window(id).map(|record| record.last_commit_seq).unwrap_or(0)
+        self.manager
+            .window(id)
+            .map(|record| record.last_commit_seq)
+            .unwrap_or(0)
     }
 
     /// Record that the app registry spawned a process, so a toplevel mapping shortly
@@ -698,9 +688,9 @@ impl WmBridge {
             .map(|slot| slot.key)
             .unwrap_or_else(|| self.register_toplevel(toplevel));
         let (app_id, title) = toplevel_metadata(toplevel);
-        let launch_id = self
-            .launches
-            .correlate(app_id.as_ref(), pid, title.as_deref(), Instant::now());
+        let launch_id =
+            self.launches
+                .correlate(app_id.as_ref(), pid, title.as_deref(), Instant::now());
 
         let request = MapRequest {
             surface_key: key,
@@ -739,11 +729,12 @@ impl WmBridge {
     }
 
     /// Drop a toplevel and every popup it owns.
-    pub(crate) fn destroy_toplevel(&mut self, toplevel: &ToplevelSurface) -> Option<DestroyedWindow> {
+    pub(crate) fn destroy_toplevel(
+        &mut self,
+        toplevel: &ToplevelSurface,
+    ) -> Option<DestroyedWindow> {
         let surface = toplevel.wl_surface().id();
-        if self.surfaces.slot(&surface).is_none() {
-            return None;
-        }
+        self.surfaces.slot(&surface)?;
         let (window_id, popup_ids) = self.surfaces.unbind_toplevel(&surface);
         self.toplevels.remove(&surface);
         for popup_id in &popup_ids {
@@ -788,7 +779,10 @@ impl WmBridge {
     pub(crate) fn title_changed(&mut self, toplevel: &ToplevelSurface) -> Option<TitleChange> {
         let window_id = self.window_for_surface(toplevel.wl_surface())?;
         let (_, title) = toplevel_metadata(toplevel);
-        let current = self.manager.window(window_id).and_then(|record| record.title.clone());
+        let current = self
+            .manager
+            .window(window_id)
+            .and_then(|record| record.title.clone());
         if current == title {
             return None;
         }
@@ -819,9 +813,9 @@ impl WmBridge {
             None
         } else {
             let pid = self.manager.window(window_id).and_then(|record| record.pid);
-            let launch_id = self
-                .launches
-                .correlate(app_id.as_ref(), pid, title.as_deref(), Instant::now());
+            let launch_id =
+                self.launches
+                    .correlate(app_id.as_ref(), pid, title.as_deref(), Instant::now());
             if let Some(launch_id) = launch_id {
                 self.launches.take(launch_id);
                 self.launch_ids.insert(window_id, launch_id);
@@ -838,11 +832,13 @@ impl WmBridge {
     /// Track a popup under its owner window.
     ///
     /// `offset` is the popup's window-relative origin (from the positioner geometry).
-    pub(crate) fn popup_added(&mut self, popup: &PopupSurface, offset: (i32, i32)) -> Option<PopupAdded> {
+    pub(crate) fn popup_added(
+        &mut self,
+        popup: &PopupSurface,
+        offset: (i32, i32),
+    ) -> Option<PopupAdded> {
         let surface = popup.wl_surface().id();
-        let parent = popup
-            .get_parent_surface()
-            .map(|parent| parent.id());
+        let parent = popup.get_parent_surface().map(|parent| parent.id());
         let window_id = parent
             .as_ref()
             .and_then(|parent| self.surfaces.window_for_surface(parent))
@@ -857,7 +853,10 @@ impl WmBridge {
         self.popup_handles.insert(surface, popup.clone());
         self.manager.on_popup_added(window_id);
         tracing::debug!(window_id = window_id.0, popup_id, "popup tracked");
-        Some(PopupAdded { window_id, popup_id })
+        Some(PopupAdded {
+            window_id,
+            popup_id,
+        })
     }
 
     /// Untrack a popup.
@@ -956,217 +955,5 @@ fn toplevel_metadata(toplevel: &ToplevelSurface) -> (Option<AppId>, Option<Strin
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn bridge() -> WmBridge {
-        WmBridge::new(Size::new(1280, 800))
-    }
-
-    #[test]
-    fn new_wires_the_output_size_into_the_policy_config() {
-        let bridge = WmBridge::new(Size::new(1280, 800));
-        assert_eq!(bridge.manager.config().output_size, Size::new(1280, 800));
-        assert_eq!(bridge.tiled_rect(), Rect::new(0, 0, 1280, 800));
-    }
-
-    #[test]
-    fn keys_are_stable_unique_and_never_reused() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        let first = registry.register_toplevel(10);
-        let second = registry.register_toplevel(20);
-        assert_ne!(first, second);
-        // Re-registering the same surface keeps its key.
-        assert_eq!(registry.register_toplevel(10), first);
-        // A key is never handed out twice, even after the surface is destroyed.
-        registry.unbind_toplevel(&10);
-        let third = registry.register_toplevel(30);
-        assert_ne!(third, first);
-        assert_ne!(third, second);
-    }
-
-    #[test]
-    fn duplicate_map_reuses_the_window_and_never_mints_a_second_id() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        assert!(registry.is_unmapped_toplevel(&1));
-        registry.bind(1, WindowId(7));
-        assert!(!registry.is_unmapped_toplevel(&1));
-        assert_eq!(registry.window_for_surface(&1), Some(WindowId(7)));
-        assert_eq!(registry.slot(&1).map(|slot| slot.window), Some(Some(WindowId(7))));
-    }
-
-    #[test]
-    fn surface_lookup_covers_roots_subsurfaces_and_popups() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        registry.bind(1, WindowId(1));
-        // A subsurface of the same tree is resolved to the same window.
-        registry.owners.insert(2, WindowId(1));
-        registry.add_popup(3, Some(1), WindowId(1), (4, 5));
-        assert_eq!(registry.window_for_surface(&1), Some(WindowId(1)));
-        assert_eq!(registry.window_for_surface(&2), Some(WindowId(1)));
-        assert_eq!(registry.window_for_surface(&3), Some(WindowId(1)));
-        assert_eq!(registry.window_for_surface(&99), None);
-    }
-
-    #[test]
-    fn popup_ids_are_monotonic_unique_and_never_reused() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        registry.bind(1, WindowId(1));
-        let first = registry.add_popup(2, Some(1), WindowId(1), (0, 0));
-        let second = registry.add_popup(3, Some(1), WindowId(1), (10, 20));
-        assert_eq!((first, second), (1, 2));
-        // Idempotent for a tracked popup surface.
-        assert_eq!(registry.add_popup(2, Some(1), WindowId(1), (0, 0)), first);
-        assert_eq!(registry.remove_popup(&2).map(|popup| popup.popup_id), Some(first));
-        let third = registry.add_popup(4, Some(1), WindowId(1), (0, 0));
-        assert_eq!(third, 3);
-    }
-
-    #[test]
-    fn popup_offsets_accumulate_over_the_popup_chain() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        registry.bind(1, WindowId(1));
-        registry.add_popup(2, Some(1), WindowId(1), (10, 20));
-        registry.add_popup(3, Some(2), WindowId(1), (1, 2));
-        assert_eq!(registry.popup_window_offset(&2), Some((10, 20)));
-        assert_eq!(registry.popup_window_offset(&3), Some((11, 22)));
-        assert_eq!(registry.popup_window_offset(&1), None);
-    }
-
-    #[test]
-    fn destroying_a_toplevel_returns_its_open_popup_ids() {
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        registry.bind(1, WindowId(1));
-        registry.add_popup(2, Some(1), WindowId(1), (0, 0));
-        registry.add_popup(3, Some(1), WindowId(1), (5, 5));
-        let (window, popups) = registry.unbind_toplevel(&1);
-        assert_eq!(window, Some(WindowId(1)));
-        assert_eq!(popups, vec![1, 2]);
-        assert_eq!(registry.window_for_surface(&2), None);
-        assert!(registry.popup(&2).is_none());
-        // An unmapped toplevel destroy reports no window and no popups.
-        registry.register_toplevel(9);
-        assert_eq!(registry.unbind_toplevel(&9), (None, Vec::new()));
-    }
-
-    #[test]
-    fn correlation_prefers_pid_then_app_id_then_title() {
-        let mut ledger = LaunchLedger::default();
-        let now = Instant::now();
-        ledger.record(LaunchId(1), AppId::from("org.mozilla.firefox"), Some(42), now);
-        ledger.record(LaunchId(2), AppId::from("org.gnome.Nautilus"), None, now);
-
-        // Exact pid wins, even when a title would match another launch.
-        assert_eq!(
-            ledger.correlate(Some(&AppId::from("org.gnome.Nautilus")), Some(42), Some("Nautilus"), now),
-            Some(LaunchId(1))
-        );
-        // No pid: app id (or its tail) wins over the title.
-        assert_eq!(
-            ledger.correlate(Some(&AppId::from("Nautilus")), None, Some("Firefox"), now),
-            Some(LaunchId(2))
-        );
-        // Only a title matches.
-        assert_eq!(
-            ledger.correlate(None, None, Some("GitHub - Firefox Developer Edition"), now),
-            Some(LaunchId(1))
-        );
-        // Nothing matches.
-        assert_eq!(ledger.correlate(Some(&AppId::from("code")), None, Some("Files"), now), None);
-    }
-
-    #[test]
-    fn correlation_uses_the_most_recent_launch_as_tie_break() {
-        let mut ledger = LaunchLedger::default();
-        let now = Instant::now();
-        ledger.record(LaunchId(1), AppId::from("org.mozilla.firefox"), None, now);
-        ledger.record(LaunchId(2), AppId::from("org.mozilla.firefox"), None, now);
-        assert_eq!(
-            ledger.correlate(Some(&AppId::from("org.mozilla.firefox")), None, None, now),
-            Some(LaunchId(2))
-        );
-        ledger.take(LaunchId(2));
-        assert_eq!(
-            ledger.correlate(Some(&AppId::from("org.mozilla.firefox")), None, None, now),
-            Some(LaunchId(1))
-        );
-    }
-
-    #[test]
-    fn correlation_expires_after_the_documented_window() {
-        let mut ledger = LaunchLedger::default();
-        let start = Instant::now();
-        ledger.record(LaunchId(1), AppId::from("org.mozilla.firefox"), None, start);
-        let later = start + LAUNCH_CORRELATION_TIMEOUT + Duration::from_millis(1);
-        assert_eq!(ledger.correlate(Some(&AppId::from("org.mozilla.firefox")), None, None, later), None);
-        ledger.expire(later);
-        assert_eq!(ledger.len(), 0);
-    }
-
-    #[test]
-    fn pending_launches_are_bounded() {
-        let mut ledger = LaunchLedger::default();
-        let now = Instant::now();
-        for id in 1..=(MAX_PENDING_LAUNCHES as u64 + 5) {
-            ledger.record(LaunchId(id), AppId::from("app"), None, now);
-        }
-        assert_eq!(ledger.len(), MAX_PENDING_LAUNCHES);
-        // The oldest entries were dropped, the newest is still there.
-        assert_eq!(ledger.correlate(Some(&AppId::from("app")), None, None, now), Some(LaunchId(MAX_PENDING_LAUNCHES as u64 + 5)));
-    }
-
-    #[test]
-    fn title_evidence_ignores_too_short_tails() {
-        let app = AppId::from("code");
-        assert!(title_matches(&app, "main.rs - Visual Studio Code"));
-        assert!(!title_matches(&app, "unrelated"));
-        // A one-character tail must not match everything.
-        assert!(!title_matches(&AppId::from("a"), "anything"));
-    }
-
-    #[test]
-    fn app_ids_match_by_tail_like_startup_wm_class() {
-        assert!(app_ids_match(&AppId::from("org.mozilla.firefox"), &AppId::from("firefox")));
-        assert!(app_ids_match(&AppId::from("org.mozilla.Firefox"), &AppId::from("Firefox")));
-        assert!(!app_ids_match(&AppId::from("org.mozilla.firefox"), &AppId::from("thunderbird")));
-    }
-
-    #[test]
-    fn unknown_windows_never_panic_and_report_unknown_window() {
-        let mut bridge = bridge();
-        assert_eq!(bridge.active_window(), None);
-        assert_eq!(bridge.keyboard_focus(), None);
-        assert!(bridge.windows().is_empty());
-        assert!(bridge.toplevel_of(WindowId(1)).is_none());
-        assert!(bridge.surface_of(WindowId(1)).is_none());
-        assert_eq!(bridge.last_commit_seq(WindowId(1)), 0);
-        let error = bridge
-            .activate(WindowId(1))
-            .expect_err("unknown window must fail");
-        assert_eq!(error.code(), adesk_core::ErrorCode::UnknownWindow);
-        let error = bridge
-            .resolve_position(WindowId(1), &Position::normalized(0.5, 0.5))
-            .expect_err("unknown window must fail");
-        assert_eq!(error.code(), adesk_core::ErrorCode::Internal);
-        assert!(bridge.commit(WindowId(1), &Region::empty()) >= 1);
-    }
-
-    #[test]
-    fn grab_bookkeeping_is_cleared_with_the_popup() {
-        let mut bridge = bridge();
-        // No grab at all.
-        assert!(bridge.popup_grab().is_none());
-        assert!(bridge.take_popup_grab().is_none());
-        // Popup ids are looked up through the pure registry.
-        let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
-        registry.register_toplevel(1);
-        registry.bind(1, WindowId(1));
-        let popup_id = registry.add_popup(2, Some(1), WindowId(1), (0, 0));
-        assert_eq!(registry.popup(&2).map(|popup| popup.popup_id), Some(popup_id));
-    }
-}
+#[path = "wm_tests.rs"]
+mod tests;

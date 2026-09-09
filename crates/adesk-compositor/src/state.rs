@@ -23,7 +23,7 @@ use smithay::{
     reexports::{
         wayland_protocols::xdg::shell::server::xdg_toplevel,
         wayland_server::{
-            protocol::{wl_surface::WlSurface, wl_shm},
+            protocol::{wl_shm, wl_surface::WlSurface},
             DisplayHandle, Resource,
         },
     },
@@ -33,7 +33,9 @@ use smithay::{
         dmabuf::DmabufState,
         seat::WaylandFocus,
         selection::data_device::DataDeviceState,
-        shell::xdg::{decoration::XdgDecorationState, PopupSurface, ToplevelSurface, XdgShellState},
+        shell::xdg::{
+            decoration::XdgDecorationState, PopupSurface, ToplevelSurface, XdgShellState,
+        },
         shm::ShmState,
     },
 };
@@ -61,8 +63,6 @@ const MAX_SURFACE_TREE_DEPTH: usize = 32;
 pub(crate) struct State {
     /// Startup configuration (output size, renderer kind, xkb settings).
     pub(crate) config: CompositorConfig,
-    /// Wayland socket name this compositor is listening on (`wayland-N`).
-    pub(crate) socket_name: String,
     /// Global event sequence / timestamp allocator.
     pub(crate) events: EventSink,
     /// Headless renderer; created on demand, used only by render commands.
@@ -82,12 +82,21 @@ pub(crate) struct State {
     /// `wl_shm` state.
     pub(crate) shm_state: ShmState,
     /// The single virtual output, tiled to fill the whole surface area.
+    ///
+    /// Kept for the compositor's lifetime: the `wl_output` global stores a clone of
+    /// this handle (`WlOutputData { output }`) and it is how the output is
+    /// reconfigured or its global destroyed.
+    #[allow(dead_code)]
     pub(crate) output: Output,
     /// `zwp_linux_dmabuf` state.
     pub(crate) dmabuf_state: DmabufState,
     /// `wl_data_device_manager` state (clipboard basics).
     pub(crate) data_device_state: DataDeviceState,
     /// `xdg-decoration` state (server-side only).
+    ///
+    /// Kept for the compositor's lifetime: it owns the `GlobalId` of the
+    /// `zxdg_decoration_manager_v1` global, the handle needed to destroy it.
+    #[allow(dead_code)]
     pub(crate) xdg_decoration_state: XdgDecorationState,
     /// Monotonic start instant; `ts_ms` in events is measured from here.
     pub(crate) start: Instant,
@@ -98,13 +107,12 @@ pub(crate) struct State {
 impl State {
     /// Create all protocol globals, the seat, the renderer and the WM bridge.
     ///
-    /// `socket_name` is recorded for readiness reporting only; the socket itself is
-    /// bound by `crate::socket` before this constructor runs (the name must be known
-    /// before clients can connect).
+    /// The socket itself is bound by `crate::socket` before this constructor runs
+    /// (the name must be known before clients can connect); it is reported through
+    /// [`ReadyInfo::display_name`](crate::ReadyInfo).
     pub(crate) fn new(
         config: &CompositorConfig,
         display: &DisplayHandle,
-        socket_name: String,
         events: broadcast::Sender<RuntimeEvent>,
     ) -> Result<State> {
         // Renderer first: its dmabuf formats feed the dmabuf global.
@@ -119,8 +127,10 @@ impl State {
         let seat = seat_state.new_wl_seat(display, "seat-0");
         let input = InputInjector::new(&seat, &config.xkb)?;
 
-        let shm_state =
-            ShmState::new::<State>(display, [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888]);
+        let shm_state = ShmState::new::<State>(
+            display,
+            [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
+        );
 
         let output = create_output(config, display);
 
@@ -134,7 +144,6 @@ impl State {
 
         Ok(State {
             config: config.clone(),
-            socket_name,
             events: EventSink::new(events),
             renderer,
             wm,
@@ -156,24 +165,6 @@ impl State {
     /// The virtual output size in pixels.
     pub(crate) fn output_size(&self) -> Size {
         self.config.output_size
-    }
-
-    /// The active (visible, tiled) window, if any.
-    pub(crate) fn active_window(&self) -> Option<adesk_core::WindowId> {
-        self.wm.active_window()
-    }
-
-    /// The window that currently holds keyboard focus, if any.
-    pub(crate) fn keyboard_focus(&self) -> Option<adesk_core::WindowId> {
-        self.wm.keyboard_focus()
-    }
-
-    /// The window owning a Wayland surface, if any (toplevel, subsurface or popup).
-    pub(crate) fn window_for_surface(
-        &self,
-        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
-    ) -> Option<adesk_core::WindowId> {
-        self.wm.window_for_surface(surface)
     }
 
     /// Uptime in monotonic milliseconds since the compositor was constructed.
@@ -219,7 +210,8 @@ impl State {
                     app_id = app_id.as_ref().map(AppId::as_str),
                     "toplevel mapped"
                 );
-                self.events.window_created(id, app_id, pid, launch_id, title);
+                self.events
+                    .window_created(id, app_id, pid, launch_id, title);
                 self.apply_decision(&decision);
             }
         }
@@ -231,7 +223,10 @@ impl State {
         self.wm.register_toplevel(surface);
         let rect = self.wm.tiled_rect();
         send_tiling_configure(surface, rect, true);
-        tracing::debug!(?rect, "registered toplevel and sent the initial tiling configure");
+        tracing::debug!(
+            ?rect,
+            "registered toplevel and sent the initial tiling configure"
+        );
     }
 
     /// A toplevel was destroyed: drop its window, activate the most recently
@@ -304,7 +299,8 @@ impl State {
                 popup_id = removed.popup_id,
                 "popup disappeared"
             );
-            self.events.popup_disappeared(removed.window_id, removed.popup_id);
+            self.events
+                .popup_disappeared(removed.window_id, removed.popup_id);
         }
     }
 
@@ -315,9 +311,8 @@ impl State {
         // handler, so a buffer in the renderer state means "the client has content" —
         // that is the first commit that can produce pixels.
         if let Some(toplevel) = self.wm.unmapped_toplevel(surface) {
-            let has_buffer =
-                with_renderer_surface_state(surface, |state| state.buffer().is_some())
-                    .unwrap_or(false);
+            let has_buffer = with_renderer_surface_state(surface, |state| state.buffer().is_some())
+                .unwrap_or(false);
             if has_buffer {
                 self.on_toplevel_mapped(&toplevel);
             }
@@ -435,8 +430,7 @@ impl State {
                 break;
             }
             // `SurfaceView::offset` is this surface's position inside its parent.
-            let Some(view) =
-                with_renderer_surface_state(&current, |state| state.view()).flatten()
+            let Some(view) = with_renderer_surface_state(&current, |state| state.view()).flatten()
             else {
                 break;
             };
@@ -857,13 +851,8 @@ mod tests {
             .expect("a wayland display can be created headless");
         let config = CompositorConfig::default().with_renderer(crate::config::RendererKind::Pixman);
         let (events, _subscriber) = broadcast::channel(64);
-        let state = State::new(
-            &config,
-            &display.handle(),
-            "wayland-test".to_owned(),
-            events,
-        )
-        .expect("pixman and the `us` keymap must initialise headless");
+        let state = State::new(&config, &display.handle(), events)
+            .expect("pixman and the `us` keymap must initialise headless");
         (display, state)
     }
 

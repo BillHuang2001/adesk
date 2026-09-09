@@ -55,10 +55,7 @@ use smithay::{
             ExportMem, ImportAll, ImportDma, Offscreen, Renderer,
         },
     },
-    reexports::{
-        pixman::Image as PixmanImage,
-        wayland_server::protocol::wl_surface::WlSurface,
-    },
+    reexports::{pixman::Image as PixmanImage, wayland_server::protocol::wl_surface::WlSurface},
 };
 
 use super::{
@@ -85,8 +82,8 @@ type PixmanTarget = PixmanImage<'static, 'static>;
 /// [`dmabuf_formats`](HeadlessRenderer::dmabuf_formats), which asks the concrete
 /// backend.
 pub(crate) enum HeadlessRenderer {
-    /// EGL/GLES renderer built on a surfaceless EGL display.
-    Gl(GlesRenderer),
+    /// EGL/GLES renderer built on a surfaceless EGL display (boxed: it is ~6 KiB).
+    Gl(Box<GlesRenderer>),
     /// pixman software renderer (always available, no GPU required).
     Pixman(PixmanRenderer),
 }
@@ -102,9 +99,9 @@ impl HeadlessRenderer {
     pub(crate) fn create(kind: RendererKind) -> crate::Result<HeadlessRenderer> {
         match kind {
             RendererKind::Pixman => Ok(HeadlessRenderer::Pixman(create_pixman()?)),
-            RendererKind::Gl => Ok(HeadlessRenderer::Gl(create_gl()?)),
+            RendererKind::Gl => Ok(HeadlessRenderer::Gl(Box::new(create_gl()?))),
             RendererKind::Auto => match create_gl() {
-                Ok(renderer) => Ok(HeadlessRenderer::Gl(renderer)),
+                Ok(renderer) => Ok(HeadlessRenderer::Gl(Box::new(renderer))),
                 Err(error) => {
                     tracing::warn!(error = %error, "GL renderer unavailable, falling back to pixman");
                     Ok(HeadlessRenderer::Pixman(create_pixman()?))
@@ -160,9 +157,7 @@ impl HeadlessRenderer {
         let config = window_config(geometry, region, max_dimension);
         match self {
             HeadlessRenderer::Gl(renderer) => render_window_gl(renderer, surface, &config),
-            HeadlessRenderer::Pixman(renderer) => {
-                render_window_pixman(renderer, surface, &config)
-            }
+            HeadlessRenderer::Pixman(renderer) => render_window_pixman(renderer, surface, &config),
         }
     }
 
@@ -255,7 +250,11 @@ fn window_config(geometry: Rect, region: Option<Rect>, max_dimension: Option<u32
 
 /// Render configuration of the whole output: target sized to the output,
 /// output-relative crop and downscale.
-fn output_config(output_size: Size, region: Option<Rect>, max_dimension: Option<u32>) -> RenderConfig {
+fn output_config(
+    output_size: Size,
+    region: Option<Rect>,
+    max_dimension: Option<u32>,
+) -> RenderConfig {
     let mut config = RenderConfig::new(Rect::from_size(output_size));
     if let Some(region) = region {
         config = config.with_crop(region);
@@ -482,11 +481,7 @@ mod tests {
     fn invalid_window_crop_is_an_invalid_request() {
         let mut renderer = create_pixman().expect("pixman renderer");
         let scene = Scene::<OutputRenderElements<PixmanRenderer>>::new(0);
-        let config = window_config(
-            Rect::new(0, 0, 10, 10),
-            Some(Rect::new(50, 50, 4, 4)),
-            None,
-        );
+        let config = window_config(Rect::new(0, 0, 10, 10), Some(Rect::new(50, 50, 4, 4)), None);
         let error = render_scene_frame::<_, PixmanTarget, _>(&mut renderer, &scene, &config)
             .expect_err("a crop outside the window is rejected");
         assert!(matches!(error, CompositorError::InvalidRequest(_)));

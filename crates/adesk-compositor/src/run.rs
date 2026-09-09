@@ -83,8 +83,9 @@ pub(crate) fn run_compositor_thread(
     let name = socket::socket_name(&socket);
     tracing::info!(socket = %name, "wayland socket bound");
 
-    // 3. Protocol state, seat, renderer and WM bridge.
-    let state = State::new(&config, &handle, name.clone(), events)?;
+    // 3. Protocol state, seat, renderer and WM bridge. The bound socket name is kept
+    //    locally: it feeds `ReadyInfo.display_name` and the tracing below.
+    let state = State::new(&config, &handle, events)?;
 
     let mut event_loop: calloop::EventLoop<LoopData> = calloop::EventLoop::try_new()
         .map_err(|error| CompositorError::EventLoop(error.to_string()))?;
