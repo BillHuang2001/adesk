@@ -70,7 +70,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Context cap tests | `./tests/context_budget.rs` |
 | Metrics semantics tests | `./tests/metrics.rs` |
 | Scenario tests | `./tests/scenarios.rs` |
-| E2E plan against a real runtime (feature `e2e`; no bodies until `adesk-testkit` lands) | `./tests/e2e_runtime.rs` |
+| E2E plan against a real runtime (feature `e2e`; no bodies yet) | `./tests/e2e_runtime.rs` |
 
 ## Design Decisions
 - Two seams, one direction: `AgentLoop` depends only on `AgentClient` (runtime) and `LlmProvider` (LLM); both are object-safe-ish traits so tests replace either side, and `AgpClient`/`OpenAiCompatProvider` are the only concrete adapters.
@@ -96,11 +96,12 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - Command: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` — 80 tests: 44 lib unit, 10 `tests/agent_loop.rs`, 7 `tests/context_budget.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`.
 - Default features run 60 (loop/scenario suites are `#![cfg(feature = "test-support")]`); CI must pass the feature flag.
 - `./scripts/dev.sh cargo check -p adesk-agent --all-targets [--features test-support,e2e]` and `clippy -D warnings` are clean; `cargo run -p adesk-agent -- --help` documents the CLI and a missing target exits 2.
-- `tests/e2e_runtime.rs` — feature-gated plan with no test bodies until `adesk-testkit` lands; it will drive `AgpClient` against a real in-process runtime with the pixman renderer (Phase 3/4 integration).
+- `tests/e2e_runtime.rs` — feature-gated plan with no test bodies yet; it will drive `AgpClient` against a real in-process runtime via `adesk-testkit` (pixman).
 - No test needs a display, GPU, network or installed application; the OpenAI HTTP path is untested by design — its pure `build_chat_request`/`parse_decision` helpers carry the coverage.
 
 ## Notes for Agents
 - Always run tests with `--features test-support`.
+- `AgpClient` is neither `Clone` nor `Debug`, and `ScenarioRunner::run` takes the client by value: connect one `AgpClient` per scenario. `StepRecord` retains the step's `Observation` but not its image; image bytes are reachable only via a shared `MockProvider`'s recorded contexts (`Arc` + forwarding `LlmProvider`, pattern in `tests/agent_loop.rs`) or `ContextBuilder::build(..).image`. The `e2e` feature does not enable `test-support`; `Scenario`/`ScenarioRunner`/`MockProvider` are available with default features.
 - `ScriptedClient` is `Clone` (shared script + call log, because the loop takes the client by value) and panics BY DESIGN on exhausted or mismatched scripts; script one `ScriptedResponse` per client call in the loop's exact order (see Design Decisions).
 - `MockProvider` records a context on every `complete` call (including failed ones); an empty script substitutes the built-in dry run, so `remaining()` == 2 for "no script".
 - `adesk-client` API divergences are adapted in `agp.rs` only — do not "fix" `client.rs`: `list_apps(query, include_hidden)`, `PingInfo.renderer` is an enum mapped to `String`, SDK request types are by-value `#[non_exhaustive]` with a mandatory `format`, `keypress` needs a `KeyChord`.
