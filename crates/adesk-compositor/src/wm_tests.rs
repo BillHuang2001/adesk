@@ -247,3 +247,66 @@ fn grab_bookkeeping_is_cleared_with_the_popup() {
         Some(popup_id)
     );
 }
+
+#[test]
+fn a_late_app_id_is_written_back_into_the_window_model() {
+    let mut bridge = bridge();
+    // `WmBridge::app_id_changed` reads its metadata from a real `ToplevelSurface`, which only
+    // the xdg-shell protocol path can build (no public constructor), so the `u64` surface
+    // stand-ins above cannot express a late `set_app_id`. This test therefore drives the
+    // bridge-owned bookkeeping that `app_id_changed` delegates to after reading the metadata
+    // (`WmBridge::note_app_id`), against a window mapped the way a map fills the model in; the
+    // protocol path itself is proven by `tests/window_lifecycle.rs`.
+    let (id, _) = bridge.manager.on_map(MapRequest {
+        surface_key: SurfaceKey::new(1),
+        app_id: Some(AppId::from("org.example.appid.map")),
+        pid: None,
+        title: Some("App id".to_string()),
+        created_seq: 1,
+    });
+    assert_eq!(
+        bridge
+            .manager
+            .window(id)
+            .and_then(|record| record.app_id.clone()),
+        Some(AppId::from("org.example.appid.map")),
+        "the map-time app id is what the model starts with"
+    );
+
+    // A changed app id is reported once and reaches the model.
+    let late = AppId::from("org.example.appid.late");
+    let change = bridge
+        .note_app_id(id, Some(late.clone()), Some("App id".to_string()))
+        .expect("a different app id is a change");
+    assert_eq!(change.window_id, id);
+    assert_eq!(change.app_id.as_ref(), Some(&late));
+    assert_eq!(change.launch_id, None, "no launch was pending");
+    assert_eq!(
+        bridge
+            .manager
+            .window(id)
+            .and_then(|record| record.app_id.clone()),
+        Some(late.clone()),
+        "the changed app id is written back into the window model"
+    );
+    assert_eq!(
+        bridge
+            .manager
+            .window_info(id)
+            .and_then(|info| info.app_id),
+        Some(late.clone()),
+        "QueryState/list_windows report the late value"
+    );
+
+    // The same value again is not a change, and `None` clears the model value.
+    assert!(bridge.note_app_id(id, Some(late.clone()), None).is_none());
+    assert!(bridge.note_app_id(id, None, None).is_some());
+    assert_eq!(
+        bridge
+            .manager
+            .window(id)
+            .and_then(|record| record.app_id.clone()),
+        None
+    );
+    assert_eq!(bridge.manager.window_info(id).and_then(|info| info.app_id), None);
+}

@@ -299,6 +299,15 @@ impl State {
         self.wm.note_launch(launch_id, app_id, pid);
     }
 
+    /// Reserve the next event sequence number without emitting an event.
+    ///
+    /// [`EventSink`] stays the single authority for `seq`/`ts_ms`: this only advances
+    /// the shared watermark, so the server can allocate a number for an event *it*
+    /// publishes (`AppLaunched`) out of the same domain the compositor emits from.
+    pub(crate) fn reserve_seq(&mut self) -> u64 {
+        self.events.next_seq()
+    }
+
     /// An xdg-popup was created; track it under its owner window.
     pub(crate) fn on_popup_created(&mut self, popup: &PopupSurface) {
         if let Some(added) = self.wm.popup_added(popup, popup_offset(popup)) {

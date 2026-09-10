@@ -79,6 +79,11 @@ pub(crate) fn handle_command(state: &mut State, command: RuntimeCommand) -> Comm
             let _ = reply.send(());
             CommandOutcome::Continue
         }
+        RuntimeCommand::ReserveSeq { reply } => {
+            // Infallible: allocation only advances the shared watermark and emits nothing.
+            let _ = reply.send(state.reserve_seq());
+            CommandOutcome::Continue
+        }
         RuntimeCommand::ActivateWindow { window_id, reply } => {
             let result = state.activate_window(window_id);
             let _ = reply.send(result.map_err(Into::into));
@@ -177,6 +182,12 @@ mod tests {
                     reply: oneshot::channel().0,
                 },
                 "note_launch",
+            ),
+            (
+                RuntimeCommand::ReserveSeq {
+                    reply: oneshot::channel().0,
+                },
+                "reserve_seq",
             ),
             (
                 RuntimeCommand::ActivateWindow {

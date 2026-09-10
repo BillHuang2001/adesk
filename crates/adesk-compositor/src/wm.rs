@@ -37,8 +37,9 @@
 //!   `WindowDestroyed`.
 //! - `title_changed(&ToplevelSurface) -> Option<TitleChange>` — `None` when the title
 //!   did not actually change.
-//! - `app_id_changed(&ToplevelSurface) -> Option<AppIdChange>` — change detection plus
-//!   launch-correlation bookkeeping (there is no app-id event in AGP v1).
+//! - `app_id_changed(&ToplevelSurface) -> Option<AppIdChange>` — change detection, the
+//!   late-`set_app_id` write-back into the window model, and launch-correlation
+//!   bookkeeping (there is no app-id event in AGP v1).
 //! - `popup_added(&PopupSurface, offset) -> Option<PopupAdded>`,
 //!   `popup_removed(&PopupSurface) -> Option<PopupRemoved>` — stable `popup_id`s and
 //!   the owner window.
@@ -804,15 +805,35 @@ impl WmBridge {
 
     /// Handle an `app_id` that arrived after the map, or `None` when it did not change.
     ///
-    /// AGP v1 has no app-id event, so this only refines the launch ledger; the caller
-    /// logs it at `debug`.
+    /// `xdg_toplevel.set_app_id` is not double-buffered: smithay applies it while the
+    /// request is dispatched and calls `XdgShellHandler::app_id_changed` right there, so a
+    /// client may set the app id long after its first buffer commit. A genuine change is
+    /// written back into the window model (see [`WmBridge::note_app_id`]), which is what
+    /// `WindowInfo.app_id` / `QueryState` report.
     pub(crate) fn app_id_changed(&mut self, toplevel: &ToplevelSurface) -> Option<AppIdChange> {
         let window_id = self.window_for_surface(toplevel.wl_surface())?;
         let (app_id, title) = toplevel_metadata(toplevel);
+        self.note_app_id(window_id, app_id, title)
+    }
+
+    /// The bookkeeping [`WmBridge::app_id_changed`] runs once it read the toplevel metadata.
+    ///
+    /// Split out from the metadata read (a `ToplevelSurface` can only be built by the
+    /// xdg-shell protocol path, so it cannot be faked in a unit test): detect the change,
+    /// write it into the window model, and refine the launch ledger.
+    pub(crate) fn note_app_id(
+        &mut self,
+        window_id: WindowId,
+        app_id: Option<AppId>,
+        title: Option<String>,
+    ) -> Option<AppIdChange> {
         if self.app_ids.get(&window_id).cloned().flatten() == app_id {
             return None;
         }
         self.app_ids.insert(window_id, app_id.clone());
+        // Metadata-only write-back: `on_app_id` returns no actions, never re-configures and
+        // never marks damage, so a late app id changes no pixels and emits no event.
+        self.manager.on_app_id(window_id, app_id.clone());
         let launch_id = if self.launch_ids.contains_key(&window_id) {
             None
         } else {

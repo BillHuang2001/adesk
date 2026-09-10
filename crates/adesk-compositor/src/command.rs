@@ -72,6 +72,21 @@ pub enum RuntimeCommand {
         /// Acknowledged once the ledger recorded the launch.
         reply: oneshot::Sender<()>,
     },
+    /// Reserve the next event sequence number **without** emitting an event.
+    ///
+    /// `seq` has one global monotonic domain covering compositor- and server-emitted
+    /// events (`docs/protocol.md` §1). The server synthesizes `AppLaunched` itself, so
+    /// it allocates that event's sequence number here instead of inventing one above
+    /// the observed watermark: the compositor's single counter advances and publishes
+    /// nothing, and a later compositor event can therefore never reuse the number.
+    /// Gaps are allowed (a reserved number may go unused), reuse is not.
+    ReserveSeq {
+        /// The reserved sequence number.
+        ///
+        /// Always answered while the compositor runs; the caller observes a dropped
+        /// oneshot when the thread is gone.
+        reply: oneshot::Sender<u64>,
+    },
     /// Make a window the active (visible, focused) window.
     ///
     /// This mutates compositor state directly — keyboard focus and tiling
@@ -146,6 +161,7 @@ impl RuntimeCommand {
             RuntimeCommand::RenderOutput { .. } => "render_output",
             RuntimeCommand::QueryState { .. } => "query_state",
             RuntimeCommand::NoteLaunch { .. } => "note_launch",
+            RuntimeCommand::ReserveSeq { .. } => "reserve_seq",
             RuntimeCommand::ActivateWindow { .. } => "activate_window",
             RuntimeCommand::CloseWindow { .. } => "close_window",
             RuntimeCommand::PointerMove { .. } => "pointer_move",

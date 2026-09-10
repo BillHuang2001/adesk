@@ -72,6 +72,13 @@ const TITLE: &str = "Lifecycle";
 const APP_A: &str = "org.example.focus.a";
 const APP_B: &str = "org.example.focus.b";
 
+/// Title of the late-app-id scenario's toplevel.
+const TITLE_APP_ID: &str = "App id";
+/// App id the late-app-id scenario's toplevel carries when it maps (the model-time value).
+const APP_ID_MAP_TIME: &str = "org.example.appid.map";
+/// App id the same client sets *after* the map — the late `set_app_id` under test.
+const APP_ID_LATE: &str = "org.example.appid.late";
+
 /// A runtime whose Wayland socket a client can connect to.
 ///
 /// `apply_env(false)`: no application is launched in this file, so the runtime scopes the
@@ -149,6 +156,7 @@ async fn render_window(
 
 /// Maps one toplevel on `client` and returns it with the runtime's window id.
 ///
+/// The toplevel requests the size the tiling policy must override and commits `fill`.
 /// Awaits the map-time `window_created` and `window_activated` (the broadcast does not
 /// replay, and the id only exists in the event) and the client's `wl_keyboard.keymap`. The
 /// keymap is the seat-readiness barrier the harness's input tests use: the client creates
@@ -160,8 +168,11 @@ async fn map_toplevel(
     events: &mut EventAssert,
     app_id: &str,
     title: &str,
+    fill: FillPattern,
 ) -> Result<(TestWindow, WindowId)> {
-    let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;
+    let window = client.create_toplevel(
+        ToplevelSpec::new(app_id, title, Size::new(320, 200)).with_fill(fill),
+    )?;
     let configure = window.wait_for_configure(DEADLINE)?;
     assert_eq!(
         configure.size(),
@@ -169,7 +180,7 @@ async fn map_toplevel(
         "the tiling policy configures the toplevel, not the size the client asked for"
     );
     window.apply_configure()?;
-    window.commit_frame(FillPattern::default())?;
+    window.commit_frame(fill)?;
 
     let created = events
         .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(app_id)), DEADLINE)
@@ -401,8 +412,24 @@ async fn focus_follows_activation() -> Result<()> {
     let mut client_a = runtime.wayland_client()?;
     let mut client_b = runtime.wayland_client()?;
 
-    let (a_window, a_id) = map_toplevel(&runtime, &client_a, &mut events, APP_A, "A").await?;
-    let (b_window, b_id) = map_toplevel(&runtime, &client_b, &mut events, APP_B, "B").await?;
+    let (a_window, a_id) = map_toplevel(
+        &runtime,
+        &client_a,
+        &mut events,
+        APP_A,
+        "A",
+        FillPattern::default(),
+    )
+    .await?;
+    let (b_window, b_id) = map_toplevel(
+        &runtime,
+        &client_b,
+        &mut events,
+        APP_B,
+        "B",
+        FillPattern::default(),
+    )
+    .await?;
     assert_ne!(a_id, b_id, "each mapped toplevel gets its own window id");
 
     // B's map took the seat focus away from A; the leave is the state the re-activation
@@ -641,5 +668,104 @@ async fn focus_follows_activation() -> Result<()> {
 
     client_a.close().await?;
     client_b.close().await?;
+    runtime.shutdown().await
+}
+
+/// Scenario 1 addendum: a *late* `xdg_toplevel.set_app_id` reaches the window model.
+///
+/// `xdg_toplevel.set_app_id` is not double-buffered: smithay applies it while it dispatches
+/// the request and calls the compositor's `app_id_changed` right there, so a client may set
+/// the app id long after its first buffer commit. The map-time value is what the window model
+/// records, so the late value must be written back — otherwise `WindowInfo.app_id` and
+/// `QueryState` keep reporting the stale one.
+///
+/// The test maps one toplevel (own app id, title and fill) and waits for every lifecycle
+/// event of the map, asserts `QueryState` reports the map-time app id, then flips the app id
+/// through the real protocol and asserts the model reports the new value. The write-back is
+/// metadata-only, so it must emit no runtime event and change nothing else about the window.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn late_app_id_reaches_the_window_model() -> Result<()> {
+    let runtime = TestRuntime::start_with(test_config()).await?;
+    // The event broadcast never replays: tap before the commit that maps the surface.
+    let mut events = EventAssert::tap(&runtime);
+    let mut client = runtime.wayland_client()?;
+    let fill = FillPattern::checker(8, [0, 200, 0, 255], [0, 0, 0, 255]);
+
+    // --- map: the client's first commit carries the model-time app id ------------------
+    let (window, id) = map_toplevel(
+        &runtime,
+        &client,
+        &mut events,
+        APP_ID_MAP_TIME,
+        TITLE_APP_ID,
+        fill,
+    )
+    .await?;
+    let committed = events
+        .wait_for_expected(&Expected::SurfaceCommit(id), DEADLINE)
+        .await?;
+    assert_eq!(
+        committed.window_id(),
+        Some(id),
+        "the commit that mapped the window belongs to it"
+    );
+
+    let mapped = query_state(&runtime).await?;
+    let before = mapped.window(id).expect("the mapped window is tracked");
+    assert_eq!(
+        before.app_id,
+        Some(AppId::from(APP_ID_MAP_TIME)),
+        "the window model starts from the app id the map carried"
+    );
+    assert_eq!(before.title.as_deref(), Some(TITLE_APP_ID));
+    assert_eq!(before.state, WindowState::Active);
+    assert_eq!(before.geometry, runtime.tiled_rect());
+
+    // Every event the map emitted was served before the `QueryState` reply, so the tail is
+    // clean: nothing below can be attributed to anything but the late app id.
+    events.drain()?;
+
+    // --- the late `set_app_id` ----------------------------------------------------------
+    window.set_app_id(APP_ID_LATE)?;
+    // Synchronization barrier, not a sleep: the round trip completes only after the
+    // compositor dispatched the `set_app_id` request it precedes (one client request queue,
+    // processed in order), and `QueryState` is served afterwards from the FIFO command
+    // channel — so the query below cannot observe the pre-change value.
+    client.roundtrip().await?;
+
+    let late = query_state(&runtime).await?;
+    let after = late.window(id).expect("the window is still tracked");
+    assert_eq!(
+        after.app_id,
+        Some(AppId::from(APP_ID_LATE)),
+        "the late app id is written back into the window model, got {:?}",
+        after.app_id
+    );
+
+    // --- and it changed nothing else ----------------------------------------------------
+    // The write-back is metadata-only: AGP v1 has no app-id event, so `Expected::Any` — the
+    // strongest form of "emits no event" — must not match anything. Bounded by QUIET_BOUND.
+    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
+    assert_eq!(
+        late.seq, mapped.seq,
+        "no event was emitted, so the sequence watermark did not move"
+    );
+    assert_eq!(
+        after.last_commit_seq, before.last_commit_seq,
+        "the late app id is not a commit"
+    );
+    assert_eq!(
+        after.geometry, before.geometry,
+        "the tiling geometry is untouched"
+    );
+    assert_eq!(after.state, before.state, "the window stays Active");
+    assert_eq!(after.title, before.title, "only the app id changed");
+    assert!(
+        window.pending_configure().is_none(),
+        "an app-id change re-configures nothing, got {:?}",
+        window.pending_configure()
+    );
+
+    client.close().await?;
     runtime.shutdown().await
 }

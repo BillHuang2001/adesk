@@ -38,6 +38,12 @@ impl EventSink {
     }
 
     /// Allocate the next global sequence number.
+    ///
+    /// This is the single allocation point for `seq`: every emitter below consumes one
+    /// number, and [`RuntimeCommand::ReserveSeq`](crate::RuntimeCommand::ReserveSeq)
+    /// uses the same call for events the **server** synthesizes (`AppLaunched`).
+    /// Reserving advances the watermark and emits nothing, so reserved numbers may be
+    /// skipped but are never reused by a later event.
     pub(crate) fn next_seq(&mut self) -> u64 {
         self.last_seq += 1;
         self.last_seq
@@ -203,6 +209,34 @@ mod tests {
             assert!(event.ts_ms() >= last);
             last = event.ts_ms();
         }
+    }
+
+    #[test]
+    fn reserved_seqs_are_increasing_and_silent() {
+        let (mut sink, mut rx) = sink();
+        let first = sink.next_seq();
+        let second = sink.next_seq();
+        assert!(
+            second > first,
+            "reserved seqs must strictly increase, got {first} then {second}"
+        );
+        assert_eq!(
+            sink.watermark(),
+            second,
+            "reserving advances the shared watermark"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(broadcast::error::TryRecvError::Empty)),
+            "reserving a seq must not publish an event"
+        );
+
+        sink.window_destroyed(WindowId(1));
+        let event = rx.try_recv().expect("the emitted event is queued");
+        assert!(
+            event.seq() > second,
+            "an event emitted after reservations must use a higher seq ({second}), got {}",
+            event.seq()
+        );
     }
 
     #[test]
