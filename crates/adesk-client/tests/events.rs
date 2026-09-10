@@ -7,35 +7,20 @@
 
 mod common;
 
-use std::time::Duration;
-
 use adesk_client::{
-    AgpEvent, AgpEventStream, Client, ClientError, ConnectOptions, EventFilter, EventKind,
-    EventStream, ImagePayload, QuietEvent,
+    AgpEvent, AgpEventStream, Client, ClientError, EventFilter, EventKind, EventStream,
+    ImagePayload, QuietEvent,
 };
 use adesk_core::{Rect, RuntimeEvent, WindowId};
-use common::MockServer;
+use common::{connect, MockServer, TIMEOUT};
 use futures::StreamExt;
 use serde_json::json;
-
-/// Deadline for every awaited step: a broken client fails loudly, never hangs.
-const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// One subscriber's event queue (`transport::EVENT_CHANNEL_CAPACITY`).
 ///
 /// The fan-out drops events beyond this per-subscriber bound and reports the
 /// count once as [`ClientError::Lagged`].
 const EVENT_CHANNEL_CAPACITY: usize = 4096;
-
-/// Connect without the handshake ping and accept the connection on the server.
-async fn connect(server: &mut MockServer) -> Client {
-    let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options)
-        .await
-        .expect("connect to the mock server");
-    server.accept().await;
-    client
-}
 
 /// `subscribe_events` against the mock server, answering with `subscription_id`.
 async fn subscribe(
@@ -45,7 +30,7 @@ async fn subscribe(
     subscription_id: u64,
 ) -> EventStream {
     let request = client.subscribe_events(filter);
-    let (stream, ()) = tokio::time::timeout(STEP_TIMEOUT, async {
+    let (stream, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "subscribe_events");
@@ -62,7 +47,7 @@ async fn subscribe(
 /// Await the next typed stream item, failing the test (instead of hanging) on
 /// timeout and treating the end of the stream as a failure.
 async fn next_event(stream: &mut EventStream) -> Result<RuntimeEvent, ClientError> {
-    tokio::time::timeout(STEP_TIMEOUT, stream.next())
+    tokio::time::timeout(TIMEOUT, stream.next())
         .await
         .expect("the stream yields an item instead of hanging")
         .expect("the stream is still open")
@@ -76,7 +61,7 @@ async fn subscribe_frames(
     subscription_id: u64,
 ) -> AgpEventStream {
     let request = client.subscribe_frames(filter);
-    let (stream, ()) = tokio::time::timeout(STEP_TIMEOUT, async {
+    let (stream, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "subscribe_events");
@@ -93,7 +78,7 @@ async fn subscribe_frames(
 /// Await the next `AgpEvent` frame, failing the test (instead of hanging) on
 /// timeout and treating the end of the stream as a failure.
 async fn next_frame(stream: &mut AgpEventStream) -> Result<AgpEvent, ClientError> {
-    tokio::time::timeout(STEP_TIMEOUT, stream.next())
+    tokio::time::timeout(TIMEOUT, stream.next())
         .await
         .expect("the stream yields an item instead of hanging")
         .expect("the stream is still open")
@@ -375,7 +360,7 @@ async fn dropping_stream_sends_unsubscribe() {
 
     // The drop enqueues the request; awaiting the server's read lets the
     // writer task flush it on the still-live connection.
-    let (_, method, params) = tokio::time::timeout(STEP_TIMEOUT, server.next_request())
+    let (_, method, params) = tokio::time::timeout(TIMEOUT, server.next_request())
         .await
         .expect("the dropped stream sends unsubscribe_events instead of hanging");
     assert_eq!(method, "unsubscribe_events");
@@ -422,7 +407,7 @@ async fn lag_reports_skipped_events() {
     // dispatches frames in order, so once it resolves the reader has processed
     // all of them (and dropped the overflow).
     let sync = client.list_windows();
-    let (result, ()) = tokio::time::timeout(STEP_TIMEOUT, async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(sync, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
@@ -502,7 +487,7 @@ async fn connection_close_ends_stream_with_closed() {
         other => panic!("expected ClientError::Closed, got {other:?}"),
     }
 
-    let end = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+    let end = tokio::time::timeout(TIMEOUT, stream.next())
         .await
         .expect("the stream ends instead of hanging");
     assert!(

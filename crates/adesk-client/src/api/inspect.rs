@@ -52,12 +52,6 @@ impl InspectCaptureRequest {
         }
     }
 
-    /// Crop the composed output.
-    pub fn region(mut self, region: Rect) -> Self {
-        self.region = Some(region);
-        self
-    }
-
     /// Downscale so the longer edge is at most `max_dimension`.
     pub fn max_dimension(mut self, max_dimension: u32) -> Self {
         self.max_dimension = Some(max_dimension);
@@ -82,12 +76,6 @@ impl InspectSubscribeRequest {
             overlays: overlays.into_iter().collect(),
             min_interval_ms: 100,
         }
-    }
-
-    /// Override the push interval.
-    pub fn min_interval_ms(mut self, min_interval_ms: u64) -> Self {
-        self.min_interval_ms = min_interval_ms;
-        self
     }
 }
 

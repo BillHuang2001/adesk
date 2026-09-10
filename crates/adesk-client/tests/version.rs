@@ -3,10 +3,8 @@
 
 mod common;
 
-use std::time::Duration;
-
 use adesk_client::{Client, ClientError, ConnectOptions};
-use common::MockServer;
+use common::{MockServer, TIMEOUT};
 use serde_json::json;
 
 /// A canned `ping` result advertising `protocol_version`.
@@ -36,7 +34,7 @@ async fn ping_rejects_protocol_version_mismatch() {
     server.accept().await;
 
     let ping = client.ping();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(ping, async {
             let (id, method, params) = server.next_request().await;
             assert_eq!(method, "ping");
@@ -61,7 +59,7 @@ async fn ping_rejects_protocol_version_mismatch() {
 
     // The same payload is accepted by the unchecked variant.
     let ping_raw = client.ping_raw();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(ping_raw, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "ping");
@@ -87,7 +85,7 @@ async fn connect_verifies_version_by_default() {
     let mut server = MockServer::start().await;
     let path = server.path().to_path_buf();
     let connect = Client::connect(path);
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(connect, async {
             server.accept().await;
             let (id, method, params) = server.next_request().await;
@@ -111,7 +109,7 @@ async fn connect_verifies_version_by_default() {
     let mut server = MockServer::start().await;
     let path = server.path().to_path_buf();
     let connect = Client::connect(path);
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(connect, async {
             server.accept().await;
             let (id, method, _) = server.next_request().await;
@@ -134,7 +132,7 @@ async fn connect_verifies_version_by_default() {
 async fn connect_with_verify_version_false_skips_ping() {
     let mut server = MockServer::start().await;
     let connect = Client::connect_with(ConnectOptions::new(server.path()).verify_version(false));
-    let (client, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (client, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(connect, async {
             server.accept().await;
         })
@@ -144,15 +142,16 @@ async fn connect_with_verify_version_false_skips_ping() {
     let client = client.expect("connect to the mock server");
 
     // No handshake: nothing must be readable until the test asks.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(100), server.next_request())
-            .await
-            .is_err(),
-        "verify_version(false) must not send a handshake ping"
-    );
+    {
+        let mut pending = Box::pin(server.next_request());
+        assert!(
+            futures::poll!(&mut pending).is_pending(),
+            "verify_version(false) must not send a handshake ping"
+        );
+    }
 
     let ping = client.ping();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(ping, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(
