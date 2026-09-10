@@ -57,12 +57,8 @@ pub(crate) fn draw(
     let inner = (window.w as i32).saturating_sub(2 * pad);
     let elided = text::elide(text, inner, style.scale())?;
     // `slot_origin` returns the plate's top-left; `draw_label` wants the ink's.
-    let plate_origin = slot_origin(window, slot, style);
-    let ink_origin = Point {
-        x: plate_origin.x.saturating_add(pad),
-        y: plate_origin.y.saturating_add(pad),
-    };
+    let ink = super::common::ink_origin(slot_origin(window, slot, style), pad);
     Some(canvas.with_clip(window, |clipped| {
-        text::draw_label(clipped, ink_origin, &elided, style)
+        text::draw_label(clipped, ink, &elided, style)
     }))
 }

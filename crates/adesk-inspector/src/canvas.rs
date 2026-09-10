@@ -12,7 +12,7 @@
 //! All arithmetic is integer, so results are exact and reproducible.
 //! `src.a == 0` never changes the buffer; `src.a == 255` writes `src` exactly.
 
-use adesk_core::{ImageBuffer, Point, Rect, Size};
+use adesk_core::{ImageBuffer, Point, Rect};
 
 use crate::color::Color;
 
@@ -31,19 +31,9 @@ impl<'a> Canvas<'a> {
         Canvas { buffer, clip }
     }
 
-    /// Size of the underlying buffer.
-    pub fn size(&self) -> Size {
-        self.buffer.size()
-    }
-
     /// Current clip rectangle.
     pub fn clip(&self) -> Rect {
         self.clip
-    }
-
-    /// Replaces the clip rectangle; an empty clip discards every draw.
-    pub fn set_clip(&mut self, clip: Rect) {
-        self.clip = clip;
     }
 
     /// Runs `f` with the clip narrowed to `clip`, restoring the previous clip

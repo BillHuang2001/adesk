@@ -4,9 +4,7 @@ use crate::canvas::Canvas;
 use crate::input::InspectionInput;
 use crate::style::OverlayStyle;
 
-/// Half-length of each crosshair arm in px (the centre is shared, so the
-/// crosshair spans `2 * ARM + 1 = 9` px per axis).
-const ARM: i32 = 4;
+use super::common::crosshair;
 
 /// Draws a crosshair centred on [`InspectionInput::cursor`] in
 /// [`OverlayStyle::cursor`]: a horizontal line from `x - 4` to `x + 4` at `y`
@@ -16,18 +14,5 @@ pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlaySt
     let Some(cursor) = input.cursor else {
         return;
     };
-    // Saturating arithmetic keeps extreme coordinates from panicking; the
-    // canvas clips both lines to `clip ∩ buffer`.
-    canvas.hline(
-        cursor.y,
-        cursor.x.saturating_sub(ARM),
-        cursor.x.saturating_add(ARM),
-        style.cursor,
-    );
-    canvas.vline(
-        cursor.x,
-        cursor.y.saturating_sub(ARM),
-        cursor.y.saturating_add(ARM),
-        style.cursor,
-    );
+    crosshair(canvas, cursor, style.cursor);
 }

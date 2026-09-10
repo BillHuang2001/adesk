@@ -77,20 +77,6 @@ impl ActionKind {
             ActionKind::CloseWindow => "close_window",
         }
     }
-
-    /// Whether this kind carries a window-relative (output) position.
-    pub const fn has_position(self) -> bool {
-        matches!(
-            self,
-            ActionKind::PointerMove
-                | ActionKind::Click
-                | ActionKind::DoubleClick
-                | ActionKind::MouseDown
-                | ActionKind::MouseUp
-                | ActionKind::Scroll
-                | ActionKind::Drag
-        )
-    }
 }
 
 /// One action recorded by the runtime's action registry, drawn by the
@@ -187,12 +173,6 @@ impl InspectionInputBuilder {
     /// Sets the active window.
     pub fn active(mut self, active: Option<WindowId>) -> Self {
         self.input.active = active;
-        self
-    }
-
-    /// Sets the active window to `id`.
-    pub fn active_window(mut self, id: WindowId) -> Self {
-        self.input.active = Some(id);
         self
     }
 

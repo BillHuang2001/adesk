@@ -9,10 +9,8 @@ use crate::input::InspectionInput;
 use crate::style::OverlayStyle;
 use crate::text;
 
-/// Half-length of the plus-marker arms in px: the marker spans
-/// `2 * ARM + 1 = 9` px per axis, of which the inner 3 px are the filled
-/// centre square.
-const ARM: i32 = 4;
+use super::common::{crosshair, ink_origin, ARM};
+
 /// Side length in px of the filled centre square of a plus marker.
 const CENTRE: u32 = 3;
 
@@ -22,8 +20,8 @@ const CENTRE: u32 = 3;
 /// - A marker with a position draws a plus-shaped glyph in
 ///   [`OverlayStyle::action`] — a 3x3 filled square centred on the position
 ///   plus 1 px arms extending 4 px from the centre (9 px span) — followed by a
-///   label whose ink top-left is `(position.x + 4, position.y + 4)` (the plate
-///   padding is applied by [`text::draw_label`]) with text
+///   label whose ink top-left is one arm length past the centre
+///   (`(position.x + 4, position.y + 4)`) with text
 ///   `"{kind} #{action_id} +{age_ms}ms"`, drawn in the action accent colour.
 /// - A marker without a position is listed in a HUD anchored to the canvas
 ///   clip's top-left corner: the `i`-th positionless marker's plate top-left is
@@ -48,10 +46,7 @@ pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlaySt
         match marker.position {
             Some(position) => {
                 plus(canvas, position, style.action);
-                let origin = Point {
-                    x: position.x.saturating_add(ARM),
-                    y: position.y.saturating_add(ARM),
-                };
+                let origin = ink_origin(position, ARM);
                 text::draw_label(canvas, origin, &label, &accent);
             }
             None => {
@@ -63,10 +58,7 @@ pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlaySt
                         .saturating_add(pad)
                         .saturating_add(hud_line.saturating_mul(step)),
                 };
-                let origin = Point {
-                    x: plate.x.saturating_add(pad),
-                    y: plate.y.saturating_add(pad),
-                };
+                let origin = ink_origin(plate, pad);
                 text::draw_label(canvas, origin, &label, &accent);
                 hud_line = hud_line.saturating_add(1);
             }
@@ -77,18 +69,7 @@ pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlaySt
 /// Draws the plus-shaped marker centred on `position` in `color`: a 9 px
 /// horizontal arm, a 9 px vertical arm and a 3x3 centre square.
 fn plus(canvas: &mut Canvas<'_>, position: Point, color: Color) {
-    canvas.hline(
-        position.y,
-        position.x.saturating_sub(ARM),
-        position.x.saturating_add(ARM),
-        color,
-    );
-    canvas.vline(
-        position.x,
-        position.y.saturating_sub(ARM),
-        position.y.saturating_add(ARM),
-        color,
-    );
+    crosshair(canvas, position, color);
     canvas.fill_rect(
         Rect::new(
             position.x.saturating_sub(1),

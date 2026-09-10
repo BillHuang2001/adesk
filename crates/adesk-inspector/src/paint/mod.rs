@@ -13,6 +13,7 @@
 mod actions;
 mod app_ids;
 mod commit_timing;
+mod common;
 mod cursor;
 mod damage;
 mod focus;
@@ -52,17 +53,19 @@ pub const CANONICAL_ORDER: [OverlayKind; 8] = [
 ];
 
 /// Position of `kind` in [`CANONICAL_ORDER`].
+///
+/// Derived from [`CANONICAL_ORDER`] so the canonical order has a single source
+/// of truth. Every [`OverlayKind`] variant appears in the array, so the scan
+/// always returns; the trailing `len` is an unreachable total-function fallback.
 pub const fn order_index(kind: OverlayKind) -> usize {
-    match kind {
-        OverlayKind::Damage => 0,
-        OverlayKind::SurfaceBounds => 1,
-        OverlayKind::WindowIds => 2,
-        OverlayKind::AppIds => 3,
-        OverlayKind::Focus => 4,
-        OverlayKind::Cursor => 5,
-        OverlayKind::Actions => 6,
-        OverlayKind::CommitTiming => 7,
+    let mut index = 0;
+    while index < CANONICAL_ORDER.len() {
+        if CANONICAL_ORDER[index] as usize == kind as usize {
+            return index;
+        }
+        index += 1;
     }
+    CANONICAL_ORDER.len()
 }
 
 /// Normalizes an overlay set: duplicates removed, canonical order.
