@@ -261,8 +261,12 @@ fn runtime_event(name: &str, seq: u64, ts_ms: u64, data: &Value) -> Option<Runti
 
 /// One `inspect_frame` event (protocol §5.7).
 ///
-/// The protocol does not spell out the data shape of `inspect_frame`; the
-/// client assumes `{"image": ImagePayload}` (see `CONTEXT.md` → Known Issues).
+/// The wire payload is `{"subscription_id": u64, "image": ImagePayload}`; this
+/// type keeps the image and the frame envelope `seq`/`ts_ms`. The wire
+/// `subscription_id` is not retained: the connection's event fan-out delivers
+/// every frame to every stream, so it could not be used to demultiplex two
+/// overlay sets anyway. A frame whose `image` does not fit becomes
+/// [`AgpEvent::Other`].
 #[derive(Debug, Clone)]
 pub struct InspectFrame {
     /// Global monotonic event sequence.

@@ -71,7 +71,7 @@ type PendingSender = oneshot::Sender<Result<Value, ServerError>>;
 /// Why the connection ended.
 ///
 /// [`PendingSender`] can only carry the server's answer, so every other failure
-/// is stored once in the connection (see [`Connection::close_reason`]) and
+/// is stored once in the connection (see [`Shared::close_reason`]) and
 /// handed to each caller that is left hanging. Unlike [`ClientError::Io`] this
 /// type is `Clone`, so one stored reason can explain any number of cancelled
 /// requests.
