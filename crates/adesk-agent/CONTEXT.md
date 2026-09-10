@@ -27,7 +27,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - Types: `RuntimeInfo`, `LaunchOutcome`, `WindowList`, `CaptureRequest/CaptureOutcome`, `ObserveRequest/ObserveOutcome`, `ClickRequest`, `ScrollRequest`, `TypeOutcome`, `PROTOCOL_VERSION = 1`.
 - `AgpClient` — `connect(&Path)`, `sdk()`; the sole adapter to `adesk-client`/`adesk-proto`.
 ### Providers (`src/provider/`)
-- `LlmProvider` (`#[async_trait]`): `complete(&AgentContext) -> Result<AgentDecision, ProviderError>`, `name()`, `supports_images()`.
+- `LlmProvider` (`#[async_trait]`): `complete(&AgentContext) -> Result<AgentDecision, ProviderError>`, `name()`, `supports_images()` (the loop consults it before requesting *or* attaching pixels); the trait is also implemented by `Box<dyn LlmProvider>` and `Arc<T: LlmProvider + ?Sized>`, so neither the binary nor the tests need a wrapper newtype.
 - `MockProvider` + `ScriptEntry` — scripted/replayable (`scripted`, `new`, `from_json`, `with_name`, `contexts()`, `remaining()`, `reset()`); default provider.
 - `DummyVlmProvider` + `DummyConfig` + `DummyMode { Fixed, Random }` + `default_action_pool()` — synthetic no-I/O "dummy VLM": `from_config`, `fixed`, `random(seed)`, `config`, `with_name`, `contexts()`, `context_count()`, `remaining()`, `reset()`; `DEFAULT_SEED = 0x5EED_5EED`, `DEFAULT_FINISH_PROBABILITY = 0.15`, `DEFAULT_STEP_BUDGET = 10`.
 - `OpenAiCompatProvider` + `OpenAiConfig` + `ImageDetail` — reqwest `/chat/completions`, base64 data-URL images, `DEFAULT_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_TIMEOUT_MS`, `DEFAULT_SYSTEM_PROMPT` (the decision schema), pure `build_chat_request`/`parse_decision`.
