@@ -167,6 +167,7 @@ where
 }
 
 /// Whether the session keeps running after handling a message.
+#[derive(Debug)]
 enum Disposition {
     /// Keep the connection open.
     Continue,
@@ -314,7 +315,20 @@ where
         // The viewer is leaving: acknowledge with `bye` and close (§4).
         ClientMessage::Bye { reason } => {
             let reason = reason.unwrap_or_else(|| "viewer left".to_owned());
-            send(write, &ServerMessage::Bye { reason }).await?;
+            // The acknowledgement is a courtesy reply, not a spec-mandated round
+            // trip (§4): the viewer has *already* declared it is leaving, so a
+            // peer that closes before reading our reply is a normal departure,
+            // not a transport failure. Only the peer-gone error kinds on this one
+            // write are downgraded; every other failure still propagates.
+            if let Err(error) = send(write, &ServerMessage::Bye { reason }).await {
+                if !is_peer_gone(&error) {
+                    return Err(error);
+                }
+                tracing::debug!(
+                    %error,
+                    "viewer departed before its bye acknowledgement was written"
+                );
+            }
             Ok(Disposition::Close)
         }
         // A second handshake is a protocol error that closes (§2).
@@ -393,6 +407,23 @@ async fn send_error<W: AsyncWrite + Unpin>(
         id: None,
     };
     send(write, &message).await
+}
+
+/// Whether `error` reports that the peer is already gone — a broken pipe or a
+/// reset connection.
+///
+/// Used only to downgrade a failed courtesy write after the peer has announced
+/// it is leaving (`docs/viewer.md` §4); it must never be used to hide a failure
+/// on a write whose delivery the protocol actually depends on.
+fn is_peer_gone(error: &ViewerError) -> bool {
+    matches!(
+        error,
+        ViewerError::Io(io)
+            if matches!(
+                io.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            )
+    )
 }
 
 #[cfg(test)]
@@ -771,5 +802,87 @@ mod tests {
 
         send_bye(&mut write).await;
         handle.await.unwrap().unwrap();
+    }
+
+    /// An [`AsyncWrite`] whose every write fails with a fixed error kind, to
+    /// simulate a peer that is already gone.
+    struct FailingWriter {
+        kind: std::io::ErrorKind,
+    }
+
+    impl AsyncWrite for FailingWriter {
+        fn poll_write(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            _buf: &[u8],
+        ) -> std::task::Poll<std::io::Result<usize>> {
+            std::task::Poll::Ready(Err(std::io::Error::from(self.kind)))
+        }
+
+        fn poll_flush(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+
+    /// §4: a failed courtesy acknowledgement after an already-received `bye` is
+    /// not an error — the viewer declared it is leaving, so the session closes
+    /// cleanly instead of surfacing a peer-gone transport failure.
+    #[tokio::test]
+    async fn bye_acknowledgement_to_a_gone_peer_is_a_clean_exit() {
+        let backend = FakeBackend::new();
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            let mut write = FailingWriter { kind };
+            let disposition =
+                handle_message(&backend, &mut write, ClientMessage::Bye { reason: None })
+                    .await
+                    .expect("a peer-gone bye acknowledgement must not fail the session");
+            assert!(matches!(disposition, Disposition::Close));
+        }
+    }
+
+    /// §4: any other write failure while acknowledging a `bye` still propagates,
+    /// so a genuine transport fault is never silently hidden.
+    #[tokio::test]
+    async fn bye_acknowledgement_failure_that_is_not_peer_gone_propagates() {
+        let backend = FakeBackend::new();
+        let mut write = FailingWriter {
+            kind: std::io::ErrorKind::WouldBlock,
+        };
+        let error = handle_message(&backend, &mut write, ClientMessage::Bye { reason: None })
+            .await
+            .expect_err("a non-peer-gone write failure must propagate");
+        assert!(matches!(error, ViewerError::Io(_)), "{error:?}");
+    }
+
+    /// `is_peer_gone` matches exactly the two peer-gone kinds and nothing else.
+    #[test]
+    fn peer_gone_matches_only_broken_pipe_and_connection_reset() {
+        for kind in [
+            std::io::ErrorKind::BrokenPipe,
+            std::io::ErrorKind::ConnectionReset,
+        ] {
+            assert!(is_peer_gone(&ViewerError::Io(std::io::Error::from(kind))));
+        }
+        for kind in [
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::UnexpectedEof,
+        ] {
+            assert!(!is_peer_gone(&ViewerError::Io(std::io::Error::from(kind))));
+        }
+        assert!(!is_peer_gone(&ViewerError::Closed));
+        assert!(!is_peer_gone(&ViewerError::Transport("x".to_owned())));
     }
 }

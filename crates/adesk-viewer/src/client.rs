@@ -51,6 +51,17 @@ pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 /// refused with [`ViewerError::Handshake`].
 pub const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Grace period [`ViewerClient::close`] allows the dispatcher to observe the
+/// server's `bye` reply before the reader task is aborted.
+///
+/// A clean close writes `bye` and shuts its write half down; the session answers
+/// with its own `bye` and finishes. Waiting this long lets the dispatcher read
+/// that reply (or the resulting EOF) and end on its own, so the read half stays
+/// open until the acknowledgement is delivered — which is what makes a clean
+/// close a deterministic success for `ViewerServer::serve`. A close that outlives
+/// this window is still a success: the reader is aborted instead.
+const CLOSE_GRACE: Duration = Duration::from_millis(250);
+
 /// Capacity of the broadcast channel that fans streamed frames out to `frames()`
 /// receivers and in-flight `request_frame` calls.
 ///
@@ -488,12 +499,22 @@ impl ViewerClient {
     }
 
     /// Closes the connection: sends a best-effort `bye`, shuts the write half
-    /// down and stops the dispatcher.
+    /// down, waits briefly for the server's reply, then stops the dispatcher.
+    ///
+    /// The close is best-effort and always succeeds: a failed `bye` write and a
+    /// dispatcher that does not finish within its grace period are both logged,
+    /// not returned. After writing `bye` the client shuts its write half down and
+    /// gives the dispatcher a bounded grace period to read the server's `bye`
+    /// reply (or the resulting EOF) and end on its own; only if that window
+    /// elapses is the reader task aborted. Ending the reader immediately would
+    /// drop the read half before the server's courtesy acknowledgement could be
+    /// written, surfacing a spurious peer-gone error from an otherwise clean
+    /// close.
     ///
     /// # Errors
     ///
     /// Returns [`ViewerError::Transport`] only if the dispatcher task itself
-    /// failed; a write failure while sending `bye` is non-fatal and logged.
+    /// failed.
     pub async fn close(mut self) -> Result<()> {
         if let Err(error) = write_message(&self.inner, &ClientMessage::Bye { reason: None }).await {
             tracing::debug!(%error, "could not send the viewer bye message");
@@ -502,17 +523,30 @@ impl ViewerClient {
             let mut writer = self.inner.writer.lock().await;
             let _ = writer.shutdown().await;
         }
-        // Wake every stream and pending request even if the peer never closes
-        // its own read side, then stop the reader task.
+        // Wake every stream and pending request even if the peer never closes its
+        // own read side. This does not touch the dispatcher's reader, so it can
+        // still observe the server's `bye` reply below.
         self.inner.shutdown();
-        self.dispatcher.abort();
-        match (&mut self.dispatcher).await {
-            Ok(()) => Ok(()),
-            Err(error) if error.is_cancelled() => Ok(()),
-            Err(error) => Err(ViewerError::Transport(format!(
-                "viewer connection task failed: {error}"
-            ))),
+        let stopped = timeout(CLOSE_GRACE, &mut self.dispatcher).await;
+        match stopped {
+            // The dispatcher ended on its own (the server's `bye` or EOF).
+            Ok(Ok(())) => {}
+            // Cancelled elsewhere: there is nothing left to stop.
+            Ok(Err(error)) if error.is_cancelled() => {}
+            // The dispatcher task itself failed: surface it.
+            Ok(Err(error)) => {
+                return Err(ViewerError::Transport(format!(
+                    "viewer connection task failed: {error}"
+                )));
+            }
+            // The grace period elapsed: stop the reader task outright. A
+            // best-effort close is still a success.
+            Err(_elapsed) => {
+                tracing::debug!("viewer dispatcher did not stop within the close grace period");
+                self.dispatcher.abort();
+            }
         }
+        Ok(())
     }
 
     /// Writes one client message as a single NDJSON line.

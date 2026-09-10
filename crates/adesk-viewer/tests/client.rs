@@ -10,7 +10,6 @@
 //! frames, `input_ack`s) rather than fixed sleeps; a `tokio::time::timeout`
 //! wraps anything that could otherwise park forever on a bug.
 
-use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -26,11 +25,13 @@ use adesk_viewer::{
     ViewerServer, ViewerTarget,
 };
 use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ViewerFrame, PROTOCOL_VERSION,
+    encode_server, ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ServerMessage,
+    ViewerFrame, PROTOCOL_VERSION,
 };
 use futures::pin_mut;
 use futures::StreamExt;
 use tempfile::TempDir;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
 
@@ -66,6 +67,18 @@ fn desktop_state() -> DesktopState {
             last_commit_seq: 2,
             popup_count: 0,
         }],
+    }
+}
+
+/// A stand-in server hello, shared by the fake backend and the raw-wire tests.
+fn server_hello() -> ServerHello {
+    ServerHello {
+        protocol_version: PROTOCOL_VERSION,
+        runtime_version: "0.1.0".to_owned(),
+        output: Size::new(800, 600),
+        renderer: RendererKind::Pixman,
+        cursor: CursorState::hidden(),
+        control: ControlOwner::Ai,
     }
 }
 
@@ -107,14 +120,7 @@ impl FakeBackend {
 #[async_trait::async_trait]
 impl ViewerBackend for FakeBackend {
     fn display(&self) -> ServerHello {
-        ServerHello {
-            protocol_version: PROTOCOL_VERSION,
-            runtime_version: "0.1.0".to_owned(),
-            output: Size::new(800, 600),
-            renderer: RendererKind::Pixman,
-            cursor: CursorState::hidden(),
-            control: ControlOwner::Ai,
-        }
+        server_hello()
     }
 
     async fn render_frame(&self) -> ViewerResult<ViewerFrame> {
@@ -332,37 +338,118 @@ async fn frames_stream_pushes_a_frame_on_a_desktop_change() {
     assert_eq!(frame.image.width, 1);
 }
 
+/// A clean `ViewerClient::close` must deterministically make `serve()` return
+/// `Ok(())`: the server writes a courtesy `bye` acknowledgement in reply, and the
+/// client has to keep its read half open long enough to receive it. Looping makes
+/// a flaky regression (a spurious `BrokenPipe` out of the session) visible.
 #[tokio::test]
 async fn close_succeeds_and_finishes_the_server_session() {
-    let harness = start_server();
-    let client = connect(&harness).await;
+    for iteration in 0..10 {
+        let harness = start_server();
+        let client = connect(&harness).await;
 
-    // `close` performs the client half of the leave handshake and always
-    // succeeds (a best-effort `bye` followed by tearing the socket down).
+        // A frame round trip proves the connection is live before closing.
+        tokio::time::timeout(STEP_TIMEOUT, client.request_frame())
+            .await
+            .expect("request_frame must not hang")
+            .expect("request_frame must succeed");
+
+        // `close` performs the client half of the leave handshake and always
+        // succeeds (a best-effort `bye` then a bounded wait for the reply).
+        tokio::time::timeout(STEP_TIMEOUT, client.close())
+            .await
+            .expect("close must not hang")
+            .expect("close must succeed");
+
+        // The session for that viewer ends cleanly — never with a peer-gone
+        // transport error — because the client waits for the `bye` reply.
+        let served = tokio::time::timeout(STEP_TIMEOUT, harness.serve)
+            .await
+            .expect("the server session must finish after the viewer leaves")
+            .expect("the serve task must not panic");
+        assert!(
+            served.is_ok(),
+            "iteration {iteration}: a clean viewer close must be Ok, got {served:?}"
+        );
+    }
+}
+
+/// The same clean-close guarantee must hold on a multi-thread runtime, where the
+/// client and the server are polled on different worker threads.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn close_succeeds_on_a_multi_thread_runtime() {
+    for iteration in 0..10 {
+        let harness = start_server();
+        let client = connect(&harness).await;
+
+        tokio::time::timeout(STEP_TIMEOUT, client.close())
+            .await
+            .expect("close must not hang")
+            .expect("close must succeed");
+
+        let served = tokio::time::timeout(STEP_TIMEOUT, harness.serve)
+            .await
+            .expect("the server session must finish after the viewer leaves")
+            .expect("the serve task must not panic");
+        assert!(
+            served.is_ok(),
+            "iteration {iteration}: a clean viewer close must be Ok, got {served:?}"
+        );
+    }
+}
+
+/// A server-initiated close is observed by the client: when the server sends
+/// `bye` and drops the connection, the client's frame stream ends instead of
+/// hanging, and the client can still be closed cleanly.
+#[tokio::test]
+async fn client_notices_a_server_initiated_bye() {
+    let dir = tempfile::tempdir().expect("a temp dir");
+    let path = dir.path().join("viewer.sock");
+    let listener = UnixListener::bind(&path).expect("bind the unix socket");
+    let server = tokio::spawn(async move {
+        let (stream, _addr) = listener.accept().await.expect("accept a viewer");
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut lines = tokio::io::BufReader::new(read_half).lines();
+        // Read the client handshake, then answer with a hello and immediately a
+        // server-initiated `bye`.
+        let handshake = lines.next_line().await.expect("read the handshake");
+        assert!(handshake.is_some(), "the client must send a hello");
+        let hello = encode_server(&ServerMessage::Hello(server_hello()));
+        write_half.write_all(hello.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+        let bye = encode_server(&ServerMessage::Bye {
+            reason: "server shutting down".to_owned(),
+        });
+        write_half.write_all(bye.as_bytes()).await.unwrap();
+        write_half.write_all(b"\n").await.unwrap();
+        write_half.flush().await.unwrap();
+        // Dropping the stream closes the connection from the server side.
+    });
+
+    let target = ViewerTarget::Unix(path);
+    let client = tokio::time::timeout(STEP_TIMEOUT, ViewerClient::connect(target))
+        .await
+        .expect("connect must not hang")
+        .expect("connect must succeed");
+
+    // The server's `bye` ends the client's frame stream (it never hangs).
+    let frames = client.frames();
+    pin_mut!(frames);
+    let next = tokio::time::timeout(STEP_TIMEOUT, frames.next())
+        .await
+        .expect("the client must notice the server-ended connection");
+    assert!(next.is_none(), "the frame stream must end, got {next:?}");
+
+    // A client whose peer already left still closes cleanly.
     tokio::time::timeout(STEP_TIMEOUT, client.close())
         .await
         .expect("close must not hang")
         .expect("close must succeed");
 
-    // The session for that viewer ends rather than hanging. `close` shuts the
-    // socket down as soon as it has sent its `bye`, so the session may observe
-    // the departure either as the `bye` it answered with `Ok(())` or as a
-    // transport error on that best-effort reply; both mean it terminated.
-    let served = tokio::time::timeout(STEP_TIMEOUT, harness.serve)
+    tokio::time::timeout(STEP_TIMEOUT, server)
         .await
-        .expect("the server session must finish after the viewer leaves")
-        .expect("the serve task must not panic");
-    match served {
-        Ok(()) => {}
-        Err(ViewerError::Io(error)) => assert!(
-            matches!(
-                error.kind(),
-                ErrorKind::BrokenPipe | ErrorKind::ConnectionReset
-            ),
-            "unexpected session failure: {error:?}"
-        ),
-        Err(other) => panic!("unexpected session failure: {other:?}"),
-    }
+        .expect("the server task must finish")
+        .expect("the server task must not panic");
 }
 
 /// A viewer that leaves by closing its socket without a `bye` is a clean EOF:
