@@ -92,6 +92,15 @@ impl ResultPayload {
     pub fn as_value(&self) -> &serde_json::Value {
         &self.0
     }
+
+    /// Decodes into the method's typed result struct, consuming the payload (no clone).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProtoError::InvalidResult`] when the payload does not match `R`.
+    pub fn into_decode<R: serde::de::DeserializeOwned>(self) -> Result<R> {
+        serde_json::from_value(self.0).map_err(|error| ProtoError::InvalidResult(error.to_string()))
+    }
 }
 
 /// Wire error object (§6): `{"code": "...", "message": "...", "data": {...}?}`.
@@ -201,7 +210,7 @@ impl<'de> Deserialize<'de> for ResponseFrame {
 ///
 /// `id` is mandatory; exactly one of `result`/`error` must be present (§6).
 fn response_from_value(value: Value) -> Result<ResponseFrame> {
-    let Value::Object(object) = value else {
+    let Value::Object(mut object) = value else {
         return Err(ProtoError::Malformed(
             "response frame must be a JSON object".to_owned(),
         ));
@@ -210,7 +219,11 @@ fn response_from_value(value: Value) -> Result<ResponseFrame> {
         .get("id")
         .and_then(Value::as_u64)
         .ok_or_else(|| ProtoError::Malformed("response frame requires an `id` u64".to_owned()))?;
-    let outcome = match (object.get("result"), object.get("error")) {
+    // `remove` yields `Some(Value::Null)` for an explicit `null`, matching the
+    // presence semantics of the previous `get`-based discrimination.
+    let result = object.remove("result");
+    let error = object.remove("error");
+    let outcome = match (result, error) {
         (Some(_), Some(_)) => {
             return Err(ProtoError::Malformed(
                 "response frame carries both `result` and `error`".to_owned(),
@@ -221,9 +234,9 @@ fn response_from_value(value: Value) -> Result<ResponseFrame> {
                 "response frame carries neither `result` nor `error`".to_owned(),
             ))
         }
-        (Some(result), None) => ResponseOutcome::Result(ResultPayload(result.clone())),
+        (Some(result), None) => ResponseOutcome::Result(ResultPayload(result)),
         (None, Some(error)) => {
-            let error: ErrorPayload = serde_json::from_value(error.clone()).map_err(|error| {
+            let error: ErrorPayload = serde_json::from_value(error).map_err(|error| {
                 ProtoError::Malformed(format!("invalid `error` payload: {error}"))
             })?;
             ResponseOutcome::Error(error)
@@ -308,13 +321,13 @@ impl<'de> Deserialize<'de> for EventFrame {
 
 /// Reads an event frame from an already-parsed JSON value (§1, §5.6).
 fn event_from_value(value: Value) -> Result<EventFrame> {
-    let Value::Object(object) = value else {
+    let Value::Object(mut object) = value else {
         return Err(ProtoError::Malformed(
             "event frame must be a JSON object".to_owned(),
         ));
     };
-    let name = match object.get("event") {
-        Some(Value::String(name)) => name.clone(),
+    let name = match object.remove("event") {
+        Some(Value::String(name)) => name,
         Some(other) => {
             return Err(ProtoError::Malformed(format!(
                 "event frame's `event` must be a string, got {other}"
@@ -326,8 +339,18 @@ fn event_from_value(value: Value) -> Result<EventFrame> {
             ))
         }
     };
-    let event: EventKind = serde_json::from_value(Value::String(name.clone()))
-        .map_err(|_| ProtoError::UnknownEventKind(name))?;
+    // Decode the kind from the borrowed name so that only the unknown-kind path
+    // needs to take ownership of it for the error.
+    let event: EventKind = {
+        use serde::de::IntoDeserializer;
+
+        let deserializer: serde::de::value::StrDeserializer<'_, serde::de::value::Error> =
+            name.as_str().into_deserializer();
+        match EventKind::deserialize(deserializer) {
+            Ok(event) => event,
+            Err(_) => return Err(ProtoError::UnknownEventKind(name)),
+        }
+    };
     let seq = object
         .get("seq")
         .and_then(Value::as_u64)
@@ -336,9 +359,9 @@ fn event_from_value(value: Value) -> Result<EventFrame> {
         .get("ts_ms")
         .and_then(Value::as_u64)
         .ok_or_else(|| ProtoError::Malformed("event frame requires a `ts_ms` u64".to_owned()))?;
-    let data = match object.get("data") {
+    let data = match object.remove("data") {
         None | Some(Value::Null) => Value::Object(Map::new()),
-        Some(data) => data.clone(),
+        Some(data) => data,
     };
     let data = EventPayload::from_data(event, data)?;
     Ok(EventFrame::new(event, seq, ts_ms, data))
@@ -390,19 +413,19 @@ impl Frame {
     /// frames, [`ProtoError::UnknownEventKind`] / [`ProtoError::InvalidEventData`]
     /// for event frames.
     pub(crate) fn from_value(value: Value) -> Result<Frame> {
-        let Value::Object(object) = value else {
+        if !value.is_object() {
             return Err(ProtoError::Malformed(
                 "frame must be a JSON object".to_owned(),
             ));
-        };
-        if object.contains_key("event") {
-            return Ok(Frame::Event(event_from_value(Value::Object(object))?));
         }
-        if object.contains_key("method") {
-            return Ok(Frame::Request(request_from_value(Value::Object(object))?));
+        if value.get("event").is_some() {
+            return event_from_value(value).map(Frame::Event);
         }
-        if object.contains_key("id") {
-            return Ok(Frame::Response(response_from_value(Value::Object(object))?));
+        if value.get("method").is_some() {
+            return request_from_value(value).map(Frame::Request);
+        }
+        if value.get("id").is_some() {
+            return response_from_value(value).map(Frame::Response);
         }
         Err(ProtoError::Malformed(
             "frame has none of `event`, `method` or `id`".to_owned(),
@@ -412,7 +435,7 @@ impl Frame {
 
 /// Reads a request frame from an already-parsed JSON value (§1).
 fn request_from_value(value: Value) -> Result<RequestFrame> {
-    let Value::Object(object) = value else {
+    let Value::Object(mut object) = value else {
         return Err(ProtoError::Malformed(
             "request frame must be a JSON object".to_owned(),
         ));
@@ -421,8 +444,8 @@ fn request_from_value(value: Value) -> Result<RequestFrame> {
         .get("id")
         .and_then(Value::as_u64)
         .ok_or_else(|| ProtoError::Malformed("request frame requires an `id` u64".to_owned()))?;
-    let name = match object.get("method") {
-        Some(Value::String(name)) => name.clone(),
+    let name = match object.remove("method") {
+        Some(Value::String(name)) => name,
         Some(other) => {
             return Err(ProtoError::Malformed(format!(
                 "request frame's `method` must be a string, got {other}"
@@ -435,9 +458,9 @@ fn request_from_value(value: Value) -> Result<RequestFrame> {
         }
     };
     // Absent or `null` params mean "no parameters" (§1 examples, §5.1 `ping`).
-    let params = match object.get("params") {
+    let params = match object.remove("params") {
         None | Some(Value::Null) => Value::Object(Map::new()),
-        Some(params) => params.clone(),
+        Some(params) => params,
     };
     Ok(RequestFrame::new(id, Method::from_parts(&name, params)?))
 }
