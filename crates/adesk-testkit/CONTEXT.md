@@ -84,6 +84,8 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 ## Known Issues
 
 - `tests/fixtures.rs` prints `Io error: Broken pipe (os error 32)` on stdout while still passing — log noise from the helper-process path, not a failure.
+- Clipboard publication is accepted only while the publishing client holds keyboard focus at dispatch time (Smithay ignores the quoted serial and silently drops the request otherwise) and `set_selection` only flushes, so a publication followed by an awaited AGP `activate_window` can be applied after the focus moved and be dropped between the two channels.
+- That ordering hazard is latent in `tests/clipboard.rs::second_set_selection_invalidates_the_first_offer` (and in `adesk-compositor`'s `second_set_selection_supersedes_the_first_offer`); `roundtrip()` is a flush plus one buffered reader-cycle notification, not a barrier, and a lost publication presents as zero offers or a stale re-announcement, never a silent pass — `tests/CONTEXT.md` records the failure signatures and the barrier pattern that closes the race.
 
 ## Notes for Agents
 
