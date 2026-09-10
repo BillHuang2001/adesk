@@ -1,8 +1,8 @@
 //! Image layer acceptance tests (`docs/protocol.md` §4).
 //!
-//! `image_payload_base64_helpers` mirrors the frozen Phase-2 acceptance test in
-//! `tests/codec.rs` (which stays `#[ignore]`d until the manager integrates);
-//! the remaining tests pin the edge cases of the same four bodies.
+//! `image_payload_base64_helpers` mirrors the frozen acceptance test in
+//! `tests/codec.rs`; the remaining tests pin the edge cases of the same four
+//! bodies.
 
 use adesk_core::PixelFormat;
 use adesk_proto::{ImageFormat, ImagePayload, ProtoError};
