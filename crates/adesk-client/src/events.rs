@@ -161,7 +161,7 @@ impl EventFilter {
 fn event_kind(event: &AgpEvent) -> Option<EventKind> {
     match event {
         AgpEvent::Runtime(runtime) => Some(EventKind::from(runtime.kind())),
-        AgpEvent::Quiet(_) => Some(EventKind::Quiet),
+        AgpEvent::Quiet { .. } => Some(EventKind::Quiet),
         // Known-but-untyped frames (`surface_damage`, future kinds): the wire
         // name is the only kind information available.
         AgpEvent::Other { name, .. } => serde_json::from_value(Value::String(name.clone())).ok(),
@@ -173,7 +173,7 @@ fn event_kind(event: &AgpEvent) -> Option<EventKind> {
 fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
     match event {
         AgpEvent::Runtime(runtime) => runtime.window_id(),
-        AgpEvent::Quiet(quiet) => quiet.window_id,
+        AgpEvent::Quiet { event, .. } => event.window_id,
         AgpEvent::Other { data, .. } => data.get("window_id").and_then(Value::as_u64).map(WindowId),
         AgpEvent::InspectFrame(_) => None,
     }
@@ -211,10 +211,11 @@ pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
                 },
             }
         }
-        // `quiet` is emitted with a typed payload (§5.6); a payload this client
-        // cannot read falls back to the raw frame (protocol §7).
+        // `quiet` is emitted with a typed payload (§5.6); the frame envelope is
+        // retained so the typed variant stays causally orderable. A payload this
+        // client cannot read falls back to the raw frame (protocol §7).
         "quiet" => match serde_json::from_value::<QuietEvent>(data.clone()) {
-            Ok(quiet) => AgpEvent::Quiet(quiet),
+            Ok(event) => AgpEvent::Quiet { seq, ts_ms, event },
             Err(_) => AgpEvent::Other {
                 name,
                 seq,
@@ -282,10 +283,17 @@ pub enum AgpEvent {
     /// A typed `quiet` event (protocol §5.6): the observer saw no counted
     /// surface commit for the window (or the whole runtime) for `quiet_ms`.
     ///
-    /// The payload is the shared wire type ([`QuietEvent`]); unlike
-    /// [`RuntimeEvent`] and [`InspectFrame`] it carries no envelope
-    /// `seq`/`ts_ms`.
-    Quiet(QuietEvent),
+    /// The frame envelope (`seq`/`ts_ms`) is retained alongside the shared wire
+    /// payload ([`QuietEvent`]), so quiet frames are causally orderable with
+    /// [`RuntimeEvent`] and [`InspectFrame`] frames.
+    Quiet {
+        /// Global monotonic event sequence.
+        seq: u64,
+        /// Monotonic milliseconds since runtime start.
+        ts_ms: u64,
+        /// The observer's quiet decision (window-specific or runtime-wide).
+        event: QuietEvent,
+    },
     /// An `inspect_frame` produced by `inspect_subscribe`.
     InspectFrame(InspectFrame),
     /// An event the client does not model (forward compatibility, protocol §7).

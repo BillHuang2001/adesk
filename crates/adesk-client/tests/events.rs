@@ -516,14 +516,14 @@ async fn connection_close_ends_stream_with_closed() {
 ///
 /// Subscribe with `subscribe_frames(EventFilter::all())`; emit a 'quiet' frame
 /// whose data is `{"window_id": 17, "quiet_ms": 250}` and assert
-/// `AgpEvent::Quiet` carries both fields; emit a runtime-wide quiet
-/// (`window_id: null`) and assert `window_id: None`; then emit a
-/// 'surface_damage' frame and assert it still arrives as `AgpEvent::Other` with
-/// name/seq/ts_ms/data preserved (it is a subscription-only filter alias that
-/// is never emitted as a typed frame).
+/// `AgpEvent::Quiet` carries both fields plus the frame's exact `seq`/`ts_ms`;
+/// emit a runtime-wide quiet (`window_id: null`) and assert `window_id: None`
+/// with its own envelope; then emit a 'surface_damage' frame and assert it still
+/// arrives as `AgpEvent::Other` with name/seq/ts_ms/data preserved (it is a
+/// subscription-only filter alias that is never emitted as a typed frame).
 ///
-/// `AgpEvent::Quiet` carries the proto payload only, so unlike
-/// `RuntimeEvent`/`InspectFrame` it has no envelope `seq`/`ts_ms` to assert.
+/// The `Quiet` variant retains the envelope, so quiet frames are causally
+/// orderable like `RuntimeEvent`/`InspectFrame` frames.
 #[tokio::test]
 async fn quiet_frame_is_typed() {
     let mut server = MockServer::start().await;
@@ -543,9 +543,11 @@ async fn quiet_frame_is_typed() {
         .await
         .expect("the quiet event is typed")
     {
-        AgpEvent::Quiet(quiet) => {
+        AgpEvent::Quiet { seq, ts_ms, event } => {
+            assert_eq!(seq, 71, "the frame envelope is retained");
+            assert_eq!(ts_ms, 4000, "the frame envelope is retained");
             assert_eq!(
-                quiet,
+                event,
                 QuietEvent {
                     window_id: Some(WindowId(17)),
                     quiet_ms: 250,
@@ -569,13 +571,14 @@ async fn quiet_frame_is_typed() {
         .await
         .expect("the runtime-wide quiet event is typed")
     {
-        AgpEvent::Quiet(quiet) => {
-            assert_eq!(quiet.window_id, None, "null window_id means the runtime");
-            assert_eq!(quiet.quiet_ms, 100);
+        AgpEvent::Quiet { seq, ts_ms, event } => {
+            assert_eq!(seq, 73);
+            assert_eq!(ts_ms, 4200);
+            assert_eq!(event.window_id, None, "null window_id means the runtime");
+            assert_eq!(event.quiet_ms, 100);
         }
         other => panic!("expected AgpEvent::Quiet, got {other:?}"),
     }
-
     // `surface_damage` stays untyped: a filter alias, not a frame kind.
     let damage = json!({
         "window_id": 17,
@@ -646,9 +649,9 @@ async fn typed_quiet_is_locally_filtered() {
         .await
         .expect("the quiet event is typed")
     {
-        AgpEvent::Quiet(quiet) => {
-            assert_eq!(quiet.window_id, Some(WindowId(17)));
-            assert_eq!(quiet.quiet_ms, 250);
+        AgpEvent::Quiet { event, .. } => {
+            assert_eq!(event.window_id, Some(WindowId(17)));
+            assert_eq!(event.quiet_ms, 250);
         }
         other => panic!("expected only AgpEvent::Quiet, got {other:?}"),
     }
@@ -683,9 +686,9 @@ async fn typed_quiet_is_locally_filtered() {
         .await
         .expect("the window-17 quiet event is typed")
     {
-        AgpEvent::Quiet(quiet) => {
+        AgpEvent::Quiet { event, .. } => {
             assert_eq!(
-                quiet.window_id,
+                event.window_id,
                 Some(WindowId(17)),
                 "the window-18 quiet was filtered out locally"
             );
