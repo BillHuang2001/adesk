@@ -106,7 +106,9 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 | §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`) | `./src/dispatch/events.rs` |
 | §5.7 inspector (`inspect_capture`, `inspect_subscribe`) | `./src/dispatch/inspect.rs` |
 | CLI binary (`adesk-server`) | `./src/main.rs` |
-| E2E AGP suites over a real runtime (nine integration targets) | `./tests/` (see `./tests/CONTEXT.md`) |
+| Viewer (VAP v1) endpoint: transport binding, accept loops, `viewer::start` | `./src/viewer/mod.rs`, `./src/viewer/listener.rs` |
+| `ViewerBackend` impl: frames, desktop state, viewer input through the seat helpers | `./src/viewer/backend.rs` |
+| E2E suites over a real runtime (ten integration targets: AGP + viewer/VAP) | `./tests/` (see `./tests/CONTEXT.md`) |
 
 ## Design Decisions
 
