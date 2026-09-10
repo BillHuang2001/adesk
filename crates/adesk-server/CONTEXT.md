@@ -153,6 +153,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 ## Notes for Agents
 
+- **Reusable seams for a second (non-AGP) endpoint.** `src/images.rs::encode`/`encode_png` is the only `ImageBuffer` → `adesk_proto::ImagePayload` encoder; `src/inspection.rs::refresh` renders the full output (`RuntimeCommand::RenderOutput`) and returns an `InspectionSnapshot` (`frame`, `active`, `cursor`, `seq`, `ts_ms`). The §5.5 seat helpers (`move_pointer`, `button_event`, `send_unit`, `activate_if_needed`, `window_rect`, `resolve_pointer_position`, `type_character`) are private to `src/dispatch/input.rs` and take `&RequestContext`; `dispatch::windows::{state, reserve_seq, command_error, unknown_window}` are `pub(super)`. `SocketListener` is a generic Unix-socket binder (RAII unlink keyed on the `(device, inode)` pair), `shutdown::run` removes only `config.socket_path`, and `event_pump` is the runtime's event-broadcast reader (`CompositorHandle::subscribe()` can be taken independently by any task).
 - Do not add AGP methods or fields outside `docs/protocol.md`; the dispatcher must stay total over `adesk_proto::Method`.
 - Keep the public API stable: `adesk-testkit` and `adesk-agent` are written against it. If a change is unavoidable, report it to the parent instead of editing siblings.
 - The crate has no blanket `allow` attributes: keep `clippy -D warnings` and `cargo doc` clean without adding new ones.
