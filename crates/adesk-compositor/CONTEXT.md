@@ -228,6 +228,7 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
+- Clipboard tests establish the publisher's keyboard focus only via the AGP `ActivateWindow` reply (sent after `apply_activate`) and client-observed events; `WaylandTestClient::roundtrip()` is a flush plus one reader poll cycle, not a `wl_display.sync` barrier, so it does not prove the compositor dispatched a preceding `set_selection`. The supersede test's second publication is ordered against the following `ActivateWindow` only by "requests flushed to the socket before the command was queued" — a latent race whose failure mode is a loud offer-count/payload assertion, never a silent pass — and the `publish` doc comment in `tests/clipboard.rs` claiming a "sync callback" is inaccurate.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 
