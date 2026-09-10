@@ -12,7 +12,7 @@ All four files are implementation-complete and audited clean: zero executable in
 - `openai.rs`: `OpenAiCompatProvider` (`new`, pure `build_chat_request`/`parse_decision`), `OpenAiConfig` (+ `Default`), constants `DEFAULT_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_TIMEOUT_MS`, `API_KEY_ENV`, `API_KEY_ENV_FALLBACK`, `DEFAULT_SYSTEM_PROMPT`.
 
 ## Constraints
-- `ProviderError` comes from `crate::error`; every failure path must map onto one of its variants (`MissingApiKey`, `Transport`, `Status`, `Timeout`, `InvalidResponse`, `Unsupported`) rather than being swallowed.
+- `ProviderError` comes from `crate::error`; every failure path must map onto one of its variants (`MissingApiKey`, `Transport`, `Status`, `Timeout`, `InvalidResponse`) rather than being swallowed.
 - `src/provider/openai.rs` is the only module in the crate that performs HTTP; it must stay behind the `LlmProvider` trait. `src/provider/dummy.rs` performs no I/O, no HTTP and no syscalls, and never panics on the `complete` path.
 - `DEFAULT_SYSTEM_PROMPT` is the prompt-level contract for `AgentDecision` and must be kept in sync with the decision vocabulary.
 - No provider test may hit the network; `build_chat_request`/`parse_decision` are pure precisely so the HTTP path itself needs no coverage.
