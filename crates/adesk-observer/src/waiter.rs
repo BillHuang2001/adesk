@@ -213,7 +213,7 @@ impl Accumulator {
                         // rects that escape the geometry. This is exactly
                         // `damage.clip(&geometry)` folded in, without allocating
                         // a temporary `Region` per counted commit.
-                        for rect in damage.iter() {
+                        for rect in damage.rects() {
                             if contained_in(rect, &geometry) {
                                 self.damage.push(*rect);
                             } else if let Some(part) = rect.intersect(&geometry) {
