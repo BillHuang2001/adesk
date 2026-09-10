@@ -118,9 +118,9 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format rejected at the wire boundary, truncated PNG) and client-owned extras for length/stride/dimension mismatches.
 - `tests/socket_path.rs` — `default_socket_path()` resolution order. The fallback branch is reachable only with `$ADESK_SOCKET` and `$XDG_RUNTIME_DIR` unset, which the ambient environment does not guarantee, so each case asserts in a **child** process of the test binary with a controlled environment (`Command::env`/`env_remove` affect the child only); the suite never mutates its own process environment. The fallback case pins `$TMPDIR` to a private dir, so a hard-coded path fails.
 - Determinism: no sleeps longer than needed, deadlines explicit, `tokio::time::pause()` only if `test-util` is enabled in dev-deps, otherwise real time with generous margins (`docs/architecture.md` §10).
-- The only wall-clock *negative* assertions (real time spent for correctness, not just a hang guard) are `concurrency.rs` `timeout(50ms, &mut first)` (replaceable with the `futures::poll!().is_pending()` idiom the same test already uses) and `version.rs` `timeout(100ms, server.next_request())`. Every other `timeout` is a hang bound that never fires on a correct client.
-- `tests/images.rs` declares `mod common;` but uses none of `MockServer`/`Client`: the whole 256-line harness is compiled into that test target for nothing.
-- Each test file re-declares its own `connect(&mut MockServer)` helper (api/concurrency/errors/events verbatim, framing a variant) and its own 10 s deadline (named `TIMEOUT` in api.rs, `STEP_TIMEOUT` in events.rs, 14 inline literals elsewhere); `common/mod.rs` carries no shared connect/deadline helper.
+- Negative assertions use the deterministic `futures::poll!(&mut fut).is_pending()` idiom (`concurrency.rs`, `version.rs`); every remaining `timeout` is a hang bound that never fires on a correct client — no assertion depends on real wall-clock delay.
+- `tests/common/mod.rs` provides the shared harness helpers — `connect`/`connect_with`, the single 10 s `TIMEOUT`, and the `window_info()` fixture — and every test file uses them; there are no per-file `connect`/deadline/fixture copies.
+- `tests/images.rs` declares no `mod common;` (it uses no harness helpers), so the mock-server harness is not compiled into that target.
 
 ## Dependencies
 
