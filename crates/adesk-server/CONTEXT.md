@@ -24,7 +24,7 @@ Everything below is re-exported at the crate root; `adesk-testkit` is designed a
 - `adesk_viewer::ViewerBackend` for the runtime (`./src/viewer/backend.rs`, `pub(crate) ViewerBackendImpl`): `display` (`ServerHello`), `render_frame`, `desktop_state`, `apply_input` (returns the recorded `ActionId`), `change_signal`, `set_control`.
 - `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
 - `RunningServer` (Clone handle; `Debug` prints only the socket path; dropping it does not stop the runtime):
-  - `socket_path() -> &Path`, `compositor() -> &CompositorHandle`, `observer() -> &ObserverService`, `registry() -> &Arc<AppRegistry>`, `context() -> &ServerContext`, `shutdown_handle() -> &ShutdownHandle`;
+  - `socket_path() -> &Path`, `viewer_socket_path() -> Option<&Path>` (the bound VAP v1 Unix socket, `None` when the endpoint is disabled), `compositor() -> &CompositorHandle`, `observer() -> &ObserverService`, `registry() -> &Arc<AppRegistry>`, `context() -> &ServerContext`, `shutdown_handle() -> &ShutdownHandle`;
   - `async wait() -> Result<()>` (resolves when the runtime stops serving), `async shutdown() -> Result<()>` (idempotent).
 - `ServerContext` (`src/context.rs`): cheap-clone bundle with public fields `config`, `compositor`, `observer`, `registry`, `correlator`, `subscriptions`, `inspect_subscriptions`, `inspection`, `cursor`, `shutdown`, `started_at`; `now_ms()`, `uptime_ms()`, `next_connection_id()`.
 - `CursorTracker { set(Point), get() -> Option<Point> }` — last commanded pointer position (the compositor snapshot has no cursor).
