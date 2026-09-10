@@ -45,14 +45,16 @@ pub const DEFAULT_FINISH_PROBABILITY: f64 = 0.15;
 pub const DEFAULT_STEP_BUDGET: u32 = 10;
 
 /// How [`DummyVlmProvider`] chooses each decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum DummyMode {
     /// Replay a caller-supplied script in order; [`AgentDecision::Finish`] once it
     /// runs out.
+    #[value(name = "fixed")]
     Fixed,
     /// Pick a random decision from the configured pool each step, finishing via
     /// the finish probability or the step budget. This is the default.
     #[default]
+    #[value(name = "random")]
     Random,
 }
 

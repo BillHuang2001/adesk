@@ -22,7 +22,9 @@
 //! ## Seams (everything is replaceable in tests)
 //!
 //! - [`LlmProvider`] — the LLM. [`MockProvider`] replays a script and is the
-//!   default provider in tests and dry runs.
+//!   default provider in tests and dry runs; [`DummyVlmProvider`] is a no-I/O
+//!   synthetic provider that replays a fixed script or picks random decisions from
+//!   a pool; [`OpenAiCompatProvider`] speaks an OpenAI-compatible HTTP endpoint.
 //! - [`AgentClient`] — AGP operations. [`AgpClient`] wraps `adesk-client`; the
 //!   `adesk_agent::testing::ScriptedClient` fake needs no socket or compositor.
 //!
@@ -34,7 +36,7 @@
 //! | [`decision`] | The decision vocabulary (`AgentDecision`, `ActionKind`) |
 //! | [`client`] | `AgentClient` trait plus AGP request/result types |
 //! | [`agp`] | Concrete `adesk-client` adapter (the only wire-coupled module) |
-//! | [`provider`] | `LlmProvider` plus mock and OpenAI-compatible implementations |
+//! | [`provider`] | `LlmProvider` plus mock, dummy and OpenAI-compatible implementations |
 //! | [`agent_loop`] | plan → act → observe → decide control flow, budgets, recovery |
 //! | [`metrics`] | Counters, latency statistics, `MetricsReport` |
 //! | [`scenario`] | Built-in scenarios, expectations, runner |
@@ -75,8 +77,8 @@ pub use metrics::{
     estimate_visual_tokens, latency_stats, LatencyStats, Metrics, MetricsReport, StopReason,
 };
 pub use provider::{
-    LlmProvider, MockProvider, OpenAiCompatProvider, OpenAiConfig, ProviderConfig, ProviderKind,
-    ScriptEntry,
+    DummyConfig, DummyMode, DummyVlmProvider, LlmProvider, MockProvider, OpenAiCompatProvider,
+    OpenAiConfig, ProviderConfig, ProviderKind, ScriptEntry,
 };
 pub use report::RunReport;
 pub use scenario::{
