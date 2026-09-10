@@ -89,18 +89,6 @@ impl CaptureRegionRequest {
             format: ImageFormat::Png,
         }
     }
-
-    /// Downscale so the longer edge is at most `max_dimension`.
-    pub fn max_dimension(mut self, max_dimension: u32) -> Self {
-        self.max_dimension = Some(max_dimension);
-        self
-    }
-
-    /// Request a specific wire format.
-    pub fn format(mut self, format: ImageFormat) -> Self {
-        self.format = format;
-        self
-    }
 }
 
 /// Result of `capture_window` / `capture_region` (protocol §5.4).
@@ -356,16 +344,6 @@ impl WaitForQuietRequest {
     }
 }
 
-/// `capture_window` / `capture_region` result envelope (`{"image", "window", ..}`).
-#[derive(Debug, Clone, Deserialize)]
-struct CaptureEnvelope {
-    image: ImagePayload,
-    window: WindowInfo,
-    commit_seq: u64,
-    #[serde(default)]
-    changed_regions: Vec<Rect>,
-}
-
 /// `observe` result envelope; tolerates `image` inside the observation object.
 #[derive(Debug, Clone, Deserialize)]
 struct ObserveEnvelope {
@@ -393,24 +371,12 @@ impl Client {
     /// Rendering happens on demand; the returned image is a fresh readback, not
     /// a cached frame (design invariant 5).
     pub async fn capture_window(&self, request: CaptureRequest) -> Result<CaptureResult> {
-        let envelope: CaptureEnvelope = self.request("capture_window", &request).await?;
-        Ok(CaptureResult {
-            image: envelope.image,
-            window: envelope.window,
-            commit_seq: envelope.commit_seq,
-            changed_regions: envelope.changed_regions,
-        })
+        self.request("capture_window", &request).await
     }
 
     /// `capture_region` — render an explicit window-relative region.
     pub async fn capture_region(&self, request: CaptureRegionRequest) -> Result<CaptureResult> {
-        let envelope: CaptureEnvelope = self.request("capture_region", &request).await?;
-        Ok(CaptureResult {
-            image: envelope.image,
-            window: envelope.window,
-            commit_seq: envelope.commit_seq,
-            changed_regions: envelope.changed_regions,
-        })
+        self.request("capture_region", &request).await
     }
 
     /// `observe` — wait for a condition and report causal history since a

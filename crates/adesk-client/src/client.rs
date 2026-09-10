@@ -70,21 +70,9 @@ impl ConnectOptions {
         }
     }
 
-    /// Override the socket path.
-    pub fn path(mut self, path: impl Into<PathBuf>) -> Self {
-        self.path = path.into();
-        self
-    }
-
     /// Override the inbound line cap.
     pub fn max_frame_len(mut self, max_frame_len: usize) -> Self {
         self.max_frame_len = max_frame_len;
-        self
-    }
-
-    /// Override the connect timeout (`None` = wait forever).
-    pub fn connect_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.connect_timeout = timeout;
         self
     }
 
@@ -160,11 +148,6 @@ impl Client {
     /// event streams end.
     pub async fn close(self) -> Result<()> {
         self.inner.close().await
-    }
-
-    /// The protocol version this client speaks (`docs/protocol.md` §5.1).
-    pub fn protocol_version(&self) -> u32 {
-        PROTOCOL_VERSION
     }
 
     /// Send one request and deserialise its result (crate-internal helper).
