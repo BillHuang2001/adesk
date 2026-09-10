@@ -5,7 +5,7 @@
 End-to-end coverage of the AGP v1 server: a real runtime (`Server::start`) on a private temp socket,
 driven through `adesk-client` (typed) and raw NDJSON, with no display, GPU, network or installed application.
 These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + transport).
-Nine integration targets totalling 55 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
+Nine integration targets totalling 56 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
 They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond generous bounds.
 
 ## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
@@ -30,7 +30,7 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
 | `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix), keyboard methods without `window_id` answer `invalid_request` (no keyboard focus). |
 | `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire. |
 | `capture.rs` | §5.4 `capture_window`/`capture_region` unknown-window errors (no client ever connects here, so no windows exist). |
-| `inspector.rs` | §5.7 `inspect_capture` PNG/dimensions/overlays/`max_dimension`; `inspect_subscribe` frame stream + unsubscribe. |
+| `inspector.rs` | §5.7 `inspect_capture` PNG/dimensions/overlays/`max_dimension`; `inspect_subscribe` frame stream + unsubscribe; a stream whose renders start failing (compositor stopped out-of-band) deregisters itself. |
 | `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids; plus launch correlation: a synthetic `WindowCreated` injected into the compositor broadcast is fanned out with the correlator's `launch_id` while the raw broadcast stays `None`. |
 | `shutdown.rs` | idempotent shutdown, socket removal, `wait()`, rebinding the same path, handle drop does not stop the runtime, in-flight `shutting_down`. |
 | `sequence.rs` | §1 seq-monotonicity for server-synthesized events: an `observe(until=timeout)` watermark before a launch; the first `app_launched` strictly above it, the second strictly above the first and above the re-sampled watermark; ≥2 consecutive `inspect_frame` seqs strictly increasing above the pre-subscription watermark; `server_synthesized_seqs_interleave_with_the_compositor_counter` brackets both emission sites with out-of-band `ReserveSeq` probes — every synthesized `seq` above the probe reserved before it, every probe reserved after it above the `seq`. |

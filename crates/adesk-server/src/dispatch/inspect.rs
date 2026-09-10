@@ -70,7 +70,8 @@ pub async fn inspect_subscribe(
     );
     ctx.session.add_subscription(subscription_id);
     // The loop outlives the request; it stops when the connection closes, the
-    // subscription is removed, or the compositor can no longer render.
+    // subscription is removed, or the compositor can no longer render — and it
+    // deregisters the subscription itself on the way out.
     tokio::spawn(inspect_loop(
         ctx.server.clone(),
         inspector,
@@ -82,6 +83,13 @@ pub async fn inspect_subscribe(
 }
 
 /// The throttled push loop of one `inspect_subscribe` subscription.
+///
+/// The loop owns the stream's lifetime: whichever way it ends — the connection
+/// closed, `unsubscribe_events` removed the id, or rendering failed — it
+/// deregisters the subscription before returning, so
+/// [`crate::subscriptions::InspectRegistry`] never keeps an entry for a stream
+/// that has stopped pushing. Ids are never reused within a registry, so the
+/// removal can only hit this loop's own entry.
 async fn inspect_loop(
     context: ServerContext,
     inspector: Inspector,
@@ -91,7 +99,7 @@ async fn inspect_loop(
 ) {
     loop {
         if sink.is_closed() || !subscription_alive(&context, subscription_id) {
-            return;
+            break;
         }
         match render_frame(&context, &inspector).await {
             Ok((image, seq, ts_ms)) => {
@@ -111,17 +119,27 @@ async fn inspect_loop(
                         subscription = subscription_id,
                         "inspect frame dropped: outbound queue is full"
                     ),
-                    Err(TrySendError::Closed(_)) => return,
+                    Err(TrySendError::Closed(_)) => break,
                 }
             }
             Err(error) => {
                 // The compositor or the encoder is gone: nothing left to stream.
-                tracing::debug!(
-                    subscription = subscription_id,
-                    %error,
-                    "inspect stream stopped"
-                );
-                return;
+                // During shutdown that is expected; anywhere else the stream dies
+                // for a reason the client has no other way of learning about.
+                if context.shutdown.is_shutting_down() {
+                    tracing::debug!(
+                        subscription = subscription_id,
+                        %error,
+                        "inspect stream stopped: the runtime is shutting down"
+                    );
+                } else {
+                    tracing::warn!(
+                        subscription = subscription_id,
+                        %error,
+                        "inspect stream stopped: rendering failed; the subscription is removed"
+                    );
+                }
+                break;
             }
         }
         // `0` means "push every refresh" (no throttle); yielding still keeps the
@@ -133,6 +151,10 @@ async fn inspect_loop(
             tokio::task::yield_now().await;
         }
     }
+    // Whichever ending the loop took, a stopped stream must not stay registered:
+    // a stale entry would claim a live subscription to `unsubscribe_events` and
+    // to every reader of `InspectRegistry::list`.
+    context.inspect_subscriptions.unsubscribe(subscription_id);
 }
 
 /// Refreshes the inspection cache and returns the fresh snapshot.
