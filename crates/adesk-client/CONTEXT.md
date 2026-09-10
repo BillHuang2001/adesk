@@ -63,6 +63,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - All `adesk_proto` frame/codec types are named **only** in `src/wire.rs` (plus the `ImagePayload`/`QuietEvent` re-exports in `lib.rs` and the `format` vocabulary in `src/image.rs`); the rest of the crate uses the crate-internal `RawEvent`/`Inbound` vocabulary.
 - No third-party version literals: every dependency comes from `[workspace.dependencies]` via `.workspace = true`.
 - No `unsafe`; `#![deny(missing_docs)]`. No panics on request/event paths.
+- Transport is plain NDJSON over a local `AF_UNIX` socket — no TLS, no authentication, no token handshake anywhere in the protocol. Isolation is filesystem permissions on the socket path.
+- The crate is tokio-based: `connect*` requires a running tokio runtime because it spawns reader/writer tasks with `tokio::spawn`; callers bring their own runtime (`#[tokio::main]` or a `Runtime`), the crate never builds one.
 - Files stay well under the ~1000-line threshold; split along protocol sections rather than growing a file.
 - Do not log pixel payloads; `tracing` at `debug`/`trace` only in transport internals, never per event above `trace`.
 
