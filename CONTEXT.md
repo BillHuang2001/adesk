@@ -149,6 +149,8 @@ Feature-gated suites are green as well: `cargo test -p adesk-agent --features te
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 71 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
+There is no human-facing way to view inspection frames beyond the AGP protocol itself: the workspace ships no viewer binary, CLI, example or HTTP/UI/display path for `inspect_capture` / `inspect_subscribe`.
+A human must run an AGP client (the `adesk-client` SDK or raw NDJSON over the runtime's Unix socket), call `inspect_capture` (or `inspect_subscribe`) and save/decode the returned PNG themselves — the server-side path is `crates/adesk-server/src/dispatch/inspect.rs` (see `crates/adesk-server/CONTEXT.md`).
 Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and an `adesk-testkit` exec-path override (downstream crates currently ship their own fixture binary, e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
 
 ## Routing Table
