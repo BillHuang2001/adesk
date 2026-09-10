@@ -57,8 +57,9 @@ Startup (`Server::start`, `docs/architecture.md` §9):
 1. `adesk_compositor::spawn(CompositorConfig)` (sync, spawns the calloop thread) → `wait_ready()`.
 2. Build `AppRegistry` (`RegistryOptions` from `app_dirs`, one `Arc<dyn Clock>` shared with `Correlator`) and `scan()` (blocking → `spawn_blocking`).
 3. Bind the Unix socket (`prepare_socket_path` + `SocketListener::bind`).
-4. Spawn the event pump (observer + fan-out + `QueryState` resync) and install SIGINT/SIGTERM handlers.
-5. Spawn the accept loop; return `RunningServer` once the listener is bound.
+4. Spawn the event pump (observer + fan-out + `QueryState` resync).
+5. Bind the viewer (VAP v1) endpoint when it is enabled (`crate::viewer::start`: the Unix socket plus the opt-in TCP listener) and spawn its accept loops — before `Server::start` returns, so a returned `RunningServer` means VAP accepts connections too.
+6. Install SIGINT/SIGTERM handlers and spawn the AGP accept loop; return `RunningServer` once both listeners are bound.
 
 Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 1. `ShutdownHandle::initiate()` — stop accepting.
