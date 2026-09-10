@@ -89,9 +89,9 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - `./tests/api_surface.rs` pins the public API shape (builders, enum mappings, snapshot structs) without running a service.
 - Run: `./scripts/dev.sh cargo test -p adesk-observer`.
 ## Known Issues
-- `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); the affected windows are flagged `state_uncertain`.
+- `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); journal eviction does not set `state_uncertain` (only `resync` does) — the loss appears as `ObserverSnapshot::events_dropped`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
-- The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
+- The `quiet` evidence flag for a non-quiet condition (`change`/`timeout`) is resolved against `ObserverConfig::default_quiet_ms`; non-quiet requests carry no per-request quiet threshold (`quiet_ms` exists only on `wait_for_quiet` and inside `Condition::Quiet { quiet_ms }`).
   The public `Condition::quiet_threshold_ms()` helper does not reflect a custom `ObserverConfig::default_quiet_ms` (it always returns the `DEFAULT_QUIET_MS` constant of 250); only the service's internal resolve path honors the config field.
 - `Clock::now_ms()` truncates to whole milliseconds, so a deadline can fire up to ~1 ms early — inherent to the event-ts domain, consistent with "quiet is evidence, never a promise".
 - Popups have no state of their own: `PopupAppeared`/`PopupDisappeared` are owner-window counted events and `WindowSnapshot::popup_count` is accepted by `resync` but ignored.
