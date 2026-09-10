@@ -119,4 +119,4 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 
 ## Status
 Implementation-complete, documented and tested: all modules, the client SDK and the headless binary are landed, and the crate's own test/clippy/fmt/doc gates are green (counts in Test Strategy).
-The viewer endpoint is not yet wired into the runtime — no `adesk-server` code references `adesk-viewer`/`ViewerBackend` yet, so nothing binds the transport or renders frames from the compositor; that integration is a separate task and is the only remaining work for an end-to-end viewer.
+`adesk-server` consumes the crate end to end: it implements `ViewerBackend`, binds both transports and serves the endpoint by default, and `crates/adesk-server/tests/` drives the typed `ViewerClient`, so the server session, `PeerInfo`, the config builders and the client SDK all have real callers.
