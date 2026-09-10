@@ -2,7 +2,11 @@
 
 `tests/window_lifecycle.rs`, `tests/input_delivery.rs`, `tests/popups.rs`,
 `tests/clipboard.rs`, `tests/reserve_seq.rs` and `tests/output_composition.rs` hold the 20
-integration tests that prove the compositor core end to end.
+integration tests that prove the compositor core end to end. Their shared scaffolding — the
+command-side helpers, the one `map_toplevel` every suite maps its toplevels with, and the shared
+`DEADLINE` — lives in `tests/common/mod.rs`, which each suite pulls in with `mod common;`.
+(`tests/compositor_smoke.rs` is the third, testkit-free binary: it drives only the public
+`adesk_compositor` API and deliberately does not use the shared module.)
 Each starts a **real in-process runtime** — one compositor thread, one virtual output, the real
 protocol handlers and seat — and drives it the way an ordinary application does: a
 `wayland-client` connection (`adesk-testkit`) over the runtime's own socket, `RuntimeCommand`s
@@ -26,9 +30,13 @@ They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
   Nothing is launched, so `TestRuntimeConfig::new().with_apply_env(false)` releases the harness's
   process-env lock after startup and the tests stay independent and parallel.
 - **Events are the assertion surface**, not sleeps: read the broadcast through `EventAssert` and
-  assert on `seq` order, then assert state via `QueryState`. Deadlines are explicit (a 10 s
-  `DEADLINE`; a 250 ms `QUIET_BOUND` for negative claims) and no test sleeps or polls in a loop.
-  The broadcast never replays, so a tap is installed *before* the action it must observe.
+  assert on `seq` order, then assert state via `QueryState`. Every bounded wait uses the single
+  10 s `DEADLINE` (`tests/common/mod.rs`); no test sleeps or polls in a loop. An "emits nothing"
+  claim is a **positive ordering barrier**, never a quiet window: `QueryState` is served FIFO on
+  the command channel, so draining the tap when its reply resolves observes every event the action
+  under test emitted — and the drained tail is then asserted empty (the pattern `reserve_seq.rs`
+  documents). The broadcast never replays, so a tap is installed *before* the action it must
+  observe.
 - **`roundtrip` is a flush, not a synchronization barrier** (it waits one reader poll cycle).
   An assertion that must come after a client request commits on the same connection and awaits
   the resulting `surface_commit` — the late-app-id test in `window_lifecycle.rs` is the model.
@@ -69,8 +77,9 @@ They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
   increasing `seq`, and the reply resolves only after both are queued), while `QueryState` shows
   `A` `Active` / `B` `Inactive` / both mapped / `active_window_id == keyboard_focus == A`. The
   seat really moved (`wl_keyboard.leave` on `B`, a later `enter` on `A`), an unknown `WindowId`
-  replies `unknown_window` and changes nothing (`Expected::Any` bounded by `QUIET_BOUND`, snapshot
-  watermark unmoved), and neither connection saw a pointer or key event from the activation.
+  replies `unknown_window` and changes nothing (a `QueryState` barrier proves the rejected
+  activation emitted no event and left the snapshot watermark unmoved), and neither connection saw
+  a pointer or key event from the activation.
 
 **Current semantics: activation does not re-tile.** `adesk-wm`'s `activate` returns exactly
 `[WmAction::Activate { id }]`, and `ConfigureWindow` — the only action that sends
@@ -166,7 +175,8 @@ exists to log or to put in an event.
 - `reserving_is_strictly_increasing_and_silent` — two `ReserveSeq`s on a fresh runtime: the values
   strictly increase, the `QueryState` watermark equals the reserved number (one seq domain — a
   second counter would show up as a mismatch here), the window model is untouched, and a tap
-  installed before the reservations receives nothing (bounded by `QUIET_BOUND`).
+  installed before the reservations receives nothing (the matching `QueryState` watermark is the
+  positive barrier: an emitted event would have advanced the counter).
 - `later_events_do_not_reuse_reserved_seqs` — two reservations, then a real toplevel map over the
   Wayland path: the first event after the reservations is exactly `second + 1`, every event of the
   tail sits strictly above the reserved watermark, and the closing `QueryState` covers both the
@@ -199,7 +209,7 @@ exists to log or to put in an event.
 | `expected_window_geometry(Size)`, `wait_until(deadline, what, cond)` | single-sourced tiling rect, bounded state polls |
 | `EventAssert::tap(&runtime)` | ordered event assertions from the broadcast |
 | `Expected::{WindowCreatedFor, WindowActivated, WindowDestroyed, SurfaceCommit, PopupAppeared, Any, custom}` | event matchers |
-| `EventAssert::{wait_for_expected, wait_for, expect_none, drain, seen, assert_seen_order}` | waits, bounded negative claims, history scans |
+| `EventAssert::{wait_for_expected, wait_for, drain, seen, assert_seen_order}` | waits, positive-barrier negative claims, history scans |
 | `WaylandTestClient::{create_toplevel(ToplevelSpec), create_popup(&TestWindow, PopupSpec)}` | protocol-path surfaces |
 | `WaylandTestClient::{roundtrip, flush, close}` | flush (`roundtrip` = flush + one reader cycle — not a `wl_display.sync` barrier) and connection teardown |
 | `WaylandTestClient::{pointer_events, keyboard_events, clear_input_events, wait_for_pointer_event, wait_for_pointer_button, wait_for_keyboard_event, wait_for_key, last_modifiers}` | recorded `PointerEvent`/`KeyboardEvent` history as assertion source |
@@ -210,3 +220,27 @@ exists to log or to put in an event.
 | `FillPattern::{default, solid_rgb, checker}` + `FillPattern::at` | known pixel patterns and their expected pixels |
 | `ImageAssert::{new, pixel, matches_pattern, matches_solid, differs_from}`, `ImageBuffer::new_rgba` | pixel assertions on `RenderedFrame` payloads |
 | `BTN_LEFT`, `KEY_LEFTCTRL`, `KEY_C`, `AxisKind`, `ButtonState`, `KeyState` | properties asserted on recorded seat events |
+
+## Shared harness module — `tests/common/mod.rs`
+
+The six testkit-driven suites share one helper module, pulled in with `mod common;`. It is not a
+test target itself (`#![allow(dead_code)]` because each binary uses only a subset), and it holds:
+
+- `DEADLINE` — the single 10 s bound every suite's resolve-on-event waits use.
+- `map_toplevel(runtime, client, events, app_id, title, fill)` — maps one toplevel and returns
+  `(TestWindow, WindowId)`. It carries the strongest behavior of the former per-file copies:
+  asserts the tiling configure (and the committed buffer) fills the whole output, awaits the
+  map-time `window_created` + `window_activated`, then blocks on the client's `wl_keyboard.keymap`
+  as the seat-readiness barrier. Every caller installs its own `EventAssert::tap` first.
+- `reply(handle, build)` — sends one result-bearing `RuntimeCommand` and awaits its reply; the
+  primitives `query_state`, `query_state_of` (the `&CompositorHandle`, infallible shape
+  `input_delivery.rs` needs), `activate_window`, `close_window`, `render_window`, `render_output`
+  and `reserve_seq` are built on it.
+- `window_info(snapshot, id)` and `assert_seqs_increase(seen)` — the shared record lookup and the
+  strictly-increasing-`seq` history check.
+- `test_config()` — `TestRuntimeConfig::new().with_apply_env(false)`, the runtime config every
+  suite starts with.
+
+`clipboard.rs` keeps its own `map_peer`/`publish` commit-barrier helpers (a genuinely different
+shape: per-peer client creation, a per-window `commit_seq` barrier, and model cross-checks) rather
+than forcing them through `map_toplevel`.

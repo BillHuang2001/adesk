@@ -24,24 +24,21 @@
 //!   and [`expected_window_geometry`].
 //! - **`RenderWindow` only where pixels are the assertion.**
 //!
-//! # Deviation from the plan (scenario 2, tiling configures)
+//! # Tiling configures on activation (plan §2, "Current semantics")
 //!
-//! The plan expects "`A` receives a new tiling configure for the full output; `B` receives
-//! none" when `A` is activated. The implemented policy does **not** re-configure on
-//! activation: `adesk-wm`'s `activate` returns exactly `[WmAction::Activate { id }]`
-//! (`crates/adesk-wm/src/policy.rs`, "Activates a window (`activate_window`, and the
-//! auto-focus on map)"), and `ConfigureWindow` — the only action that sends
-//! `xdg_toplevel.configure` (`crates/adesk-compositor/src/state.rs`, `apply_decision` →
-//! `send_tiling_configure`) — is returned by `on_map` and `on_output_size` only. Activation
-//! is therefore a pure focus/state change: it re-tiles nothing, because every tracked
-//! window already has the tiled geometry (both windows are tiled to the full output at map
-//! time, and `QueryState` proves they still are afterwards).
+//! The plan's "activation does not re-tile" is implemented exactly: `adesk-wm`'s `activate`
+//! returns exactly `[WmAction::Activate { id }]` (`crates/adesk-wm/src/policy.rs`) and
+//! `ConfigureWindow` — the only action that sends `xdg_toplevel.configure` — is returned by
+//! `on_map` and `on_output_size` only. Activation is therefore a pure focus/state change: it
+//! re-tiles nothing, because every tracked window already has the tiled geometry (both
+//! windows are tiled to the full output at map time, and `QueryState` proves they still are
+//! afterwards).
 //!
-//! `focus_follows_activation` proves that faithfully instead of weakening silently: A's and
-//! B's configure state is *unchanged* by the activation (the plan's "`B` receives none"
-//! plus the symmetric "neither does A"), while the tiling state that the configure would
-//! have carried is asserted positively — `geometry == tiled_rect()` for both windows and
-//! A's last configure being the full-output tiling configure with the `activated` state.
+//! `focus_follows_activation` asserts that faithfully: neither A nor B receives a configure
+//! from the activation (`last_configure`/`pending_configure` unchanged on both connections),
+//! while the tiling state a configure would have carried is asserted positively —
+//! `geometry == tiled_rect()` for both windows and A's last configure being the full-output
+//! tiling configure with the `activated` state.
 
 use adesk_core::{ErrorCode, WindowId, WindowState};
 use adesk_testkit::{
@@ -272,9 +269,9 @@ async fn window_appears_with_tiling_configure() -> Result<()> {
 /// keyboard focus back to `A` in one causal step — through compositor state, never through
 /// synthesized input — while `B` stays mapped.
 ///
-/// See the module docs for the one deliberate deviation: activation re-tiles nothing, so
-/// the plan's "A receives a new tiling configure" is proven as "the tiling state is already
-/// correct and the activation changes no configure on either connection".
+/// See the module docs for the implemented semantics: activation re-tiles nothing, so the
+/// activation is proven to change no configure on either connection while the tiling state
+/// stays correct (`geometry == tiled_rect()` for both windows).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn focus_follows_activation() -> Result<()> {
     let runtime = TestRuntime::start_with(test_config()).await?;
@@ -440,7 +437,7 @@ async fn focus_follows_activation() -> Result<()> {
     assert_eq!(after.active_window_id, Some(a_id));
     assert_eq!(after.keyboard_focus, Some(a_id));
 
-    // --- tiling configures (deviation, see the module docs) ---------------------------
+    // --- tiling configures (see the module docs) --------------------------------------
     // The round trips flush the protocol on both connections, so a configure the runtime
     // sent for the activation would be recorded in the client's configure state by now.
     client_a.roundtrip().await?;

@@ -39,12 +39,12 @@
 //!   equivalent of the server's `inspect_capture`, with no AGP client, no image decoding and
 //!   no screenshot loop.
 //!
-//! # Deviation from the plan
+//! # `RenderOutput` in this suite
 //!
-//! `tests/integration_plan.md` states a ground rule that `RenderOutput` is not used by the
-//! other suites. This suite is the exception the pixel proof needs: it drives
-//! `RuntimeCommand::RenderOutput` with `overlays: vec![]`, `region: None` and
-//! `max_dimension: None`.
+//! The plan's ground rule is that `RenderOutput` is used by `output_composition.rs` to prove
+//! output-level composition while the other suites assert on `RenderWindow`; this suite is
+//! that user. It drives `RuntimeCommand::RenderOutput` with `overlays: vec![]`, `region: None`
+//! and `max_dimension: None`.
 
 use adesk_core::{Rect, WindowId, WindowState};
 use adesk_render::DEFAULT_CLEAR_COLOR;
