@@ -130,6 +130,14 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `create_target`, `render_scene` and `import_buffer` are all backed by real implementations; the pixman path is verified headless, the GL path under `ADESK_TEST_GL=1` (Mesa llvmpipe) with exact image equality against the software reference.
 - Known gaps: `create_target` error boxing is text-only (signature gap above); `import_buffer` has no direct test without a live wayland connection.
 
+## Known Issues
+
+- `import_buffer` (`src/pipeline.rs`) is unreferenced: no production or test caller anywhere in the workspace (the compositor imports buffers through Smithay's surface-tree walk instead). Its `UnsupportedBuffer`/`ImportFailed` results are therefore never produced by real code.
+- `DamageAccumulator` and `coalesce_damage` (`src/damage.rs`) are referenced only by `tests/damage.rs`, never by `adesk-compositor`/`adesk-server`.
+- `RenderError::UnsupportedFormat` is never constructed (it is only listed in `code()`); `RenderError::UnsupportedBuffer`/`ImportFailed` are constructed only inside the dead `import_buffer`.
+- Unreferenced `pub` accessors: `SceneNode::{element_mut, set_location, set_damage, into_element}`, `Scene::extend`, `OffscreenTarget::{texture, into_inner}`, `RenderConfig::with_clear_color` (tests only). `encode_png` is used by this crate's tests only.
+- `adesk-server/src/images.rs` re-implements PNG encoding and stride repacking that duplicate `src/image.rs` (`encode_png` + private `tight_rgba`); it does not call `adesk_render::encode_png`.
+
 ## Notes for Agents
 
 - `render_scene` requires `target.core_size() == config.target_size()`; callers should create the target from `config.target_size()`.
