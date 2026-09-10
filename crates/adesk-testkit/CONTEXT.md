@@ -24,7 +24,7 @@ It is the only supported way to run ADesk end-to-end tests: an in-process runtim
 ## Constraints
 
 - Dev-only: it is a `[dev-dependencies]` entry, never a runtime dependency; `adesk-test-app` is a test helper binary.
-- No test may require a display, GPU, network or a specific installed application; the default renderer is pixman and GL paths must skip cleanly without `ADESK_TEST_GL=1`; no test is `#[ignore]`d.
+- No test may require a display, GPU, network or a specific installed application; the default renderer is pixman and GL paths must skip cleanly without `ADESK_TEST_GL=1`; no behavioural test is `#[ignore]`d (the ignored doctests are doc-code fences).
 - Every wait, pump and shutdown has an explicit deadline; a hung runtime fails the test with `Timeout`, it never blocks forever.
 - Assertions panic; all other fallible calls return `Result<_, TestkitError>`.
 - Real protocol path only: the Wayland client drives the compositor exactly like an ordinary application and must never reach into compositor internals.
