@@ -12,8 +12,8 @@ use crate::state::{MachineId, MachineName, MachineStatus};
 
 /// The name ↔ id map plus a last-known `MachineStatus` cache.
 ///
-/// Keyed by `MachineName` (the manager's unique key) and kept sorted so
-/// [`MachineRegistry::list`] is deterministic.
+/// Keyed by `MachineName` (the manager's unique key); the backing maps are
+/// `BTreeMap`s, so ordering is deterministic.
 #[derive(Debug, Clone, Default)]
 pub struct MachineRegistry {
     ids: BTreeMap<MachineName, MachineId>,
@@ -79,16 +79,6 @@ impl MachineRegistry {
         self.ids.remove(name);
         self.statuses.remove(name)
     }
-
-    /// Every registered status, sorted by machine name.
-    pub fn list(&self) -> Vec<MachineStatus> {
-        self.statuses.values().cloned().collect()
-    }
-
-    /// Every registered name, sorted.
-    pub fn names(&self) -> Vec<MachineName> {
-        self.statuses.keys().cloned().collect()
-    }
 }
 
 #[cfg(test)]
@@ -114,7 +104,6 @@ mod tests {
         let registry = MachineRegistry::new();
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
-        assert_eq!(registry.list(), Vec::new());
         assert!(!registry.contains(&MachineName::from("adesk")));
         assert_eq!(registry.get(&MachineName::from("adesk")), None);
         assert_eq!(registry.id(&MachineName::from("adesk")), None);
@@ -190,28 +179,23 @@ mod tests {
     }
 
     #[test]
-    fn list_and_names_are_sorted() {
+    fn multiple_entries_are_tracked_independently() {
         let mut registry = MachineRegistry::new();
         registry.insert(status("charlie", "machine-3", MachineState::Running));
         registry.insert(status("alpha", "machine-1", MachineState::Running));
         registry.insert(status("bravo", "machine-2", MachineState::Created));
 
-        assert_eq!(
-            registry.names(),
-            vec![
-                MachineName::from("alpha"),
-                MachineName::from("bravo"),
-                MachineName::from("charlie"),
-            ]
-        );
-        let listed: Vec<MachineName> = registry.list().into_iter().map(|s| s.name).collect();
-        assert_eq!(
-            listed,
-            vec![
-                MachineName::from("alpha"),
-                MachineName::from("bravo"),
-                MachineName::from("charlie"),
-            ]
-        );
+        assert_eq!(registry.len(), 3);
+        assert!(!registry.is_empty());
+        for (name, id, state) in [
+            ("alpha", "machine-1", MachineState::Running),
+            ("bravo", "machine-2", MachineState::Created),
+            ("charlie", "machine-3", MachineState::Running),
+        ] {
+            let name = MachineName::from(name);
+            assert!(registry.contains(&name));
+            assert_eq!(registry.id(&name), Some(&MachineId::from(id)));
+            assert_eq!(registry.get(&name).map(|s| s.state.clone()), Some(state));
+        }
     }
 }

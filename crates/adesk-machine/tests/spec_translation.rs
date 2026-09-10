@@ -94,6 +94,56 @@ fn populated_spec_translates_every_field_in_order() {
 }
 
 #[test]
+fn populated_spec_with_a_published_port_orders_every_option() {
+    // The same fully-populated spec, but with host networking and a TCP viewer,
+    // so the exact position of `--network`/`--publish` (before the image and
+    // command) is pinned alongside every other option.
+    let spec = MachineSpec::new("work", "debian:trixie")
+        .with_command(vec!["bash".to_owned(), "-l".to_owned()])
+        .with_label("team", "agent")
+        .with_env("LANG", "C.UTF-8")
+        .with_mount(Mount::ro("/etc/localtime", "/etc/localtime"))
+        .with_mount(Mount::rw("/srv/share", "/mnt/share"))
+        .with_memory_mb(2048)
+        .with_cpus(1.5)
+        .with_network(NetworkMode::Host)
+        .with_viewer(ViewerExposure::TcpPort {
+            host_port: 7000,
+            container_port: 7100,
+        });
+
+    assert_eq!(
+        argv(&spec),
+        strings(&[
+            "create",
+            "--name",
+            "work",
+            "--label",
+            "adesk.io/role=machine",
+            "--label",
+            "team=agent",
+            "--env",
+            "LANG=C.UTF-8",
+            "--volume",
+            "/etc/localtime:/etc/localtime:ro",
+            "--volume",
+            "/srv/share:/mnt/share",
+            "--memory",
+            "2048m",
+            "--cpus",
+            "1.5",
+            "--network",
+            "host",
+            "--publish",
+            "7000:7100",
+            "debian:trixie",
+            "bash",
+            "-l",
+        ])
+    );
+}
+
+#[test]
 fn network_modes_map_to_flags() {
     let none = MachineSpec::new("m", "img").with_network(NetworkMode::None);
     assert!(has_pair(&argv(&none), "--network", "none"));

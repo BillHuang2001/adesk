@@ -57,17 +57,6 @@ pub enum NetworkMode {
     Private,
 }
 
-impl NetworkMode {
-    /// The stable snake_case name used on the wire and in CLI arguments.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            NetworkMode::None => "none",
-            NetworkMode::Host => "host",
-            NetworkMode::Private => "private",
-        }
-    }
-}
-
 /// How the viewer (outside the machine) reaches ADesk (inside it).
 ///
 /// Both cases are expressible as ordinary container options — a bind mount or a
@@ -148,18 +137,6 @@ impl MachineSpec {
             image: image.into(),
             ..MachineSpec::default()
         }
-    }
-
-    /// Sets the machine name.
-    pub fn with_name(mut self, name: impl Into<MachineName>) -> MachineSpec {
-        self.name = name.into();
-        self
-    }
-
-    /// Sets the container image.
-    pub fn with_image(mut self, image: impl Into<String>) -> MachineSpec {
-        self.image = image.into();
-        self
     }
 
     /// Replaces the container command (`argv`).
@@ -275,8 +252,6 @@ mod tests {
     #[test]
     fn builders_mutate_the_spec() {
         let spec = MachineSpec::new("work", "debian:trixie")
-            .with_name("renamed")
-            .with_image("ubuntu:noble")
             .with_command(vec!["bash".to_owned(), "-l".to_owned()])
             .with_env("LANG", "C.UTF-8")
             .with_env("TZ", "UTC")
@@ -290,8 +265,9 @@ mod tests {
             })
             .with_label("team", "agent");
 
-        assert_eq!(spec.name, MachineName::from("renamed"));
-        assert_eq!(spec.image, "ubuntu:noble");
+        // The builders leave the name and image set by `new` untouched.
+        assert_eq!(spec.name, MachineName::from("work"));
+        assert_eq!(spec.image, "debian:trixie");
         assert_eq!(spec.command, vec!["bash".to_owned(), "-l".to_owned()]);
         assert_eq!(spec.env.get("LANG").map(String::as_str), Some("C.UTF-8"));
         assert_eq!(spec.env.get("TZ").map(String::as_str), Some("UTC"));
@@ -321,14 +297,13 @@ mod tests {
     }
 
     #[test]
-    fn network_mode_as_str_matches_serde() {
+    fn network_mode_round_trips_through_serde() {
         let cases = [
             (NetworkMode::None, "none"),
             (NetworkMode::Host, "host"),
             (NetworkMode::Private, "private"),
         ];
         for (mode, name) in cases {
-            assert_eq!(mode.as_str(), name);
             assert_eq!(serde_json::to_value(mode).unwrap(), serde_json::json!(name));
             assert_eq!(
                 serde_json::from_value::<NetworkMode>(serde_json::json!(name)).unwrap(),

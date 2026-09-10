@@ -351,20 +351,30 @@ fn parse_mount(value: &str) -> Result<Mount, String> {
     })
 }
 
+/// Splits a `FIRST:SECOND` value (a `HOST:CONTAINER` path pair or a `HOST:PORT`
+/// port pair) on its first `:`, requiring both sides to be non-empty.
+///
+/// Returns `None` on a missing separator or an empty side, so each caller can
+/// report its own flag-specific error.
+fn split_host_and_container(value: &str) -> Option<(&str, &str)> {
+    let (host, container) = value.split_once(':')?;
+    if host.is_empty() || container.is_empty() {
+        return None;
+    }
+    Some((host, container))
+}
+
 /// Parses a `--viewer-unix HOST:CONTAINER` value into a Unix-socket exposure.
 fn parse_viewer_unix(value: &str) -> Result<ViewerExposure, String> {
     let invalid = || format!("invalid --viewer-unix `{value}`: expected HOST:CONTAINER");
-    let (host, container) = value.split_once(':').ok_or_else(invalid)?;
-    if host.is_empty() || container.is_empty() {
-        return Err(invalid());
-    }
+    let (host, container) = split_host_and_container(value).ok_or_else(invalid)?;
     Ok(ViewerExposure::default_unix(host, container))
 }
 
 /// Parses a `--viewer-tcp HOST:PORT` value into a published-port exposure.
 fn parse_viewer_tcp(value: &str) -> Result<ViewerExposure, String> {
     let invalid = || format!("invalid --viewer-tcp `{value}`: expected HOST:PORT");
-    let (host, container) = value.split_once(':').ok_or_else(invalid)?;
+    let (host, container) = split_host_and_container(value).ok_or_else(&invalid)?;
     let host_port = host.parse::<u16>().map_err(|_| invalid())?;
     let container_port = container.parse::<u16>().map_err(|_| invalid())?;
     Ok(ViewerExposure::TcpPort {
@@ -388,7 +398,6 @@ fn parse_network(value: &str) -> Result<NetworkMode, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
     /// A `create` argument set with every optional flag absent.
     fn create_args() -> CreateArgs {
@@ -406,38 +415,28 @@ mod tests {
     }
 
     #[test]
-    fn mount_defaults_to_read_write() {
-        let mount = parse_mount("/host/data:/mnt/data").unwrap();
-        assert_eq!(mount.host_path, PathBuf::from("/host/data"));
-        assert_eq!(mount.container_path, PathBuf::from("/mnt/data"));
-        assert!(!mount.read_only);
-    }
-
-    #[test]
-    fn mount_recognizes_the_ro_mode() {
-        let mount = parse_mount("/host/data:/mnt/data:ro").unwrap();
-        assert_eq!(mount.host_path, PathBuf::from("/host/data"));
-        assert_eq!(mount.container_path, PathBuf::from("/mnt/data"));
-        assert!(mount.read_only);
-    }
-
-    #[test]
-    fn mount_recognizes_an_explicit_rw_mode() {
-        let mount = parse_mount("/a:/b:rw").unwrap();
-        assert_eq!(mount.host_path, PathBuf::from("/a"));
-        assert_eq!(mount.container_path, PathBuf::from("/b"));
-        assert!(!mount.read_only);
-    }
-
-    #[test]
-    fn mount_without_a_separator_is_rejected() {
-        assert!(parse_mount("/only-a-path").is_err());
-    }
-
-    #[test]
-    fn mount_with_an_empty_side_is_rejected() {
-        assert!(parse_mount(":/b").is_err());
-        assert!(parse_mount("/a:").is_err());
+    fn mount_parses_paths_and_modes_and_rejects_malformed_values() {
+        // Input -> the expected `Mount`, or `Err(())` for a rejected value.
+        let cases: [(&str, Result<Mount, ()>); 6] = [
+            (
+                "/host/data:/mnt/data",
+                Ok(Mount::rw("/host/data", "/mnt/data")),
+            ),
+            (
+                "/host/data:/mnt/data:ro",
+                Ok(Mount::ro("/host/data", "/mnt/data")),
+            ),
+            ("/a:/b:rw", Ok(Mount::rw("/a", "/b"))),
+            ("/only-a-path", Err(())),
+            (":/b", Err(())),
+            ("/a:", Err(())),
+        ];
+        for (input, expected) in cases {
+            match expected {
+                Ok(mount) => assert_eq!(parse_mount(input).unwrap(), mount, "parsed {input:?}"),
+                Err(()) => assert!(parse_mount(input).is_err(), "accepted {input:?}"),
+            }
+        }
     }
 
     #[test]
