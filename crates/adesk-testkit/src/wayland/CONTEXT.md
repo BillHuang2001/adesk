@@ -8,7 +8,10 @@ It must never reach into compositor internals.
 ## API Surface
 
 - `WaylandTestClient` — `connect` / `connect_in`, `display_name`, `globals`, `is_closed`, `create_toplevel`, `create_popup`, `pump_for`, `pump_until`, `roundtrip`, `flush`, `close`.
+- Seat-input recording on `WaylandTestClient` — `pointer_events()`, `keyboard_events()`, `clear_input_events()`, `wait_for_pointer_event(timeout, what, pred)`, `wait_for_keyboard_event(...)`, `wait_for_pointer_button(button, ButtonState, timeout)`, `wait_for_key(Keycode, KeyState, timeout)`, `last_modifiers()`; all `&self`, all waits deadline-bounded.
+- Recorded event types (module `input`, re-exported here): `PointerEvent` (`Enter`/`Leave`/`Motion`/`Button`/`Axis`/`Frame`), `KeyboardEvent` (`Keymap`/`Enter`/`Leave`/`Key`/`Modifiers`/`RepeatInfo`), `AxisKind`, `ButtonState`, `KeyState`, `ModifiersState`, plus `BTN_LEFT` / `KEY_LEFTCTRL` / `KEY_C`.
 - `ToplevelSpec`, `TestWindow`, `ConfiguredSize`, `PopupSpec`, `TestPopup`, `PumpStats`, `Globals`.
+- These items are reachable as `adesk_testkit::wayland::…`; `lib.rs` re-exports only the window/globals subset.
 
 ## Constraints
 
