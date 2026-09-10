@@ -30,10 +30,10 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 /// One window as seen by the output composition path.
 ///
 /// `adesk-wm` owns geometry, z-order and activity; the compositor's
-/// `RenderOutput` command flattens the visible windows into this type so the
-/// renderer never has to know about window-management types. `geometry` is in
-/// output coordinates — the window model, not the renderer, converts
-/// window-relative coordinates.
+/// `RenderOutput` command flattens every tracked window into this type, so a
+/// slice of `OutputWindow`s is a *candidate list*. `geometry` is in output
+/// coordinates — the window model, not the renderer, converts window-relative
+/// coordinates.
 pub(crate) struct OutputWindow {
     /// Window rectangle in output pixels (`(0,0)`-origin, tiled by the WM).
     pub(crate) geometry: Rect,
@@ -41,7 +41,12 @@ pub(crate) struct OutputWindow {
     /// subsurfaces are discovered while walking the tree and popups through
     /// [`elements::popup_surfaces`].
     pub(crate) surface: WlSurface,
-    /// Whether this window is the active (visible, tiled) one; overlays and
-    /// future multi-window composition use this to highlight focus.
+    /// Whether this window is the active (visible, tiled) one.
+    ///
+    /// This is the **visibility selector**, not merely a focus hint: output
+    /// composition ([`elements::output_scene`]) draws exactly the first candidate
+    /// with `active == true` and nothing else, because ADesk shows one toplevel
+    /// at a time. Tracked-but-inactive windows stay candidates and are never
+    /// composed.
     pub(crate) active: bool,
 }

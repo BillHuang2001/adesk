@@ -691,10 +691,14 @@ impl State {
 
     /// Compose the whole virtual output, optionally with debug overlays.
     ///
-    /// Every known window with a root surface becomes an
-    /// [`OutputWindow`](crate::render::OutputWindow); an empty window list is a
-    /// valid clear frame, not an error. The output composition is not tied to a
-    /// single window, so its `commit_seq` stays `0`.
+    /// Every tracked window with a root surface becomes a candidate
+    /// [`OutputWindow`](crate::render::OutputWindow); `active` marks the window
+    /// `adesk-wm` tiles to fill the output. Composition is the
+    /// single-visible-toplevel projection: `render::elements::output_scene`
+    /// draws exactly the active candidate and nothing else, so a tracked window
+    /// is never visible. With no active window the frame is a valid clear frame,
+    /// not an error. The output composition is not tied to a single window, so
+    /// its `commit_seq` stays `0`.
     pub(crate) fn render_output(
         &mut self,
         overlays: &[OverlayKind],

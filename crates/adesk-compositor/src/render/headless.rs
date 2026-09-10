@@ -161,14 +161,16 @@ impl HeadlessRenderer {
         }
     }
 
-    /// Compose the whole virtual output: every window in z-order plus optional
-    /// debug overlays, then crop/downscale/read back.
+    /// Compose the whole virtual output: the single **visible** window plus
+    /// optional debug overlays, then crop/downscale/read back.
     ///
     /// `output_size` is the virtual output's pixel size and sizes the target, so
-    /// an **empty window list is a valid clear frame**, not an error. `region`
-    /// and `max_dimension` are output-relative. `commit_seq` of the resulting
-    /// frame is `0`: an output composition is not tied to a single window's
-    /// commit counter.
+    /// a candidate list with no active window is a **valid clear frame**, not an
+    /// error. `windows` is the candidate list; [`elements::output_scene`] draws
+    /// only the active candidate, because ADesk shows one toplevel at a time.
+    /// `region` and `max_dimension` are output-relative. `commit_seq` of the
+    /// resulting frame is `0`: an output composition is not tied to a single
+    /// window's commit counter.
     ///
     /// `overlays` are debug-only markers; see
     /// [`elements::overlay_elements`](super::elements) for what each
