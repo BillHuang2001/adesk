@@ -191,7 +191,3 @@ Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, 
 | AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
 | Protocol/viewer/machine specs, architecture decisions | `docs/` |
 | Dev shell, build wrapper | `flake.nix`, `scripts/` |
-headless viewer binary | `crates/adesk-viewer/` |
-| AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
-| Protocol/viewer/machine specs, architecture decisions | `docs/` |
-| Dev shell, build wrapper | `flake.nix`, `scripts/` |
