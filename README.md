@@ -90,8 +90,10 @@ typed `RuntimeEvent`s use `subscribe_events(EventFilter)`, which returns an `Eve
 
 ```rust
 use adesk_client::{ClickRequest, Client, EventFilter, ObserveRequest};
+use futures::StreamExt;
 
-# async fn demo() -> Result<(), adesk_client::ClientError> {
+#[tokio::main]
+async fn main() -> Result<(), adesk_client::ClientError> {
 // $ADESK_SOCKET, else $XDG_RUNTIME_DIR/adesk.sock, else <temp dir>/adesk.sock
 let client = Client::connect_default().await?;
 
@@ -120,7 +122,8 @@ if let Some(event) = events.next().await {
     println!("{event:?}");
 }
 let _ = launched;
-# Ok(()) }
+Ok(())
+}
 ```
 
 **Built-in agent prototype** (`adesk-agent`): a provider-agnostic multimodal LLM agent
