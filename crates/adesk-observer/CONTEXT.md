@@ -88,6 +88,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Do **not** un-ignore a failing spec to "fix" it: a wrong implementation makes paused-time waits hang forever. Assertions in `./tests/*.rs` are frozen — behaviour must be argued against `docs/protocol.md`, never against the specs.
 - `./tests/api_surface.rs` pins the public API shape (builders, enum mappings, snapshot structs) without running a service.
 - Run: `./scripts/dev.sh cargo test -p adesk-observer`.
+- The inline `service.rs`/`waiter.rs` unit tests and the `./tests/*.rs` integration specs overlap heavily (~27 of 39 integration tests have a near 1:1 inline twin, four with the exact name); the integration copies are the frozen protocol acceptance specs and the inline copies are the modifiable ones. See `./tests/CONTEXT.md` (Notes for Agents) for the duplication map, the fixture-builder duplication forced by Rust test-module isolation, and the fact that no test uses a wall-clock sleep.
 ## Known Issues
 - `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); journal eviction does not set `state_uncertain` (only `resync` does) — the loss appears as `ObserverSnapshot::events_dropped`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).

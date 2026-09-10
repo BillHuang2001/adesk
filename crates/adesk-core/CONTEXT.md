@@ -99,6 +99,9 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - Inline `#[cfg(test)]` unit tests per module (72 tests): rect edge/intersect/union cases, region coalesce/clip/bounds/simplified, `Position::resolve` clamping incl. NaN, infinities, empty and 1x1 windows, `from_rgba` validation and `pixel` bounds, `ErrorCode::as_str`, `RuntimeEvent` accessors for every variant.
 - `./tests/serde_wire.rs` (13 tests) pins exact AGP JSON for `Position`, `Rect`, `Region`, `WindowInfo`, `AppInfo`, `Observation`, all `RuntimeEvent` variants, `Error`, ids and every enum wire name.
 - One doctest in `lib.rs` documents `Position::resolve`.
+- Known duplication (maintenance cost, not a correctness risk): the `ErrorCode` 13-name table is asserted twice (`src/error.rs:137` is a strict superset of `tests/serde_wire.rs:373`), the `EventKind` 9-name table twice (`src/event.rs:418` vs `tests/serde_wire.rs:455`), and `WindowState`/`ButtonState`/`KeyState`/`PixelFormat` wire names are re-asserted in `tests/serde_wire.rs::enum_wire_names` after `src/input.rs`/`src/image.rs`/`src/window.rs` already cover them.
+- Fixture duplication: `tests/serde_wire.rs::sample_window_info` (19 lines) is field-for-field identical to `src/window.rs::tests::info()`; `sample_app_info` mirrors `src/app.rs::tests::info()` except `categories`/`try_exec`.
+- The `rect(x,y,w,h)` helper in `src/geometry.rs::tests` duplicates the public `Rect::new` const constructor (same signature).
 - Total: 86 tests. Run with `bash scripts/dev.sh cargo test -p adesk-core` (the wrapper script is not executable in worktrees — invoke it through `bash`; bare `cargo` cannot link outside the dev shell).
 - No test needs a display, GPU, network or installed application.
 

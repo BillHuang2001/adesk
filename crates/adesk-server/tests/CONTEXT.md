@@ -42,13 +42,17 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
 | `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; params that fail validation answer `invalid_request` and keep the connection open; error responses keep the connection open; malformed NDJSON closes only that connection — pinned for non-JSON, JSON non-object and id-less object lines (the §6 open/close boundary); concurrent + pipelined requests; blank lines ignored. |
 | `apps.rs` | §5.2 `list_apps` (query, include_hidden, invalid entries skipped, Exec-less entries), `get_app`, unknown app. |
 | `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix), keyboard methods without `window_id` answer `invalid_request` (no keyboard focus). |
-| `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire, `observe(include_image=true)` with no candidate window answering a `null` image (SDK result and raw wire). |
+| `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire, `observe(include_image=true)` with no candidate window answering a `null` image (SDK result and raw wire). Eleven sync `#[test]`s on the real clock (no paused time; bounded by `block_on_timeout`). The §4 JSON *shape* of an `Observation` (`image` key present as `null`, `seq`/`last_commit_seq` u64, `after_action` null, nullable `focus_changed`) and the `include_image` protocol defaults are pinned only here — `adesk-observer` has no serde and never asserts wire shape. |
 | `capture.rs` | §5.4 `capture_window`/`capture_region` unknown-window errors (no client ever connects here, so no windows exist). |
 | `inspector.rs` | §5.7 `inspect_capture` PNG/dimensions/overlays/`max_dimension`; `inspect_subscribe` frame stream + unsubscribe; a stream whose renders start failing (compositor stopped out-of-band) deregisters itself. |
 | `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids; plus launch correlation: a synthetic `WindowCreated` injected into the compositor broadcast is fanned out with the correlator's `launch_id` while the raw broadcast stays `None`. |
 | `shutdown.rs` | idempotent shutdown, socket removal, `wait()`, rebinding the same path, handle drop does not stop the runtime, in-flight `shutting_down`. |
 | `sequence.rs` | §1 seq-monotonicity for server-synthesized events: an `observe(until=timeout)` watermark before a launch; the first `app_launched` strictly above it, the second strictly above the first and above the re-sampled watermark; ≥2 consecutive `inspect_frame` seqs strictly increasing above the pre-subscription watermark; `server_synthesized_seqs_interleave_with_the_compositor_counter` brackets both emission sites with out-of-band `ReserveSeq` probes — every synthesized `seq` above the probe reserved before it, every probe reserved after it above the `seq`. |
 | `viewer.rs` | VAP v1 endpoint (`docs/viewer.md`): §2 handshake (`protocol_version`, the 1280x720 output, `pixman`); §4/§5 `request_frame` (a full-output PNG whose own `IHDR` carries the output size, and a strictly greater `seq` on the second frame) and `request_state` (empty runtime → `active_window_id: null`, `windows: []`); **viewer input through the seat** — a real `WaylandTestClient` toplevel is activated over AGP, then a viewer `pointer_button` and a `key` chord tap each answer an `input_ack` with a fresh `ActionId` and the *client* observes the delivered move/press/release in its own `wl_pointer`/`wl_keyboard` history; `without_viewer()` (no socket path, no socket file, AGP still serves, clean shutdown); teardown removes both socket files and a fresh runtime rebinds the same viewer path; an input with no active window is answered with a VAP `error` (`invalid_request`) that leaves the connection usable. |
+
+Per-file test counts (65 total, all plain sync `#[test]`; no `#[tokio::test]`, no `#[ignore]`):
+`observation.rs` 11, `protocol.rs` 10, `subscriptions.rs` 8, `viewer.rs` 7, `windows.rs` 7,
+`apps.rs` 6, `inspector.rs` 5, `shutdown.rs` 5, `capture.rs` 3, `sequence.rs` 3.
 
 ## Notes for Agents
 
@@ -90,6 +94,19 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
 - Viewer coverage gaps (deliberate, v1): the opt-in **TCP** viewer transport, viewer `scroll`/`text`, the `frames()`
   streaming loop, `set_control` and multi-connection fan-out are not covered here; only the default Unix socket path is
   exercised end to end.
+- `viewer.rs` overlaps `crates/adesk-viewer/tests/session.rs` (12 duplex-style tests over a
+  `tokio::io::duplex` against a fake `ViewerBackend`): the handshake-metadata assertions and the
+  `request_frame`/`request_state` round trip are pinned there too, so those two server tests only add
+  the *real* values (output size, pixman renderer, PNG bytes + IHDR, reserved `seq`). The session-level
+  refusal paths (version mismatch, non-hello first message, handshake timeout, malformed line,
+  unknown type, `set_control`, `bye`) exist only in `session.rs`. `viewer.rs`'s unique value is the
+  wiring: **input delivered through the real seat** to a mapped `WaylandTestClient` toplevel, the
+  `ViewerBackendImpl` error mapping, `without_viewer`, and the socket-file lifecycle.
+- No test in this directory binds a real TCP port: `ViewerConfig::tcp` is only parsed/recorded in the
+  `src/config.rs` / `src/main.rs` unit tests, never bound; every suite here is Unix-socket only.
+  `viewer.rs` has no sleeps — every wait is deadline-bounded (`DEADLINE`, `common::eventually`,
+  `block_on_timeout`); the only polling sleeps it reaches are `common/mod.rs`'s 10 ms loop and the
+  50/200 ms sleeps in `shutdown.rs`.
 - §1 `seq` domain (`sequence.rs`): one global monotonic `seq` domain spans compositor- and
   server-emitted events (gaps allowed, reuse not). `app_launched` and `inspect_frame` reserve their
   number from the compositor's central counter (`RuntimeCommand::ReserveSeq`; server side

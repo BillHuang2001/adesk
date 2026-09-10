@@ -74,6 +74,11 @@ Runs with `./scripts/dev.sh cargo test -p adesk-machine` → 114 passed, 0 faile
 - `./tests/spec_translation.rs` — `build_create_argv` for the default and a fully-populated spec; each `NetworkMode`; viewer exposure → `--volume`/`--publish`.
 - `./tests/approvals.rs` — `AutoApprove`/`AutoDeny`, pre-approval short-circuit, `HostCapabilities` mount/port matching, `HostControlPlane::request_approval`.
 - `./tests/podman_stub.rs` (`#[cfg(unix)]`) — a temp `#!/bin/sh` stub through `PodmanRuntime::with_program` pins the argv and the non-zero-exit → `MachineError::Backend` mapping.
+### Test-suite duplication (audit finding, current state)
+- ~23 of the 74 lib unittests have a near-equivalent integration test: `src/manager.rs` tests (7/10) vs `tests/lifecycle.rs`; `src/host.rs` tests (7/9) vs `tests/approvals.rs`; `src/runtime/podman.rs` (4/13) vs `tests/spec_translation.rs` (byte-identical `build_create_argv` expectations) and (2/13) vs `tests/podman_stub.rs`; `src/approval.rs` (3/6) vs `tests/approvals.rs`.
+- Two in-memory doubles model the same created→running→stopped lifecycle: production `MockRuntime` (`src/runtime/mock.rs`, used by the integration tests) and the `#[cfg(test)]`-only `StubRuntime` (`src/manager.rs` `mod testing`, used by the manager/host unit tests). `StubRuntime::seed` (register a backend-side name without the manager cache) is the one thing the lib double does that `MockRuntime` does not expose directly.
+- Process-spawning stub scaffolding is duplicated: `SPAWN_LOCK` + a temp `#!/bin/sh` writer exist both in `tests/podman_stub.rs` and inline in `src/runtime/podman.rs`; the `Recording`/`RecordingDeny` approver is likewise defined in both `src/approval.rs` and `tests/approvals.rs`.
+- No `#[ignore]`d tests; no wall-clock sleeps, real `podman` invocation or network in any test (all stub tests use `with_program`, never `PodmanRuntime::new`).
 ## Notes for Agents
 - `adesk-machine` does not depend on `adesk-core` or any GUI crate; the ADesk kernel binary name is data (`MachineSpec::command`), not a dependency.
 - The default `MachineSpec` describes the ADesk machine (image + command running `adesk-server` + a viewer socket mount); keep that default coherent with `docs/machine.md` §3/§5.

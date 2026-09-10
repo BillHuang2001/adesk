@@ -107,6 +107,8 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - `tests/client.rs` — 10 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream, input methods, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
 - `tests/script.rs` — 15 tests for the input-script grammar and error line numbers.
 - Inline unit tests: 53 in the lib target (backend, transport, capture, session, server, client) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
+- `tests/CONTEXT.md` records the audit-level redundancy in this suite (the `tests/script.rs` ⊃ `src/script.rs` inline-test overlap, the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`, and the four `FakeBackend` copies); read it before adding parser/session tests.
+- `tests/CONTEXT.md` records the audit-level redundancy in this suite (the `tests/script.rs` ⊃ `src/script.rs` inline-test overlap, the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`, and the four `FakeBackend` copies); read it before adding parser/session tests.
 - Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **105 passed / 0 failed / 0 ignored** (53 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
@@ -114,6 +116,7 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - The server session owns no transport: `serve` takes an already-connected stream; binding/accepting lives in `adesk-server`.
 - `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
+- Test scaffolding re-implements NDJSON framing locally rather than reusing the crate's own `pub` `transport::write_line`/`read_line`: `tests/session.rs` defines a local `write_line`, and the inline `src/session.rs` and `src/server.rs` test modules write `line + b"\n"` + flush by hand. `tests/session.rs` `send`/`recv` are thin wrappers over `adesk_viewer_proto::{encode_client, decode_server}` plus that framing. No `test-support` feature exists; `tempfile` is the only dev-dependency.
 - `close()` can block up to the 250 ms grace only when the peer never answers; the happy path returns as soon as the server's `bye`/EOF arrives.
 - Implementing `ViewerBackend` is still pending in `adesk-server` (planned: `RenderOutput` full-output render through `adesk-server::images::encode_png` → `ImagePayload`, `CursorTracker` for the cursor, `QueryState` for the window list/active window, and the seat input helpers for `apply_input` returning an `ActionId`).
 

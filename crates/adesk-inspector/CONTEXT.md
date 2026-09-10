@@ -79,6 +79,9 @@ Painters preserve input order for windows, damage rects and action markers.
   `adesk-render`, `thiserror` and `tracing`, all referenced via `[workspace.dependencies]`.
   Depending on `adesk-render` pulls its renderer stack transitively, but the inspector uses only
   its pure crop/downscale ops (see `./src/post.rs`).
+- No dev-dependencies: `tests/common/mod.rs` and the per-test-file helpers are crate-local by
+  design. Do not add `adesk-testkit` for pixel helpers — it would pull async/Smithay/Wayland
+  into a crate that must stay pure.
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay far below the ~1000-line threshold.
 - Overlays are drawn only in `paint::CANONICAL_ORDER`, never in caller order; the same
   `InspectionInput` must always produce the same bytes.
