@@ -96,8 +96,12 @@ End-to-end tests live in `crates/adesk-server/tests/`; protocol-level compositor
 - File size: ~1000 lines is the concern threshold; split along module boundaries
   rather than growing a file. Cohesive test modules may exceed it.
 - Public API surface is what `CONTEXT.md` documents; keep internals `pub(crate)`.
-- Feature flags: `gl` (GPU renderer via EGL, default on) and `pixman`/software
-  (default on). The software path must always work headless — CI has no GPU.
+- Renderer selection is a runtime option, not a Cargo feature: `--renderer auto|gl|pixman`
+  (default `auto` tries surfaceless EGL/GL and falls back to pixman with a warning).
+  Only `adesk-agent` declares Cargo features (`test-support`, `e2e`); both smithay renderer
+  backends are always compiled in. The software path must always work headless — CI has no
+  GPU (verified: `cargo check -p adesk-render --no-default-features` and
+  `-p adesk-compositor --no-default-features` are green).
 - No test may require a display, GPU, real network, or a specific installed
   application; use `adesk-testkit` fixtures.
 
