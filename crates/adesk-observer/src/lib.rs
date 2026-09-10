@@ -53,11 +53,11 @@
 //!
 //! | Module | Contents |
 //! |---|---|
-//! | [`actions`] | `ActionKind`, `ActionRecord`, `ActionRegistry` |
-//! | [`state`] | per-window temporal state, `ObserverSnapshot`, resync snapshot types |
-//! | [`spec`] | `WaitSpec`, `QuietSpec`, `ObserveSpec`, `Condition` |
-//! | [`service`] | `ObserverService`, `ObserverConfig` |
-//! | [`error`] | crate-local `Error`/`Result` mapped onto `adesk_core::Error` |
+//! | `actions` | `ActionKind`, `ActionRecord`, `ActionRegistry` |
+//! | `state` | per-window temporal state, `ObserverSnapshot`, resync snapshot types |
+//! | `spec` | `WaitSpec`, `QuietSpec`, `ObserveSpec`, `Condition` |
+//! | `service` | `ObserverService`, `ObserverConfig` |
+//! | `error` | crate-local `Error`/`Result` mapped onto `adesk_core::Error` |
 //!
 //! Internal machinery: `journal` (bounded counted-event journal) and `waiter`
 //! (filters, accumulator, condition evaluation) — `pub(crate)`, not part of the

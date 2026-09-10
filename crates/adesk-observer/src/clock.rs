@@ -15,7 +15,8 @@
 //! Consequences that the waiters rely on:
 //!
 //! - Deadlines are expressed in the event `ts_ms` domain, so quiet detection
-//!   (`now - last_commit_at >= quiet_ms`) uses one clock end to end.
+//!   (`now - max(anchor_ts, last counted commit ts) >= quiet_ms`, see
+//!   `docs/architecture.md` §6) uses one clock end to end.
 //! - Under `tokio::time::pause()` both `Instant::now()` and `elapsed()` are frozen,
 //!   so `now_ms()` is exactly the last observed event timestamp — tests are
 //!   deterministic without real sleeps.

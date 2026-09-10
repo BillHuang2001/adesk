@@ -249,7 +249,7 @@ impl ObserverService {
     ///
     /// - advance the watermark to `max(watermark, event.seq())`;
     /// - re-anchor the clock at `event.ts_ms()`;
-    /// - `WindowCreated`: insert [`WindowTemporalState::created`] if absent
+    /// - `WindowCreated`: insert `WindowTemporalState::created` if absent
     ///   (existing state is kept, only `state_uncertain` is cleared);
     /// - `WindowDestroyed`: drop the window's state (new waits then report
     ///   `unknown_window`) and journal the destruction so in-flight waiters resolve;
@@ -261,7 +261,7 @@ impl ObserverService {
     /// - window-scoped events for unknown windows create state on demand
     ///   (lagged streams are self-healing) — a later `resync` corrects it;
     /// - `AppLaunched`: watermark only, never counted;
-    /// - push a [`CountedEvent`] for counted kinds and bump the generation;
+    /// - push a `CountedEvent` for counted kinds and bump the generation;
     /// - never log above `trace`.
     pub fn handle_event(&self, event: &RuntimeEvent) {
         let seq = event.seq();
