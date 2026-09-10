@@ -9,7 +9,6 @@ use std::borrow::Cow;
 use adesk_core::ImageBuffer;
 use adesk_proto::{ImageFormat, ImagePayload, ProtoError};
 use adesk_render::RenderError;
-use image::ImageEncoder;
 
 use crate::error::{Result, ServerError};
 
@@ -45,25 +44,32 @@ pub fn encode(image: &ImageBuffer, format: ImageFormat, scale: f64) -> Result<Im
     }
 }
 
-/// Encodes an RGBA8 buffer as PNG bytes (the `image` crate is the only encoder).
+/// Encodes an RGBA8 buffer as PNG bytes.
+///
+/// The encoding itself is delegated to [`adesk_render::encode_png`] — the
+/// workspace's single PNG encoder — after a cheap shape check of the buffer
+/// (`buffer_shape`); no row packing is done here.
 ///
 /// # Errors
 ///
-/// Returns [`crate::ServerError::Render`] if the encoder rejects the buffer.
+/// Returns [`crate::ServerError::Proto`] when the buffer cannot describe
+/// `width x height` pixels, and [`crate::ServerError::Render`] if the encoder
+/// rejects the image (an empty `0x0` image).
 pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
-    let tight = tightly_packed(image)?;
-    let mut out = Vec::new();
-    image::codecs::png::PngEncoder::new(&mut out)
-        .write_image(
-            &tight,
-            image.width,
-            image.height,
-            image::ExtendedColorType::Rgba8,
-        )
-        .map_err(|err| RenderError::Encode {
-            reason: err.to_string(),
-        })?;
-    Ok(out)
+    buffer_shape(image)?;
+    if image.width == 0 || image.height == 0 {
+        // `adesk_render::encode_png` refuses empty images with
+        // `RenderError::InvalidImage`; the server reports the encoder failure
+        // instead, which is what its own encoder produced before the delegation.
+        return Err(RenderError::Encode {
+            reason: format!(
+                "cannot encode an empty {}x{} image",
+                image.width, image.height
+            ),
+        }
+        .into());
+    }
+    Ok(adesk_render::encode_png(image)?)
 }
 
 /// Returns `image`'s pixels with tightly packed rows (`width * bytes_per_pixel`).
@@ -80,6 +86,33 @@ pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
 /// Returns [`ServerError::Proto`] when the buffer cannot describe `width x height`
 /// pixels: a stride smaller than one row, or data shorter than `stride * height`.
 fn tightly_packed(image: &ImageBuffer) -> Result<Cow<'_, [u8]>> {
+    let (row_bytes, stride) = buffer_shape(image)?;
+    if stride == row_bytes {
+        // Already tight: only the (possibly present) trailing bytes are dropped.
+        let len = row_bytes * image.height as usize;
+        return Ok(Cow::Borrowed(&image.data[..len]));
+    }
+    let mut tight = Vec::with_capacity(row_bytes * image.height as usize);
+    for row in 0..image.height as usize {
+        let start = row * stride;
+        tight.extend_from_slice(&image.data[start..start + row_bytes]);
+    }
+    Ok(Cow::Owned(tight))
+}
+
+/// Validates that `image`'s buffer describes `width x height` pixels and
+/// returns `(row_bytes, stride)` in bytes.
+///
+/// This is the server's malformed-buffer guard: a stride shorter than one row,
+/// or fewer data bytes than `stride * height`, is a [`ServerError::Proto`] rather
+/// than `adesk-render`'s `RenderError::InvalidImage`. It is a length/stride check
+/// only, so a valid buffer pays no row packing here.
+///
+/// # Errors
+///
+/// Returns [`ServerError::Proto`] when the buffer cannot describe `width x height`
+/// pixels.
+fn buffer_shape(image: &ImageBuffer) -> Result<(usize, usize)> {
     let row_bytes = u64::from(image.width) * image.format.bytes_per_pixel() as u64;
     let stride = u64::from(image.stride);
     if stride < row_bytes {
@@ -95,19 +128,7 @@ fn tightly_packed(image: &ImageBuffer) -> Result<Cow<'_, [u8]>> {
             format!("data length {} is shorter than the {required} bytes described by stride {stride} x height {}", image.data.len(), image.height),
         ));
     }
-    let row_bytes = row_bytes as usize;
-    if stride == row_bytes as u64 {
-        // Already tight: only the (possibly present) trailing bytes are dropped.
-        let len = row_bytes * image.height as usize;
-        return Ok(Cow::Borrowed(&image.data[..len]));
-    }
-    let stride = stride as usize;
-    let mut tight = Vec::with_capacity(row_bytes * image.height as usize);
-    for row in 0..image.height as usize {
-        let start = row * stride;
-        tight.extend_from_slice(&image.data[start..start + row_bytes]);
-    }
-    Ok(Cow::Owned(tight))
+    Ok((row_bytes as usize, stride as usize))
 }
 
 /// Builds the malformed-buffer error (dimensions only, never pixel bytes).
@@ -288,6 +309,21 @@ mod tests {
         assert_eq!(decode_png(&png).as_raw().as_slice(), tight_bytes(&image));
     }
 
+    #[test]
+    fn encode_png_delegates_to_adesk_render_byte_for_byte() {
+        let tight = make(4, 3);
+        let padded = make_padded(4, 3, 20);
+        let mut with_trailing = make(3, 2);
+        with_trailing.data.extend_from_slice(&[0xEE; 9]);
+
+        for image in [&tight, &padded, &with_trailing] {
+            assert_eq!(
+                encode_png(image).unwrap(),
+                adesk_render::encode_png(image).unwrap(),
+                "delegated PNG bytes must match adesk-render for {image:?}"
+            );
+        }
+    }
     #[test]
     fn short_data_is_rejected_without_panicking() {
         let mut image = make(2, 2);
