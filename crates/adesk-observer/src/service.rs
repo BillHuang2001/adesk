@@ -30,25 +30,7 @@ use crate::state::{
     ObserverSnapshot, PendingObservation, ResyncReport, StateSnapshot, WindowTemporalState,
 };
 use crate::waiter::{condition_met, Accumulator, Filters, ResolveContext, WaitCondition, WaitPlan};
-use crate::{DEFAULT_JOURNAL_CAPACITY, DEFAULT_QUIET_MS};
-
-/// Tunables of an [`ObserverService`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObserverConfig {
-    /// Counted events retained for waiter seeding (see `journal.rs`).
-    pub journal_capacity: usize,
-    /// Quiet threshold used for the `quiet` evidence flag of non-quiet waits.
-    pub default_quiet_ms: u64,
-}
-
-impl Default for ObserverConfig {
-    fn default() -> Self {
-        Self {
-            journal_capacity: DEFAULT_JOURNAL_CAPACITY,
-            default_quiet_ms: DEFAULT_QUIET_MS,
-        }
-    }
-}
+use crate::DEFAULT_JOURNAL_CAPACITY;
 
 /// The temporal observation engine (cloneable handle).
 #[derive(Debug, Clone)]
@@ -65,8 +47,6 @@ impl Default for ObserverService {
 /// Shared service state. `pub(crate)` so `waiter.rs`/tests can inspect it.
 #[derive(Debug)]
 pub(crate) struct Inner {
-    /// Tunables.
-    pub(crate) config: ObserverConfig,
     /// Per-window temporal state + journal + watermark.
     pub(crate) state: Mutex<ServiceState>,
     /// Clock domain bridge (own mutex: never taken while `state` is held).
@@ -214,20 +194,14 @@ impl Drop for PendingGuard {
 }
 
 impl ObserverService {
-    /// Service with [`ObserverConfig::default`].
+    /// Fresh service with protocol defaults (`journal.rs` capacity, `250` ms
+    /// evidence threshold).
     pub fn new() -> Self {
-        Self::with_config(ObserverConfig::default())
-    }
-
-    /// Service with explicit tunables.
-    pub fn with_config(config: ObserverConfig) -> Self {
-        let journal = EventJournal::new(config.journal_capacity);
         Self {
             inner: Arc::new(Inner {
-                config,
                 state: Mutex::new(ServiceState {
                     windows: BTreeMap::new(),
-                    journal,
+                    journal: EventJournal::new(DEFAULT_JOURNAL_CAPACITY),
                     watermark: 0,
                     pending: BTreeMap::new(),
                 }),
@@ -754,11 +728,9 @@ impl ObserverService {
                     now_ms,
                     watermark: state.watermark,
                     // A quiet condition carries its own threshold; the other
-                    // conditions report evidence against the configured default.
-                    // The single mapping lives on `WaitCondition`.
-                    quiet_threshold_ms: plan
-                        .condition
-                        .quiet_threshold_ms(inner.config.default_quiet_ms),
+                    // conditions report evidence against the crate default. The
+                    // single mapping lives on `WaitCondition`.
+                    quiet_threshold_ms: plan.condition.quiet_threshold_ms(),
                     window_state: window_state.as_ref(),
                     global_last_commit_seq: state.global_last_commit_seq(),
                     timed_out,
@@ -819,18 +791,6 @@ impl ObserverService {
     /// Current time in the event `ts_ms` domain.
     pub fn now_ms(&self) -> u64 {
         lock_clock(&self.inner).now_ms()
-    }
-
-    /// Ids of the windows the observer currently tracks (ascending).
-    pub fn window_ids(&self) -> Vec<WindowId> {
-        lock_state(&self.inner).windows.keys().copied().collect()
-    }
-
-    /// `true` when `window_id` has been quiet for `quiet_ms` at `now_ms`.
-    pub fn is_quiet(&self, window_id: WindowId, quiet_ms: u64) -> Option<bool> {
-        let now_ms = self.now_ms();
-        self.window_state(window_id)
-            .map(|window| window.is_quiet(now_ms, quiet_ms))
     }
 }
 
@@ -913,15 +873,6 @@ mod tests {
         }
     }
 
-    fn popup_appeared(seq: u64, ts_ms: u64, id: u64, popup_id: u64) -> RuntimeEvent {
-        RuntimeEvent::PopupAppeared {
-            seq,
-            ts_ms,
-            window_id: WindowId(id),
-            popup_id,
-        }
-    }
-
     fn app_launched(seq: u64, ts_ms: u64) -> RuntimeEvent {
         RuntimeEvent::AppLaunched {
             seq,
@@ -959,7 +910,7 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
-    async fn new_service_starts_empty_and_honours_config() {
+    async fn new_service_starts_empty() {
         let observer = ObserverService::new();
         let snapshot = observer.snapshot();
         assert_eq!(
@@ -975,22 +926,7 @@ mod tests {
         );
         assert_eq!(observer.watermark(), 0);
         assert_eq!(observer.now_ms(), 0);
-        assert_eq!(observer.window_ids(), Vec::new());
         assert_eq!(observer.window_state(WindowId(7)), None);
-        assert_eq!(observer.is_quiet(WindowId(7), 10), None);
-
-        // The configured journal capacity is what the journal actually uses.
-        let observer = ObserverService::with_config(ObserverConfig {
-            journal_capacity: 2,
-            default_quiet_ms: DEFAULT_QUIET_MS,
-        });
-        observer.handle_event(&created(1, 0, 7));
-        observer.handle_event(&title_changed(2, 1, 7));
-        observer.handle_event(&popup_appeared(3, 2, 7, 9));
-        let snapshot = observer.snapshot();
-        assert_eq!(snapshot.journal_len, 2);
-        assert_eq!(snapshot.events_dropped, 1);
-        assert_eq!(snapshot.seq, 3);
     }
 
     #[test]
@@ -1065,7 +1001,13 @@ mod tests {
                 .last_meaningful_change_at,
             20
         );
-        assert_eq!(observer.window_ids(), vec![WindowId(7), WindowId(8)]);
+        let tracked: Vec<WindowId> = observer
+            .snapshot()
+            .windows
+            .iter()
+            .map(|window| window.window_id)
+            .collect();
+        assert_eq!(tracked, vec![WindowId(7), WindowId(8)]);
     }
 
     #[test]
@@ -1075,7 +1017,7 @@ mod tests {
         observer.handle_event(&destroyed(2, 10, 7));
 
         assert_eq!(observer.window_state(WindowId(7)), None);
-        assert_eq!(observer.window_ids(), Vec::new());
+        assert!(observer.snapshot().windows.is_empty());
         assert_eq!(observer.watermark(), 2);
         assert_eq!(
             journal_kinds(&observer),
@@ -1093,7 +1035,7 @@ mod tests {
         assert_eq!(observer.watermark(), 7);
         assert_eq!(observer.now_ms(), 70);
         assert_eq!(observer.snapshot().journal_len, 0, "never counted");
-        assert_eq!(observer.window_ids(), Vec::new());
+        assert!(observer.snapshot().windows.is_empty());
     }
 
     #[test]
@@ -1216,7 +1158,7 @@ mod tests {
         assert_eq!(report.windows_added, Vec::new());
         assert_eq!(report.marked_uncertain, Vec::new());
         assert_eq!(observer.window_state(WindowId(7)), None);
-        assert_eq!(observer.window_ids(), Vec::new());
+        assert!(observer.snapshot().windows.is_empty());
         assert_eq!(journal_kinds(&observer), vec![(20, CountedKind::Destroyed)]);
     }
 
@@ -1352,11 +1294,15 @@ mod tests {
         assert_eq!(snapshot.actions_len, 1);
         assert_eq!(snapshot.journal_len, 3);
         assert_eq!(snapshot.events_dropped, 0);
-        assert_eq!(observer.is_quiet(WindowId(7), 250), Some(false));
         assert_eq!(
-            observer.is_quiet(WindowId(8), 0),
-            Some(true),
-            "quiet_since is set"
+            observer.window_state(WindowId(7)).unwrap().quiet_since,
+            None,
+            "window 7 never committed"
+        );
+        assert_eq!(
+            observer.window_state(WindowId(8)).unwrap().quiet_since,
+            Some(30),
+            "quiet_since is set by the commit"
         );
     }
 
@@ -1584,40 +1530,6 @@ mod tests {
         assert_eq!(observation.last_commit_seq, 1);
         assert_eq!(observation.changed_regions, vec![rect(0, 0, 4, 4)]);
         assert_eq!(observation.elapsed_ms, 40);
-    }
-
-    #[tokio::test(start_paused = true)]
-    async fn non_quiet_wait_quiet_flag_honours_the_configured_default() {
-        // Feed a non-commit change 40 ms after the wait starts: the `quiet`
-        // evidence flag of a non-quiet wait must be measured against the
-        // configured `ObserverConfig::default_quiet_ms`, not the crate constant.
-        async fn quiet_flag_of_change_wait(default_quiet_ms: u64) -> bool {
-            let observer = ObserverService::with_config(ObserverConfig {
-                journal_capacity: DEFAULT_JOURNAL_CAPACITY,
-                default_quiet_ms,
-            });
-            observer.handle_event(&created(1, 0, 7));
-
-            let mut wait = Box::pin(
-                observer.wait_for_change(WaitSpec::new().window(WindowId(7)).timeout_ms(60_000)),
-            );
-            tokio::select! {
-                biased;
-                observation = &mut wait => panic!("resolved before any event: {observation:?}"),
-                () = tokio::task::yield_now() => {}
-            }
-            observer.handle_event(&title_changed(2, 40, 7));
-            wait.await.expect("known window").quiet
-        }
-
-        assert!(
-            quiet_flag_of_change_wait(5).await,
-            "40 ms >= the configured 5 ms default: quiet"
-        );
-        assert!(
-            !quiet_flag_of_change_wait(DEFAULT_QUIET_MS).await,
-            "40 ms < the 250 ms crate constant: not quiet"
-        );
     }
 
     #[tokio::test(start_paused = true)]

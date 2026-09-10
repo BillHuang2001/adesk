@@ -15,6 +15,7 @@ use adesk_core::{ActionId, Observation, Rect, Region, WindowId};
 
 use crate::journal::{CountedEvent, CountedKind};
 use crate::state::WindowTemporalState;
+use crate::DEFAULT_QUIET_MS;
 
 /// Which counted events a waiter counts (`docs/protocol.md` §5.4).
 ///
@@ -83,12 +84,12 @@ impl WaitCondition {
     /// The quiet threshold used for the `quiet` evidence flag.
     ///
     /// Single source of truth for the mapping: a `Quiet` condition carries its
-    /// own threshold, while `Change`/`Timeout` are resolved against the service's
-    /// configured `ObserverConfig::default_quiet_ms` (passed by the caller).
-    pub(crate) fn quiet_threshold_ms(self, default_quiet_ms: u64) -> u64 {
+    /// own threshold, while `Change`/`Timeout` are resolved against the crate's
+    /// [`DEFAULT_QUIET_MS`] evidence default.
+    pub(crate) fn quiet_threshold_ms(self) -> u64 {
         match self {
             WaitCondition::Quiet { quiet_ms } => quiet_ms,
-            WaitCondition::Change | WaitCondition::Timeout => default_quiet_ms,
+            WaitCondition::Change | WaitCondition::Timeout => DEFAULT_QUIET_MS,
         }
     }
 }
@@ -338,7 +339,6 @@ pub(crate) fn condition_met(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::DEFAULT_QUIET_MS;
     use adesk_core::Rect;
 
     fn wid(id: u64) -> WindowId {
@@ -876,29 +876,18 @@ mod tests {
     // ------------------------------------------------------ quiet_threshold_ms
 
     #[test]
-    fn quiet_threshold_ms_is_own_or_configured_default() {
-        // A quiet condition carries its own threshold; the passed default is
-        // ignored for it.
+    fn quiet_threshold_ms_is_own_or_default() {
+        // A quiet condition carries its own threshold.
         assert_eq!(
-            WaitCondition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(DEFAULT_QUIET_MS),
-            33
-        );
-        assert_eq!(
-            WaitCondition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(999),
+            WaitCondition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(),
             33
         );
 
-        // Non-quiet conditions honour the configured default (the fix for the
-        // "custom `default_quiet_ms` ignored" issue), not the crate constant.
+        // Non-quiet conditions fall back to the crate evidence default.
+        assert_eq!(WaitCondition::Change.quiet_threshold_ms(), DEFAULT_QUIET_MS);
         assert_eq!(
-            WaitCondition::Change.quiet_threshold_ms(DEFAULT_QUIET_MS),
+            WaitCondition::Timeout.quiet_threshold_ms(),
             DEFAULT_QUIET_MS
         );
-        assert_eq!(
-            WaitCondition::Timeout.quiet_threshold_ms(DEFAULT_QUIET_MS),
-            DEFAULT_QUIET_MS
-        );
-        assert_eq!(WaitCondition::Change.quiet_threshold_ms(777), 777);
-        assert_eq!(WaitCondition::Timeout.quiet_threshold_ms(777), 777);
     }
 }

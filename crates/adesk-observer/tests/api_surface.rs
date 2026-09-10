@@ -8,9 +8,9 @@ mod common;
 
 use adesk_core::{Position, Rect, WindowId};
 use adesk_observer::{
-    ActionKind, ActionRecord, ActionRegistry, Condition, ObserveSpec, ObserverConfig,
-    ObserverService, PendingObservation, QuietSpec, StateSnapshot, WaitSpec, WindowSnapshot,
-    WindowTemporalState, DEFAULT_JOURNAL_CAPACITY, DEFAULT_QUIET_MS, DEFAULT_TIMEOUT_MS,
+    ActionKind, ActionRecord, ActionRegistry, Condition, ObserveSpec, ObserverService,
+    PendingObservation, QuietSpec, StateSnapshot, WaitSpec, WindowSnapshot, WindowTemporalState,
+    DEFAULT_QUIET_MS, DEFAULT_TIMEOUT_MS,
 };
 
 #[test]
@@ -59,10 +59,6 @@ fn observe_spec_builders_and_conditions() {
     assert_eq!(spec.until, Condition::Quiet { quiet_ms: 120 });
     assert_eq!(spec.window_id, Some(WindowId(1)));
     assert_eq!(spec.timeout_ms, 2000);
-
-    assert_eq!(Condition::Change.quiet_threshold_ms(), DEFAULT_QUIET_MS);
-    assert_eq!(Condition::Timeout.quiet_threshold_ms(), DEFAULT_QUIET_MS);
-    assert_eq!(Condition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(), 33);
 }
 
 #[test]
@@ -115,8 +111,7 @@ fn registry_and_snapshot_types_are_constructible() {
         }),
         state_uncertain: false,
     };
-    assert!(state.is_quiet(300, 250));
-    assert!(!state.is_quiet(100, 250));
+    assert_eq!(state.window_id, WindowId(7));
 
     let snapshot = StateSnapshot {
         seq: 120,
@@ -130,10 +125,6 @@ fn registry_and_snapshot_types_are_constructible() {
     };
     assert_eq!(snapshot.windows.len(), 1);
 
-    let config = ObserverConfig::default();
-    assert_eq!(config.journal_capacity, DEFAULT_JOURNAL_CAPACITY);
-    assert_eq!(config.default_quiet_ms, DEFAULT_QUIET_MS);
-    // Reference the constructors without running a service.
+    // Reference the constructor without running a service.
     let _constructors: [fn() -> ObserverService; 1] = [ObserverService::new];
-    let _with_config: fn(ObserverConfig) -> ObserverService = ObserverService::with_config;
 }

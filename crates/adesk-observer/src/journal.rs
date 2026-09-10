@@ -238,13 +238,6 @@ impl EventJournal {
         pruned
     }
 
-    /// Oldest retained sequence, if any.
-    // Test-only accessor: the eviction tests assert the oldest retained sequence.
-    #[allow(dead_code)]
-    pub(crate) fn oldest_seq(&self) -> Option<u64> {
-        self.buf.front().map(|event| event.seq)
-    }
-
     /// Events with `seq` strictly greater than `min_seq`, oldest first.
     ///
     /// O(1) when `min_seq >= max_seq`: no stored event can exceed `min_seq`, so
@@ -495,7 +488,6 @@ mod tests {
         let journal = EventJournal::new(4);
 
         assert_eq!(journal.len(), 0);
-        assert_eq!(journal.oldest_seq(), None);
         assert_eq!(journal.dropped(), 0);
         assert_eq!(journal.since(0).count(), 0);
     }
@@ -508,20 +500,19 @@ mod tests {
         journal.push(ev(2));
 
         assert_eq!(journal.len(), 1);
-        assert_eq!(journal.oldest_seq(), Some(2));
         assert_eq!(journal.dropped(), 1);
         assert_eq!(seqs(&journal, 0), vec![2]);
     }
 
     #[test]
-    fn eviction_increments_dropped_and_advances_oldest_seq() {
+    fn eviction_drops_the_oldest_and_advances_the_horizon() {
         let mut journal = EventJournal::new(3);
         for seq in 1..=3 {
             journal.push(ev(seq));
         }
 
         assert_eq!(journal.len(), 3);
-        assert_eq!(journal.oldest_seq(), Some(1));
+        assert_eq!(seqs(&journal, 0), vec![1, 2, 3], "nothing evicted yet");
         assert_eq!(journal.dropped(), 0, "no eviction while within capacity");
 
         for seq in 4..=6 {
@@ -529,13 +520,8 @@ mod tests {
         }
 
         assert_eq!(journal.len(), 3, "never retains more than capacity");
-        assert_eq!(journal.oldest_seq(), Some(4), "oldest evicted first");
+        assert_eq!(seqs(&journal, 0), vec![4, 5, 6], "oldest evicted first");
         assert_eq!(journal.dropped(), 3);
-        assert_eq!(
-            seqs(&journal, 0),
-            vec![4, 5, 6],
-            "newest events kept in order"
-        );
     }
 
     #[test]
@@ -547,7 +533,7 @@ mod tests {
 
         assert_eq!(journal.prune_through(3), 3, "drops seq 1..=3");
         assert_eq!(journal.len(), 2);
-        assert_eq!(journal.oldest_seq(), Some(4));
+        assert_eq!(seqs(&journal, 0), vec![4, 5], "oldest evicted first");
         assert_eq!(
             journal.dropped(),
             0,
@@ -559,11 +545,11 @@ mod tests {
         assert_eq!(journal.len(), 2);
 
         assert_eq!(journal.prune_through(4), 1, "boundary: seq == watermark");
-        assert_eq!(journal.oldest_seq(), Some(5));
+        assert_eq!(seqs(&journal, 0), vec![5]);
 
         assert_eq!(journal.prune_through(u64::MAX), 1);
         assert_eq!(journal.len(), 0);
-        assert_eq!(journal.oldest_seq(), None);
+        assert_eq!(seqs(&journal, 0), Vec::<u64>::new());
         assert_eq!(journal.prune_through(u64::MAX), 0);
     }
 
