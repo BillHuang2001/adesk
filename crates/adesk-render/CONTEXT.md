@@ -126,9 +126,9 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 
 ## Status
 
-- Phase 2 complete: zero `todo!()`; 54 tests passing (lib 13, damage 11, image_ops 16, render_backend 12, renderer_bounds 2); `cargo check -p adesk-render --all-targets`, `cargo clippy -p adesk-render --all-targets -- -D warnings` and `cargo check --workspace --all-targets` clean.
-- `create_target`, `render_scene`, `import_buffer` implemented; pixman path verified headless, GL path verified under `ADESK_TEST_GL=1` (llvmpipe) with exact-equality against the software reference.
-- Known gaps: `create_target` error boxing is text-only (signature gap above); `import_buffer` untested without a wayland connection; the crate is not `cargo fmt --check` clean (pre-existing, includes the frozen test suites).
+- Implemented; zero `todo!()` in the crate. `./scripts/dev.sh cargo test -p adesk-render` passes 54 tests, 0 failures, 0 ignored; `cargo check -p adesk-render --all-targets`, `cargo clippy -p adesk-render --all-targets --no-deps -- -D warnings`, `cargo doc -p adesk-render --no-deps --document-private-items` (no warnings) and `cargo fmt -p adesk-render --check` are clean.
+- `create_target`, `render_scene` and `import_buffer` are all backed by real implementations; the pixman path is verified headless, the GL path under `ADESK_TEST_GL=1` (Mesa llvmpipe) with exact image equality against the software reference.
+- Known gaps: `create_target` error boxing is text-only (signature gap above); `import_buffer` has no direct test without a live wayland connection.
 
 ## Notes for Agents
 
