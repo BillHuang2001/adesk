@@ -70,6 +70,21 @@ fn crop_full_image_is_identity() {
 }
 
 #[test]
+fn crop_whole_padded_image_still_repacks_tight() {
+    // A whole-image crop is only a shortcut for tight inputs; padded rows must
+    // still be repacked into a tight result.
+    let src = make_padded(3, 2, 16, pattern);
+    let out = crop(&src, src.rect());
+    assert_eq!(out.size(), Size::new(3, 2));
+    assert_eq!(out.stride, 12);
+    assert_ne!(out.stride, src.stride);
+    for y in 0..2 {
+        for x in 0..3 {
+            assert_eq!(out.pixel(x, y), src.pixel(x, y));
+        }
+    }
+}
+#[test]
 fn crop_clamps_negative_and_oversized_rects() {
     let src = make(4, 4, pattern);
 
@@ -130,6 +145,20 @@ fn downscale_is_noop_when_image_fits_or_bound_is_zero() {
 }
 
 #[test]
+fn downscale_noop_covers_degenerate_and_padded_images() {
+    // Degenerate dimensions never reach the box filter, and a no-op keeps the
+    // source bytes (including row padding) untouched.
+    let empty = ImageBuffer::new_rgba(0, 0);
+    assert_eq!(downscale(&empty, 4), empty);
+    let flat = ImageBuffer::new_rgba(0, 7);
+    assert_eq!(downscale(&flat, 4), flat);
+
+    let padded = make_padded(3, 2, 16, pattern);
+    assert_eq!(downscale(&padded, 9), padded);
+    assert_eq!(downscale(&padded, 3), padded);
+    assert_eq!(downscale(&padded, 0), padded);
+}
+#[test]
 fn downscale_preserves_aspect_ratio() {
     let src = make(4, 2, |x, y| [x as u8, y as u8, 0, 0xFF]);
     let out = downscale(&src, 2);
@@ -181,6 +210,47 @@ fn encode_png_repacks_padded_stride() {
     assert_eq!(decoded.get_pixel(1, 1).0, pattern(1, 1));
 }
 
+#[test]
+fn encode_png_is_byte_identical_for_tight_and_padded_strides() {
+    // The tight path borrows the pixel buffer and the padded path repacks it;
+    // both must feed the encoder the same bytes.
+    let tight = make(3, 2, pattern);
+    let padded = make_padded(3, 2, 20, pattern);
+    assert_eq!(tight.stride, 12);
+    assert_eq!(padded.stride, 20);
+    assert_eq!(encode_png(&tight).unwrap(), encode_png(&padded).unwrap());
+}
+
+#[test]
+fn encode_png_rejects_truncated_buffers() {
+    // Hand-built buffers can lie about their stride/height; that is an error,
+    // not a panic.
+    let tight_short = ImageBuffer {
+        width: 2,
+        height: 2,
+        stride: 8,
+        format: PixelFormat::Rgba8,
+        data: vec![0; 8],
+    };
+    let err = encode_png(&tight_short).unwrap_err();
+    assert!(matches!(
+        err,
+        adesk_render::RenderError::InvalidImage { .. }
+    ));
+
+    let padded_short = ImageBuffer {
+        width: 2,
+        height: 2,
+        stride: 16,
+        format: PixelFormat::Rgba8,
+        data: vec![0; 20],
+    };
+    let err = encode_png(&padded_short).unwrap_err();
+    assert!(matches!(
+        err,
+        adesk_render::RenderError::InvalidImage { .. }
+    ));
+}
 #[test]
 fn encode_png_rejects_empty_images() {
     let err = encode_png(&ImageBuffer::new_rgba(0, 0)).unwrap_err();
@@ -238,4 +308,53 @@ fn image_from_readback_rejects_short_and_malformed_buffers() {
         empty,
         Err(adesk_render::RenderError::InvalidImage { .. })
     ));
+}
+
+#[test]
+fn image_from_readback_tight_path_matches_padded_path() {
+    let (width, height) = (3u32, 2u32);
+
+    // Top-to-bottom rows, tightly packed (the fast path).
+    let mut tight = Vec::new();
+    for y in 0..height {
+        for x in 0..width {
+            tight.extend_from_slice(&pattern(x, y));
+        }
+    }
+    // The same rows, padded and stored bottom-to-top (the general path).
+    let mut padded = Vec::new();
+    for y in (0..height).rev() {
+        for x in 0..width {
+            padded.extend_from_slice(&pattern(x, y));
+        }
+        padded.extend_from_slice(&[0xEE; 4]);
+    }
+
+    let from_tight = image_from_readback(&tight, width, height, width * 4, false).unwrap();
+    let from_padded = image_from_readback(&padded, width, height, width * 4 + 4, true).unwrap();
+    assert_eq!(
+        from_tight, from_padded,
+        "fast path must match the padded path"
+    );
+    assert_eq!(from_tight.stride, width * 4);
+    assert_eq!(from_tight.data, tight, "tight rows are copied verbatim");
+
+    // A tight but bottom-to-top buffer takes the general path and must agree too.
+    let mut flipped_tight = Vec::new();
+    for y in (0..height).rev() {
+        for x in 0..width {
+            flipped_tight.extend_from_slice(&pattern(x, y));
+        }
+    }
+    let from_flipped_tight =
+        image_from_readback(&flipped_tight, width, height, width * 4, true).unwrap();
+    assert_eq!(from_flipped_tight, from_tight);
+
+    // Bytes past the `stride * height` payload are ignored on the tight path.
+    let mut overlong = tight.clone();
+    overlong.extend_from_slice(&[0xAB; 8]);
+    assert_eq!(
+        image_from_readback(&overlong, width, height, width * 4, false).unwrap(),
+        from_tight
+    );
 }

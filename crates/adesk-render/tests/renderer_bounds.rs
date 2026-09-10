@@ -1,6 +1,6 @@
 //! Compile-time pinning of the Smithay 0.7 trait surface this crate builds on.
 //!
-//! `render_scene`, `create_target` and `import_buffer` are generic over the
+//! `render_scene` and `create_target` are generic over the
 //! renderer; these assertions fail the build if Smithay changes the traits the
 //! pipeline depends on. They also pin that both renderer error types are
 //! `Send + Sync + 'static`, which the structured error boxing requires.
