@@ -2,49 +2,46 @@
 //!
 //! These drive a real [`ViewerClient`] against a real [`ViewerServer`] over a
 //! real Unix domain socket bound in a `tempfile` directory — no network, no
-//! display, no GPU. A test-local [`FakeBackend`] stands in for the runtime, so
-//! the suite exercises the full client → transport → session → backend round
-//! trip (`docs/viewer.md` §1–§6).
+//! display, no GPU. The shared [`FakeBackend`](common::FakeBackend) stands in for
+//! the runtime, so the suite exercises the full client → transport → session →
+//! backend round trip (`docs/viewer.md` §1–§6).
 //!
 //! Every test observes its assertions through protocol messages (handshake,
 //! frames, `input_ack`s) rather than fixed sleeps; a `tokio::time::timeout`
 //! wraps anything that could otherwise park forever on a bug.
 
+mod common;
+
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use adesk_core::{
     ActionId, AppId, Button, ButtonState, Rect, Size, WindowId, WindowInfo, WindowState,
 };
-use adesk_proto::{ImagePayload, KeySpec, RendererKind};
+use adesk_proto::{KeySpec, RendererKind};
 use adesk_viewer::Result as ViewerResult;
 use adesk_viewer::{
-    ChangeSignal, ConnectOptions, PeerInfo, ViewerBackend, ViewerClient, ViewerError, ViewerInput,
-    ViewerServer, ViewerTarget,
+    ConnectOptions, PeerInfo, ViewerClient, ViewerError, ViewerInput, ViewerServer, ViewerTarget,
 };
 use adesk_viewer_proto::{
     encode_server, ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ServerMessage,
-    ViewerFrame, PROTOCOL_VERSION,
+    PROTOCOL_VERSION,
 };
 use futures::pin_mut;
 use futures::StreamExt;
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::AsyncBufReadExt;
 use tokio::net::UnixListener;
 use tokio::task::JoinHandle;
+
+use common::FakeBackend;
 
 /// The `ActionId` every fake input is recorded under.
 const ACTION: ActionId = ActionId(11);
 
 /// Generous bound for any step that depends on the peer making progress.
 const STEP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// A one-pixel opaque black RGBA8 frame body.
-fn tiny_image() -> ImagePayload {
-    ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0).expect("a valid 1x1 rgba8 payload")
-}
 
 /// The desktop state the fake backend reports and the tests expect back.
 fn desktop_state() -> DesktopState {
@@ -82,77 +79,6 @@ fn server_hello() -> ServerHello {
     }
 }
 
-/// A minimal [`ViewerBackend`] that records what the session forwards to it.
-struct FakeBackend {
-    /// The desktop-change source the test drives directly.
-    change: ChangeSignal,
-    /// Monotonic frame counter.
-    seq: AtomicU64,
-    /// Every [`ViewerInput`] the session applied, in submission order.
-    inputs: Mutex<Vec<ViewerInput>>,
-    /// Every [`ControlOwner`] the session announced, in submission order.
-    control: Mutex<Vec<ControlOwner>>,
-}
-
-impl Default for FakeBackend {
-    fn default() -> FakeBackend {
-        FakeBackend {
-            change: ChangeSignal::new(),
-            seq: AtomicU64::new(0),
-            inputs: Mutex::new(Vec::new()),
-            control: Mutex::new(Vec::new()),
-        }
-    }
-}
-
-impl FakeBackend {
-    /// A snapshot of the inputs applied so far.
-    fn inputs(&self) -> Vec<ViewerInput> {
-        self.inputs.lock().expect("inputs mutex").clone()
-    }
-
-    /// A snapshot of the control-owner announcements received so far.
-    fn control(&self) -> Vec<ControlOwner> {
-        self.control.lock().expect("control mutex").clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl ViewerBackend for FakeBackend {
-    fn display(&self) -> ServerHello {
-        server_hello()
-    }
-
-    async fn render_frame(&self) -> ViewerResult<ViewerFrame> {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(ViewerFrame {
-            seq,
-            ts_ms: seq,
-            image: tiny_image(),
-            cursor: CursorState::hidden(),
-            active_window_id: Some(WindowId(7)),
-        })
-    }
-
-    async fn desktop_state(&self) -> ViewerResult<DesktopState> {
-        Ok(desktop_state())
-    }
-
-    async fn apply_input(&self, input: ViewerInput) -> ViewerResult<Option<ActionId>> {
-        self.inputs.lock().expect("inputs mutex").push(input);
-        Ok(Some(ACTION))
-    }
-
-    fn change_signal(&self) -> ChangeSignal {
-        self.change.clone()
-    }
-
-    async fn set_control(&self, owner: ControlOwner) -> ViewerResult<()> {
-        self.control.lock().expect("control mutex").push(owner);
-        Ok(())
-    }
-}
-
 /// A running server: the bound socket path, the backend the test manipulates,
 /// and the task that serves the single accepted connection to completion.
 struct Harness {
@@ -171,7 +97,15 @@ fn start_server() -> Harness {
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("viewer.sock");
     let listener = UnixListener::bind(&path).expect("bind the unix socket");
-    let backend = Arc::new(FakeBackend::default());
+    // The client suite's fake: an 800×600 desktop with one active window, an
+    // advancing `ts_ms` and `ACTION` recorded for every applied input.
+    let backend = Arc::new(
+        FakeBackend::default()
+            .with_display(server_hello())
+            .with_desktop(desktop_state())
+            .with_action(ACTION)
+            .with_ts_ms(None),
+    );
     let server_backend = Arc::clone(&backend);
     let peer_path = path.clone();
     let serve = tokio::spawn(async move {
@@ -290,7 +224,7 @@ async fn input_methods_reach_the_backend() {
     }
 
     assert_eq!(
-        harness.backend.inputs(),
+        harness.backend.recorded_inputs(),
         vec![
             ViewerInput::PointerMove { x: 0.5, y: 0.5 },
             ViewerInput::PointerButton {
@@ -314,7 +248,10 @@ async fn input_methods_reach_the_backend() {
             },
         ]
     );
-    assert_eq!(harness.backend.control(), vec![ControlOwner::Human]);
+    assert_eq!(
+        harness.backend.recorded_controls(),
+        vec![ControlOwner::Human]
+    );
 }
 
 #[tokio::test]
@@ -415,14 +352,15 @@ async fn client_notices_a_server_initiated_bye() {
         let handshake = lines.next_line().await.expect("read the handshake");
         assert!(handshake.is_some(), "the client must send a hello");
         let hello = encode_server(&ServerMessage::Hello(server_hello()));
-        write_half.write_all(hello.as_bytes()).await.unwrap();
-        write_half.write_all(b"\n").await.unwrap();
+        adesk_viewer::write_line(&mut write_half, &hello)
+            .await
+            .unwrap();
         let bye = encode_server(&ServerMessage::Bye {
             reason: "server shutting down".to_owned(),
         });
-        write_half.write_all(bye.as_bytes()).await.unwrap();
-        write_half.write_all(b"\n").await.unwrap();
-        write_half.flush().await.unwrap();
+        adesk_viewer::write_line(&mut write_half, &bye)
+            .await
+            .unwrap();
         // Dropping the stream closes the connection from the server side.
     });
 

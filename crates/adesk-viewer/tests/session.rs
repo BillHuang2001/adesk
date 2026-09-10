@@ -12,26 +12,23 @@
 //! Everything that could hang is wrapped in [`tokio::time::timeout`], so the
 //! suite is deterministic without any fixed-sleep synchronization.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+mod common;
+
+use std::sync::Arc;
 use std::time::Duration;
 
 use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size};
-use adesk_proto::{ImagePayload, KeySpec, RendererKind};
-use adesk_viewer::{
-    ChangeSignal, PeerInfo, ViewerBackend, ViewerError, ViewerInput, ViewerServer,
-    ViewerServerConfig,
-};
+use adesk_proto::{KeySpec, RendererKind};
+use adesk_viewer::{PeerInfo, ViewerError, ViewerInput, ViewerServer, ViewerServerConfig};
 use adesk_viewer_proto::{
     decode_server, encode_client, ClientMessage, ControlOwner, CursorState, DesktopState,
-    KeyAction, ServerHello, ServerMessage, ViewerFrame, ViewerHello, PROTOCOL_VERSION,
+    KeyAction, ServerHello, ServerMessage, ViewerHello, PROTOCOL_VERSION,
 };
-use tokio::io::{
-    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf,
-    WriteHalf,
-};
+use tokio::io::{AsyncBufRead, AsyncWrite, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
+
+use common::FakeBackend;
 
 /// The `serve` task's result type.
 type Session = JoinHandle<adesk_viewer::Result<()>>;
@@ -49,86 +46,27 @@ const CAPACITY: usize = 1 << 16;
 /// protocol, not about timing.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// A backend that records every input and control owner and can be told to
-/// report a desktop change. State is behind interior mutability and no lock is
-/// ever held across an `.await`.
-struct FakeBackend {
-    /// The "desktop changed" source the session awaits.
-    change: ChangeSignal,
-    /// Frame sequence counter.
-    seq: AtomicU64,
-    /// Inputs `apply_input` received, in submission order.
-    inputs: Mutex<Vec<ViewerInput>>,
-    /// Control owners `set_control` received, in submission order.
-    controls: Mutex<Vec<ControlOwner>>,
-}
-
-impl FakeBackend {
-    fn new() -> Arc<FakeBackend> {
-        Arc::new(FakeBackend {
-            change: ChangeSignal::new(),
-            seq: AtomicU64::new(0),
-            inputs: Mutex::new(Vec::new()),
-            controls: Mutex::new(Vec::new()),
-        })
-    }
-
-    /// The inputs recorded so far.
-    fn recorded_inputs(&self) -> Vec<ViewerInput> {
-        self.inputs.lock().expect("inputs lock").clone()
-    }
-
-    /// The control owners recorded so far.
-    fn recorded_controls(&self) -> Vec<ControlOwner> {
-        self.controls.lock().expect("controls lock").clone()
-    }
-}
-
-#[async_trait::async_trait]
-impl ViewerBackend for FakeBackend {
-    fn display(&self) -> ServerHello {
-        ServerHello {
-            protocol_version: PROTOCOL_VERSION,
-            runtime_version: "test".to_owned(),
-            output: Size::new(1280, 800),
-            renderer: RendererKind::Pixman,
-            cursor: CursorState::hidden(),
-            control: ControlOwner::Ai,
-        }
-    }
-
-    async fn render_frame(&self) -> adesk_viewer::Result<ViewerFrame> {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        Ok(ViewerFrame {
-            seq,
-            ts_ms: 0,
-            image: ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0)
-                .expect("a valid rgba8 payload"),
-            cursor: CursorState::hidden(),
-            active_window_id: None,
-        })
-    }
-
-    async fn desktop_state(&self) -> adesk_viewer::Result<DesktopState> {
-        Ok(DesktopState {
-            active_window_id: None,
-            windows: Vec::new(),
-        })
-    }
-
-    async fn apply_input(&self, input: ViewerInput) -> adesk_viewer::Result<Option<ActionId>> {
-        self.inputs.lock().expect("inputs lock").push(input);
-        Ok(Some(ActionId(7)))
-    }
-
-    fn change_signal(&self) -> ChangeSignal {
-        self.change.clone()
-    }
-
-    async fn set_control(&self, owner: ControlOwner) -> adesk_viewer::Result<()> {
-        self.controls.lock().expect("controls lock").push(owner);
-        Ok(())
-    }
+/// A fake backend configured for the session suite: an empty 1280×800 Pixman
+/// desktop reported as runtime `"test"`, a fixed frame `ts_ms` of `0` and
+/// `ActionId(7)` recorded for every applied input.
+fn backend() -> Arc<FakeBackend> {
+    Arc::new(
+        FakeBackend::default()
+            .with_display(ServerHello {
+                protocol_version: PROTOCOL_VERSION,
+                runtime_version: "test".to_owned(),
+                output: Size::new(1280, 800),
+                renderer: RendererKind::Pixman,
+                cursor: CursorState::hidden(),
+                control: ControlOwner::Ai,
+            })
+            .with_desktop(DesktopState {
+                active_window_id: None,
+                windows: Vec::new(),
+            })
+            .with_action(ActionId(7))
+            .with_ts_ms(Some(0)),
+    )
 }
 
 /// Spawns a server over one half of an in-memory duplex, returning the session
@@ -155,7 +93,9 @@ async fn send<W>(writer: &mut W, message: &ClientMessage)
 where
     W: AsyncWrite + Unpin,
 {
-    write_line(writer, &encode_client(message)).await;
+    adesk_viewer::write_line(writer, &encode_client(message))
+        .await
+        .expect("write a message");
 }
 
 /// Writes and flushes one raw line, for malformed/unknown-type tests.
@@ -163,17 +103,9 @@ async fn send_raw<W>(writer: &mut W, line: &str)
 where
     W: AsyncWrite + Unpin,
 {
-    write_line(writer, line).await;
-}
-
-/// Writes `line`, a `\n`, then flushes.
-async fn write_line<W>(writer: &mut W, line: &str)
-where
-    W: AsyncWrite + Unpin,
-{
-    writer.write_all(line.as_bytes()).await.expect("write line");
-    writer.write_all(b"\n").await.expect("write terminator");
-    writer.flush().await.expect("flush line");
+    adesk_viewer::write_line(writer, line)
+        .await
+        .expect("write a raw line");
 }
 
 /// Reads one `\n`-terminated server message; `None` on a clean EOF.
@@ -181,12 +113,10 @@ async fn recv<R>(reader: &mut R) -> Option<ServerMessage>
 where
     R: AsyncBufRead + Unpin,
 {
-    let mut line = String::new();
-    let read = reader.read_line(&mut line).await.expect("read a line");
-    if read == 0 {
-        return None;
-    }
-    Some(decode_server(line.trim_end_matches('\n')).expect("a valid server message"))
+    adesk_viewer::read_line(reader, adesk_viewer::DEFAULT_MAX_FRAME_LEN)
+        .await
+        .expect("read a line")
+        .map(|line| decode_server(&line).expect("a valid server message"))
 }
 
 /// Awaits the next server message, failing the test if none arrives in time.
@@ -253,7 +183,7 @@ async fn finish(handle: Session) {
 /// §2: the handshake reply carries the backend's `display()` metadata.
 #[tokio::test]
 async fn handshake_replies_with_backend_display_metadata() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, stream) = start(backend, ViewerServerConfig::default());
     let (mut reader, mut writer) = split(stream);
 
@@ -276,7 +206,7 @@ async fn handshake_replies_with_backend_display_metadata() {
 /// `serve` still reports success.
 #[tokio::test]
 async fn version_mismatch_is_refused_and_closes() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, stream) = start(backend, ViewerServerConfig::default());
     let (mut reader, mut writer) = split(stream);
 
@@ -297,7 +227,7 @@ async fn version_mismatch_is_refused_and_closes() {
 /// §2: a first message that is not a hello is refused and the connection closes.
 #[tokio::test]
 async fn a_non_hello_first_message_is_refused_and_closes() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, stream) = start(backend, ViewerServerConfig::default());
     let (mut reader, mut writer) = split(stream);
 
@@ -315,7 +245,7 @@ async fn a_non_hello_first_message_is_refused_and_closes() {
 /// error (the client stream is kept alive so this is a timeout, not an EOF).
 #[tokio::test]
 async fn a_silent_viewer_hits_the_handshake_timeout() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let config = ViewerServerConfig::default().with_handshake_timeout(Duration::from_millis(50));
     let (handle, _client) = start(backend, config);
 
@@ -333,7 +263,7 @@ async fn a_silent_viewer_hits_the_handshake_timeout() {
 /// `state`.
 #[tokio::test]
 async fn request_frame_and_request_state_round_trip() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend).await;
 
     send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
@@ -354,7 +284,7 @@ async fn request_frame_and_request_state_round_trip() {
 /// §5: a desktop change pushes a frame without a `request_frame`.
 #[tokio::test]
 async fn a_desktop_change_pushes_a_frame_on_demand() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend.clone()).await;
 
     backend.change.notify();
@@ -370,7 +300,7 @@ async fn a_desktop_change_pushes_a_frame_on_demand() {
 /// the recorded action id.
 #[tokio::test]
 async fn pointer_move_is_forwarded_and_acknowledged() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend.clone()).await;
 
     send(&mut writer, &ClientMessage::PointerMove { x: 0.5, y: 0.25 }).await;
@@ -394,7 +324,7 @@ async fn pointer_move_is_forwarded_and_acknowledged() {
 /// order.
 #[tokio::test]
 async fn every_input_variant_is_forwarded_in_order() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend.clone()).await;
 
     let messages = vec![
@@ -461,7 +391,7 @@ async fn every_input_variant_is_forwarded_in_order() {
 /// §5: `set_control` is echoed as `control` and announced to the backend.
 #[tokio::test]
 async fn set_control_is_echoed_and_recorded() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend.clone()).await;
 
     send(
@@ -484,7 +414,7 @@ async fn set_control_is_echoed_and_recorded() {
 /// §4: `bye` is acknowledged and then closes the connection.
 #[tokio::test]
 async fn bye_is_echoed_and_closes_the_connection() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend).await;
 
     send(
@@ -507,7 +437,7 @@ async fn bye_is_echoed_and_closes_the_connection() {
 /// connection.
 #[tokio::test]
 async fn a_malformed_line_is_refused_and_closes() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend).await;
 
     send_raw(&mut writer, "not json").await;
@@ -523,7 +453,7 @@ async fn a_malformed_line_is_refused_and_closes() {
 /// §1/§7: an unrecognised message type is ignored; the connection stays usable.
 #[tokio::test]
 async fn an_unknown_message_type_is_ignored() {
-    let backend = FakeBackend::new();
+    let backend = backend();
     let (handle, mut reader, mut writer) = connected(backend).await;
 
     send_raw(&mut writer, r#"{"type":"future_thing"}"#).await;
