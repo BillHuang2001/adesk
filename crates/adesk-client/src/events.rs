@@ -164,8 +164,30 @@ fn event_kind(event: &AgpEvent) -> Option<EventKind> {
         AgpEvent::Quiet { .. } => Some(EventKind::Quiet),
         // Known-but-untyped frames (`surface_damage`, future kinds): the wire
         // name is the only kind information available.
-        AgpEvent::Other { name, .. } => serde_json::from_value(Value::String(name.clone())).ok(),
+        AgpEvent::Other { name, .. } => kind_from_name(name),
         AgpEvent::InspectFrame(_) => None,
+    }
+}
+
+/// Map a wire event name onto the client [`EventKind`], allocation-free.
+///
+/// The strings mirror [`EventKind`]'s `snake_case` serde representation. A name
+/// the client does not model (`inspect_frame`, or any future kind, protocol §7)
+/// yields `None`, so such a frame never matches a `Some` filter.
+fn kind_from_name(name: &str) -> Option<EventKind> {
+    match name {
+        "window_created" => Some(EventKind::WindowCreated),
+        "window_destroyed" => Some(EventKind::WindowDestroyed),
+        "window_activated" => Some(EventKind::WindowActivated),
+        "title_changed" => Some(EventKind::TitleChanged),
+        "surface_commit" => Some(EventKind::SurfaceCommit),
+        "surface_damage" => Some(EventKind::SurfaceDamage),
+        "focus_changed" => Some(EventKind::FocusChanged),
+        "popup_appeared" => Some(EventKind::PopupAppeared),
+        "popup_disappeared" => Some(EventKind::PopupDisappeared),
+        "quiet" => Some(EventKind::Quiet),
+        "app_launched" => Some(EventKind::AppLaunched),
+        _ => None,
     }
 }
 
@@ -193,17 +215,26 @@ pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
         name,
         seq,
         ts_ms,
-        data,
+        mut data,
     } = raw;
     match name.as_str() {
         "inspect_frame" => {
-            match data
-                .get("image")
-                .cloned()
-                .map(serde_json::from_value::<ImagePayload>)
-            {
-                Some(Ok(image)) => AgpEvent::InspectFrame(InspectFrame { seq, ts_ms, image }),
-                _ => AgpEvent::Other {
+            // Move `data.image` out rather than cloning it: an `inspect_frame`
+            // image is multi-MiB of base64. A payload that does not fit leaves
+            // a `null` image slot in the fallback below, but the frame is still
+            // handed to `AgpEvent::Other` with its name, sequence and remaining
+            // fields intact (protocol §7 forward compatibility).
+            match data.get_mut("image").map(Value::take) {
+                Some(image) => match serde_json::from_value::<ImagePayload>(image) {
+                    Ok(image) => AgpEvent::InspectFrame(InspectFrame { seq, ts_ms, image }),
+                    Err(_) => AgpEvent::Other {
+                        name,
+                        seq,
+                        ts_ms,
+                        data,
+                    },
+                },
+                None => AgpEvent::Other {
                     name,
                     seq,
                     ts_ms,
@@ -314,6 +345,72 @@ pub enum AgpEvent {
     },
 }
 
+/// Shared plumbing for the three stream views: the per-connection event
+/// fan-out, the local [`EventFilter`], the server-assigned subscription id, and
+/// the best-effort `unsubscribe_events` on drop.
+///
+/// Each public stream ([`EventStream`], [`AgpEventStream`], [`InspectStream`])
+/// is a thin wrapper that owns one of these and only maps the delivered event
+/// onto its own item type.
+struct Subscription {
+    /// Per-connection event fan-out (shared with all streams).
+    events: EventReceiver,
+    /// Local filter applied to every event.
+    filter: EventFilter,
+    /// Server-assigned subscription id, used for `unsubscribe_events`.
+    subscription_id: u64,
+    /// Connection handle used to cancel the subscription on drop.
+    connection: std::sync::Arc<crate::transport::Connection>,
+}
+
+impl Subscription {
+    /// Build the shared subscription state.
+    fn new(
+        events: EventReceiver,
+        filter: EventFilter,
+        subscription_id: u64,
+        connection: std::sync::Arc<crate::transport::Connection>,
+    ) -> Self {
+        Self {
+            events,
+            filter,
+            subscription_id,
+            connection,
+        }
+    }
+
+    /// The server-assigned subscription id (for manual `unsubscribe_events`).
+    fn subscription_id(&self) -> u64 {
+        self.subscription_id
+    }
+
+    /// Poll until the next event that passes the local filter, discarding the
+    /// rest. The subscription-level outcomes (lag/close/end) pass through
+    /// unchanged, so every call stops at the first *filtered* event.
+    fn poll_matching(&mut self, cx: &mut Context<'_>) -> Poll<Option<Result<AgpEvent>>> {
+        loop {
+            match self.events.poll_event(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
+                Poll::Ready(Some(Ok(event))) => {
+                    if self.filter.matches(&event) {
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        // Best-effort: enqueue `unsubscribe_events`; a dead connection is fine.
+        self.connection
+            .unsubscribe_fire_and_forget(self.subscription_id);
+    }
+}
+
 /// Stream of agent-facing runtime events: `subscribe_events` with a filter that
 /// selects the 9 core kinds.
 ///
@@ -324,14 +421,8 @@ pub enum AgpEvent {
 /// skipped even when the filter selects them — use [`AgpEventStream`]
 /// (`subscribe_frames`) to observe those.
 pub struct EventStream {
-    /// Per-connection event fan-out (shared with all streams).
-    events: EventReceiver,
-    /// Local filter applied to every event.
-    filter: EventFilter,
-    /// Server-assigned subscription id, used for `unsubscribe_events`.
-    subscription_id: u64,
-    /// Connection handle used to cancel the subscription on drop.
-    connection: std::sync::Arc<crate::transport::Connection>,
+    /// Shared subscription state.
+    inner: Subscription,
 }
 
 impl EventStream {
@@ -344,16 +435,13 @@ impl EventStream {
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
         Self {
-            events,
-            filter,
-            subscription_id,
-            connection,
+            inner: Subscription::new(events, filter, subscription_id, connection),
         }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
     pub fn subscription_id(&self) -> u64 {
-        self.subscription_id
+        self.inner.subscription_id()
     }
 }
 
@@ -363,14 +451,11 @@ impl Stream for EventStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
-            match this.events.poll_event(cx) {
+            match this.inner.poll_matching(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
                 Poll::Ready(Some(Ok(event))) => {
-                    if !this.filter.matches(&event) {
-                        continue;
-                    }
                     if let AgpEvent::Runtime(runtime) = event {
                         return Poll::Ready(Some(Ok(runtime)));
                     }
@@ -382,25 +467,11 @@ impl Stream for EventStream {
     }
 }
 
-impl Drop for EventStream {
-    fn drop(&mut self) {
-        // Best-effort: enqueue `unsubscribe_events`; a dead connection is fine.
-        self.connection
-            .unsubscribe_fire_and_forget(self.subscription_id);
-    }
-}
-
 /// Stream of **all** AGP event frames (`subscribe_frames`), including `quiet`,
 /// `inspect_frame` and unknown future kinds.
 pub struct AgpEventStream {
-    /// Per-connection event fan-out.
-    events: EventReceiver,
-    /// Local filter applied to every event.
-    filter: EventFilter,
-    /// Server-assigned subscription id.
-    subscription_id: u64,
-    /// Connection handle used to cancel the subscription on drop.
-    connection: std::sync::Arc<crate::transport::Connection>,
+    /// Shared subscription state.
+    inner: Subscription,
 }
 
 impl AgpEventStream {
@@ -412,16 +483,13 @@ impl AgpEventStream {
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
         Self {
-            events,
-            filter,
-            subscription_id,
-            connection,
+            inner: Subscription::new(events, filter, subscription_id, connection),
         }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
     pub fn subscription_id(&self) -> u64 {
-        self.subscription_id
+        self.inner.subscription_id()
     }
 }
 
@@ -429,37 +497,14 @@ impl Stream for AgpEventStream {
     type Item = Result<AgpEvent>;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        let this = self.get_mut();
-        loop {
-            match this.events.poll_event(cx) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
-                Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(Some(Ok(event))) => {
-                    if this.filter.matches(&event) {
-                        return Poll::Ready(Some(Ok(event)));
-                    }
-                }
-            }
-        }
-    }
-}
-
-impl Drop for AgpEventStream {
-    fn drop(&mut self) {
-        self.connection
-            .unsubscribe_fire_and_forget(self.subscription_id);
+        self.get_mut().inner.poll_matching(cx)
     }
 }
 
 /// Stream of `inspect_frame` events produced by `inspect_subscribe`.
 pub struct InspectStream {
-    /// Per-connection event fan-out.
-    events: EventReceiver,
-    /// Server-assigned subscription id.
-    subscription_id: u64,
-    /// Connection handle used to cancel the subscription on drop.
-    connection: std::sync::Arc<crate::transport::Connection>,
+    /// Shared subscription state.
+    inner: Subscription,
 }
 
 impl InspectStream {
@@ -470,15 +515,15 @@ impl InspectStream {
         connection: std::sync::Arc<crate::transport::Connection>,
     ) -> Self {
         Self {
-            events,
-            subscription_id,
-            connection,
+            // `inspect_frame` is never filtered locally: this view accepts every
+            // frame the connection fans out and keeps only the ones it models.
+            inner: Subscription::new(events, EventFilter::all(), subscription_id, connection),
         }
     }
 
     /// The server-assigned subscription id (for manual `unsubscribe_events`).
     pub fn subscription_id(&self) -> u64 {
-        self.subscription_id
+        self.inner.subscription_id()
     }
 }
 
@@ -488,23 +533,16 @@ impl Stream for InspectStream {
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.get_mut();
         loop {
-            match this.events.poll_event(cx) {
+            match this.inner.poll_matching(cx) {
                 Poll::Pending => return Poll::Pending,
                 Poll::Ready(None) => return Poll::Ready(None),
                 Poll::Ready(Some(Err(error))) => return Poll::Ready(Some(Err(error))),
-                Poll::Ready(Some(Ok(event))) => {
-                    if let AgpEvent::InspectFrame(frame) = event {
-                        return Poll::Ready(Some(Ok(frame)));
-                    }
+                Poll::Ready(Some(Ok(AgpEvent::InspectFrame(frame)))) => {
+                    return Poll::Ready(Some(Ok(frame)))
                 }
+                // Any other kind is not an `inspect_frame`: skip it.
+                Poll::Ready(Some(Ok(_))) => {}
             }
         }
-    }
-}
-
-impl Drop for InspectStream {
-    fn drop(&mut self) {
-        self.connection
-            .unsubscribe_fire_and_forget(self.subscription_id);
     }
 }
