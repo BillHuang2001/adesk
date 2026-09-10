@@ -1,10 +1,11 @@
 //! One AGP client connection: NDJSON framing, per-connection session and the
 //! request dispatch loop.
 //!
-//! Framing (`docs/protocol.md` §1) is NDJSON: one `Frame` per line. A malformed
-//! frame closes **only** that connection; a failed request yields an error
-//! response and the connection stays open. Every request gets exactly one
-//! response.
+//! Framing (`docs/protocol.md` §1) is NDJSON: one `Frame` per line. Every
+//! request gets exactly one response and the connection stays open, including
+//! for a request whose params fail validation (`invalid_request`); only a line
+//! that cannot be identified as a request at all (invalid UTF-8, or JSON with no
+//! `u64` id) is framing corruption and closes **only** that connection (§6).
 
 use std::sync::Arc;
 
@@ -113,10 +114,12 @@ async fn write_loop(
 /// Reads NDJSON requests, dispatching each on its own task so slow requests do
 /// not block the connection (`docs/architecture.md` §9).
 ///
-/// A malformed frame (bad UTF-8, undecodable JSON, or a non-request frame)
-/// closes only this connection; every accepted request is answered exactly once
-/// by its dispatch task. An unknown method is the one decode failure that is
-/// answered (`unknown_method`, §1) instead of closing the connection.
+/// A frame that does not decode but still names a request is answered with an
+/// error response and the connection stays open (§6): `unknown_method` for an
+/// unknown method, `invalid_request` for params that fail validation. Only a
+/// line that cannot be identified as a request — invalid UTF-8, or JSON with no
+/// `u64` id — or a *decoded* non-request frame closes this connection. Every
+/// accepted request is answered exactly once by its dispatch task.
 ///
 /// Each dispatch task races its handler against the shutdown token, so a request
 /// that is already in flight when the runtime stops answers `shutting_down`.
@@ -152,26 +155,26 @@ async fn read_loop(
         }
         let frame = match NdjsonCodec.decode_str(text) {
             Ok(frame) => frame,
-            // Protocol §1: an unknown method answers `unknown_method` and the
-            // connection stays open. `ProtoError::UnknownMethod` carries only
-            // the method name, so the request id is lifted from the raw line;
-            // without a usable id the line is unusable framing after all.
-            Err(error @ adesk_proto::ProtoError::UnknownMethod(_)) => {
+            // Protocol §6: a client error never closes the connection — only
+            // framing corruption does. Every `ProtoError` that describes a
+            // *request* (unknown method, params that fail validation, a
+            // request-shaped object that matches no frame) is answered with the
+            // code it maps to (`unknown_method` / `invalid_request`) and the
+            // connection stays usable. `ProtoError` carries no request id, so it
+            // is lifted from the raw line; a line from which no id can be lifted
+            // is not identifiable as a request and closes the connection.
+            Err(error) => {
                 let Some(id) = request_id_from_line(text) else {
-                    tracing::warn!(%error, "unknown method without a usable id; closing connection");
+                    tracing::warn!(%error, "undecodable frame without a usable id; closing connection");
                     break;
                 };
-                tracing::debug!(%error, id, "unknown method");
+                tracing::debug!(%error, id, "answering an undecodable request");
                 let response = error_response(id, &ServerError::Proto(error));
                 if let Err(error) = writer.send(Frame::Response(response)).await {
                     tracing::debug!(%error, "failed to deliver response");
                     break;
                 }
                 continue;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "malformed frame; closing connection");
-                break;
             }
         };
         let Frame::Request(request) = frame else {
@@ -217,12 +220,14 @@ async fn read_loop(
     Ok(())
 }
 
-/// Lifts the `id` of a raw request line that failed to decode as an unknown
-/// method.
+/// Lifts the `id` of a raw request line that failed to decode into a frame.
 ///
-/// `ProtoError::UnknownMethod` keeps only the method name, so the id has to come
-/// from the line itself. Returns `None` when the line is not a JSON object with
-/// a `u64` id — the caller then treats it as malformed framing.
+/// `ProtoError` keeps only a description of the failure (the method name, the
+/// params error), never the request id, so the id has to come from the line
+/// itself — this is what lets `read_loop` answer an undecodable request
+/// (`unknown_method`, `invalid_request`) without closing the connection (§6).
+/// Returns `None` when the line is not a JSON object with a `u64` id — the
+/// caller then treats it as framing corruption.
 fn request_id_from_line(text: &str) -> Option<u64> {
     let value: serde_json::Value = serde_json::from_str(text).ok()?;
     value.get("id")?.as_u64()

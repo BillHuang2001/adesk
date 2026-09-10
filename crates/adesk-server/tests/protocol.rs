@@ -13,9 +13,12 @@
 //!   (scenario 2).
 //! - an unknown method answers `unknown_method` and keeps the connection open
 //!   (§1, scenario 3).
+//! - a request whose `params` fail validation answers `invalid_request` and
+//!   keeps the connection open (§6, scenario 3b).
 //! - an AGP error response does not close the connection (§6, scenarios 4/5).
-//! - a malformed NDJSON line closes only the offending connection (§1,
-//!   scenario 6).
+//! - a line that identifies no request — not JSON at all, JSON that is not an
+//!   object, or a request-shaped object without a `u64` id — closes only the
+//!   offending connection (§1/§6, scenario 6).
 //! - concurrent (scenario 7) and pipelined (scenario 8) requests on one
 //!   connection all resolve with exactly one response each (§1).
 //! - blank lines are ignored (§1, scenario 9).
@@ -505,6 +508,54 @@ fn unknown_method_answers_unknown_method_and_keeps_the_connection_open() {
 }
 
 // ---------------------------------------------------------------------------
+// Scenario 3b — request params that fail validation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn invalid_params_answer_invalid_request_and_keep_the_connection_open() {
+    let t = TestRuntime::start();
+    let mut raw = t.connect_raw();
+
+    t.block_on(async {
+        // A well-formed request frame whose `params` do not match the method's
+        // schema decodes to `ProtoError::InvalidParams`. Protocol §6: the server
+        // answers every request with exactly one response frame and only framing
+        // corruption may close the connection — so this must be answered
+        // `invalid_request` (`adesk-proto` maps `InvalidParams` there), not
+        // dropped.
+        raw.send_line(r#"{"id":43,"method":"click","params":{"window_id":"not-a-number"}}"#)
+            .await;
+
+        let response = raw.expect_json(REQUEST_TIMEOUT).await;
+        assert_eq!(
+            response["id"],
+            json!(43),
+            "the error response must carry the request id, got {response}"
+        );
+        assert_eq!(
+            response["error"]["code"],
+            json!("invalid_request"),
+            "params that fail validation must answer `invalid_request` (§6), got {response}"
+        );
+        assert!(
+            response.get("result").is_none(),
+            "an `invalid_request` response must not carry a `result`, got {response}"
+        );
+
+        // The connection must still be usable afterwards (§6).
+        raw.send_json(&json!({ "id": 44, "method": "ping", "params": {} }))
+            .await;
+        let response = raw.expect_json(REQUEST_TIMEOUT).await;
+        assert_eq!(response["id"], json!(44));
+        assert_eq!(
+            response["result"]["protocol_version"],
+            json!(1),
+            "the connection must stay open after `invalid_request`, got {response}"
+        );
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Scenario 4 — registry error path keeps the connection open
 // ---------------------------------------------------------------------------
 
@@ -566,6 +617,12 @@ fn unknown_window_error_keeps_the_connection_open() {
 fn malformed_ndjson_closes_only_that_connection() {
     let t = TestRuntime::start();
     let mut raw = t.connect_raw();
+    // The two §6 boundary lines below each corrupt their own connection, so they
+    // need one connection each. They are created here because the harness's
+    // `connect_raw` blocks on the runtime and cannot be called from inside
+    // `block_on`.
+    let non_object = t.connect_raw();
+    let no_id = t.connect_raw();
 
     t.block_on(async {
         raw.send_json(&json!({ "id": 1, "method": "ping", "params": {} }))
@@ -581,6 +638,28 @@ fn malformed_ndjson_closes_only_that_connection() {
         // connection and only this connection (§1).
         raw.send_line("this is not json").await;
         raw.expect_closed(Duration::from_secs(5)).await;
+
+        // The §6 boundary: JSON alone is not a request. A line that carries no
+        // `u64` id cannot be answered with an error response (there is no id to
+        // put on it) and identifies no request, so it is framing corruption and
+        // closes — unlike a request-shaped line, which is answered and kept
+        // (scenario 3b).
+        for (mut raw, line) in [
+            (non_object, "[1, 2, 3]"),       // JSON, but not an object
+            (no_id, r#"{"method":"ping"}"#), // object, but no `id`
+        ] {
+            raw.send_json(&json!({ "id": 2, "method": "ping", "params": {} }))
+                .await;
+            let response = raw.expect_json(REQUEST_TIMEOUT).await;
+            assert_eq!(
+                response["id"],
+                json!(2),
+                "the connection works before {line}, got {response}"
+            );
+
+            raw.send_line(line).await;
+            raw.expect_closed(Duration::from_secs(5)).await;
+        }
     });
 
     // A second, independent client is unaffected and the runtime still serves.
