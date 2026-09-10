@@ -29,6 +29,9 @@ adesk-client = { path = "crates/adesk-client" }
 adesk-server = { path = "crates/adesk-server" }
 adesk-agent = { path = "crates/adesk-agent" }
 adesk-testkit = { path = "crates/adesk-testkit" }
+adesk-viewer-proto = { path = "crates/adesk-viewer-proto" }
+adesk-viewer = { path = "crates/adesk-viewer" }
+adesk-machine = { path = "crates/adesk-machine" }
 
 # --- wayland / smithay stack ---
 smithay = { version = "0.7.0", default-features = false }

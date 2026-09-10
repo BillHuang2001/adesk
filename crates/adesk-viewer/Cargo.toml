@@ -1,0 +1,40 @@
+# adesk-viewer — the ADesk viewer: server-side session + client SDK + headless binary.
+#
+# Dependency versions are declared once in the root workspace manifest
+# ([workspace.dependencies]); this crate only references them so versions can
+# never drift. The crate is transport-agnostic: it drives any reliable byte
+# stream (Unix socket, TCP, in-memory) through the VAP codec and knows nothing
+# about the compositor or the AGP server (docs/viewer.md).
+[package]
+name = "adesk-viewer"
+description = "ADesk viewer: desktop-streaming session server, async client SDK and a headless viewer binary (VAP)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "adesk_viewer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adesk-viewer"
+path = "src/main.rs"
+
+[dependencies]
+adesk-core.workspace = true
+adesk-proto.workspace = true
+adesk-viewer-proto.workspace = true
+async-trait.workspace = true
+clap.workspace = true
+futures.workspace = true
+image.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

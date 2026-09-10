@@ -67,9 +67,21 @@ Design invariants:
 | `crates/adesk-client/` | Async Rust client SDK for AGP (typed methods + event stream). |
 | `crates/adesk-agent/` | Multimodal agent prototype: provider-agnostic LLM interface, context assembly, metrics, task scenarios. |
 | `crates/adesk-testkit/` | Dev-only test harness: in-process runtime, Wayland test client, fixtures, image assertions. |
+| `crates/adesk-viewer-proto/` | Viewer Attachment Protocol (VAP) v1: viewer↔runtime wire messages, codec. No I/O. |
+| `crates/adesk-viewer/` | Viewer: desktop-streaming server session + async client SDK + headless `adesk-viewer` binary. |
+| `crates/adesk-machine/` | AI Machine runtime: rootless-container backend seam, machine lifecycle manager, host control plane. |
 
 End-to-end tests live in `crates/adesk-server/tests/`; protocol-level compositor tests in
 `crates/adesk-compositor/tests/`. Both build on `adesk-testkit`.
+
+## Assistant runtime (AI Machine + Viewer)
+
+Beyond the GUI runtime, the workspace grows toward the assistant-runtime design in
+`docs/machine.md` and `docs/viewer.md`: an AI-owned Linux machine inside a rootless
+container (`adesk-machine`) with ADesk running inside it, and a Viewer outside it that
+observes the desktop and provides limited human input over a purpose-built protocol
+(VAP, `adesk-viewer-proto` / `adesk-viewer`). ADesk's viewer endpoint lives in
+`adesk-server` and reuses the same seat/input path as agent input.
 
 ## Cross-crate contracts
 
@@ -142,7 +154,8 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   `crates/adesk-compositor/CONTEXT.md`.
 
 ## Status
-All 12 crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
+The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
+Three new crates extend the workspace toward the assistant runtime — `adesk-viewer-proto`, `adesk-viewer` and `adesk-machine` — and carry the ADesk viewer endpoint in `adesk-server`; see each crate's `CONTEXT.md` for its current state and `docs/viewer.md` / `docs/machine.md` for the designs.
 `./scripts/dev.sh cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
 `./scripts/dev.sh cargo test --workspace --no-fail-fast` = 1230 passed, 0 failed, 5 ignored across 93 test targets; the 5 ignored are doc-code fences only.
 Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 94 passed.
@@ -169,5 +182,8 @@ Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, 
 | Agent client SDK | `crates/adesk-client/` |
 | Multimodal agent prototype, metrics | `crates/adesk-agent/` |
 | Test harness, Wayland test client, fixtures | `crates/adesk-testkit/` |
-| Protocol spec, architecture decisions | `docs/` |
+| Viewer wire protocol (VAP) messages + codec | `crates/adesk-viewer-proto/` |
+| Viewer server session, client SDK, headless viewer binary | `crates/adesk-viewer/` |
+| AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
+| Protocol/viewer/machine specs, architecture decisions | `docs/` |
 | Dev shell, build wrapper | `flake.nix`, `scripts/` |

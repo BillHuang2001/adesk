@@ -1,0 +1,36 @@
+# adesk-machine — the AI Machine runtime and host control plane.
+#
+# Dependency versions are declared once in the root workspace manifest
+# ([workspace.dependencies]); this crate only references them so versions can
+# never drift. The crate is a different domain from the GUI runtime, so it
+# carries its own error type and does not depend on `adesk-core`. The container
+# backend is an abstraction (rootless Podman is the first implementation) and the
+# host control plane owns the machine boundary (docs/machine.md).
+[package]
+name = "adesk-machine"
+description = "AI Machine runtime: rootless-container backend abstraction, machine lifecycle manager and host control plane."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "adesk_machine"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adesk-machine"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

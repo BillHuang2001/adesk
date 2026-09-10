@@ -33,5 +33,7 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
 | Area | Owner |
 |---|---|
 | External agent-facing protocol | `protocol.md` |
+| External viewer-facing protocol | `viewer.md` |
+| AI Machine runtime + host control plane | `machine.md` |
 | Internal cross-crate contracts | `architecture.md` |
 | Per-crate internals | each crate's `CONTEXT.md` |
