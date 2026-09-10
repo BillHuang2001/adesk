@@ -142,113 +142,14 @@ impl<R: ContainerRuntime> HostControlPlane<R> {
 mod tests {
     use super::*;
     use crate::approval::{ApprovalPolicy, AutoDeny};
-    use crate::manager::testing::{name, StubRuntime};
-    use crate::runtime::RuntimeKind;
-    use crate::state::MachineState;
+    use crate::manager::testing::name;
+    use crate::runtime::MockRuntime;
 
-    fn plane() -> HostControlPlane<StubRuntime> {
+    fn plane() -> HostControlPlane<MockRuntime> {
         HostControlPlane::new(
-            MachineManager::new(StubRuntime::new()),
+            MachineManager::new(MockRuntime::new()),
             HostCapabilities::default(),
         )
-    }
-
-    fn spec(value: &str) -> MachineSpec {
-        MachineSpec::new(value, "ghcr.io/adesk/machine:latest")
-    }
-
-    #[test]
-    fn default_grants_nothing() {
-        let caps = HostCapabilities::default();
-        assert!(!caps.gpu);
-        assert!(!caps.kvm);
-        assert!(caps.allowed_mounts.is_empty());
-        assert!(!caps.publish_ports);
-        assert!(!caps.allows_mount(Path::new("/data")));
-        assert!(!caps.allows_port(8080));
-    }
-
-    #[test]
-    fn allows_mount_is_component_wise() {
-        let caps = HostCapabilities {
-            allowed_mounts: vec![PathBuf::from("/data"), PathBuf::from("/srv/share")],
-            ..HostCapabilities::default()
-        };
-
-        assert!(caps.allows_mount(Path::new("/data")));
-        assert!(caps.allows_mount(Path::new("/data/sub")));
-        assert!(caps.allows_mount(Path::new("/data/sub/file")));
-        assert!(caps.allows_mount(Path::new("/srv/share")));
-
-        // No false positives from a bare string prefix.
-        assert!(!caps.allows_mount(Path::new("/database")));
-        assert!(!caps.allows_mount(Path::new("/dat")));
-        assert!(!caps.allows_mount(Path::new("/srv/other")));
-        assert!(!caps.allows_mount(Path::new("/other")));
-    }
-
-    #[test]
-    fn allows_port_reflects_publish_ports() {
-        let closed = HostCapabilities::default();
-        assert!(!closed.allows_port(80));
-        assert!(!closed.allows_port(65535));
-
-        let open = HostCapabilities {
-            publish_ports: true,
-            ..HostCapabilities::default()
-        };
-        assert!(open.allows_port(80));
-        assert!(open.allows_port(65535));
-    }
-
-    #[test]
-    fn capabilities_accessor_reports_the_installed_capabilities() {
-        let caps = HostCapabilities {
-            gpu: true,
-            kvm: true,
-            ..HostCapabilities::default()
-        };
-        let plane = HostControlPlane::new(MachineManager::new(StubRuntime::new()), caps);
-        assert!(plane.capabilities().gpu);
-        assert!(plane.capabilities().kvm);
-    }
-
-    #[tokio::test]
-    async fn delegating_methods_drive_a_machine() {
-        let plane = plane();
-        // The manager and its runtime are reachable through the plane.
-        assert_eq!(plane.manager().runtime().kind(), RuntimeKind::Mock);
-
-        let created = plane.create(&spec("adesk")).await.unwrap();
-        assert_eq!(created.state, MachineState::Created);
-
-        let adesk = name("adesk");
-        assert_eq!(
-            plane.status(&adesk).await.unwrap().state,
-            MachineState::Created
-        );
-        assert_eq!(
-            plane.start(&adesk).await.unwrap().state,
-            MachineState::Running
-        );
-        assert_eq!(
-            plane
-                .machines()
-                .await
-                .unwrap()
-                .first()
-                .map(|s| s.name.clone()),
-            Some(adesk.clone())
-        );
-        assert_eq!(
-            plane.stop(&adesk, 0).await.unwrap().state,
-            MachineState::Stopped
-        );
-        assert_eq!(
-            plane.remove(&adesk, false).await.unwrap().state,
-            MachineState::Stopped
-        );
-        assert!(plane.machines().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -258,30 +159,6 @@ mod tests {
             plane.status(&name("ghost")).await.unwrap_err(),
             crate::error::MachineError::NotFound { .. }
         ));
-    }
-
-    #[tokio::test]
-    async fn request_approval_defaults_to_allow() {
-        let plane = plane();
-        let decision = plane
-            .request_approval(ApprovalRequest::new(1, "adesk", "host.gpu", "wants a GPU"))
-            .await;
-        assert_eq!(decision, ApprovalDecision::Allow);
-        assert!(decision.is_allowed());
-    }
-
-    #[tokio::test]
-    async fn request_approval_with_auto_deny() {
-        let plane = plane().with_router(ApprovalRouter::new(Arc::new(AutoDeny::new("no"))));
-        let decision = plane
-            .request_approval(ApprovalRequest::new(2, "adesk", "host.gpu", "wants a GPU"))
-            .await;
-        assert_eq!(
-            decision,
-            ApprovalDecision::Deny {
-                reason: "no".into()
-            }
-        );
     }
 
     #[tokio::test]

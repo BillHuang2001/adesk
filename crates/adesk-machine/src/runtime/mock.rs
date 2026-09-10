@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use async_trait::async_trait;
 
 use crate::error::{MachineError, Result};
-use crate::runtime::{ContainerRuntime, RuntimeKind};
+use crate::runtime::ContainerRuntime;
 use crate::spec::MachineSpec;
 use crate::state::{MachineId, MachineName, MachineState, MachineStatus};
 
@@ -144,9 +144,7 @@ impl MockRuntime {
     /// Locks the interior, recovering from a poisoned lock so a backend never
     /// panics on an ordinary call path.
     fn lock(&self) -> MutexGuard<'_, MockInner> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::sync::lock_unpoisoned(&self.inner)
     }
 }
 
@@ -158,10 +156,6 @@ impl Default for MockRuntime {
 
 #[async_trait]
 impl ContainerRuntime for MockRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Mock
-    }
-
     async fn create(&self, spec: &MachineSpec) -> Result<MachineId> {
         let mut inner = self.lock();
         inner.calls.push(RuntimeCall::Create {
@@ -275,12 +269,6 @@ mod tests {
     /// unambiguous).
     fn spec(name: &str) -> MachineSpec {
         MachineSpec::new(name, "image:1").with_viewer(ViewerExposure::None)
-    }
-
-    #[tokio::test]
-    async fn kind_is_mock() {
-        assert_eq!(MockRuntime::new().kind(), RuntimeKind::Mock);
-        assert_eq!(MockRuntime::default().kind(), RuntimeKind::Mock);
     }
 
     #[tokio::test]

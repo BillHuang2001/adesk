@@ -27,56 +27,175 @@ fn manager() -> MachineManager<MockRuntime> {
     MachineManager::new(MockRuntime::new())
 }
 
-#[tokio::test]
-async fn full_lifecycle_transitions_and_removal() {
+/// One step of a scripted lifecycle, run against a fresh manager.
+#[derive(Clone)]
+enum Step {
+    /// `create` succeeds and yields `Created`.
+    Create(&'static str),
+    /// `start` succeeds and yields `Running`.
+    Start(&'static str),
+    /// `restart` succeeds and yields `Running`.
+    Restart(&'static str),
+    /// `stop` succeeds and yields `Stopped`.
+    Stop(&'static str),
+    /// `remove` succeeds and reports the state observed just before removal.
+    Remove(&'static str, bool, MachineState),
+    /// `start` is illegal in `state`.
+    StartIsIllegal(&'static str, &'static str),
+    /// `stop` is illegal in `state`.
+    StopIsIllegal(&'static str, &'static str),
+    /// `remove` without `force` is illegal while the machine runs.
+    RemoveRunningIsIllegal(&'static str),
+    /// `list` reports no machines.
+    ListIsEmpty,
+    /// `status` fails with `NotFound`.
+    StatusIsNotFound(&'static str),
+}
+
+/// Runs `steps` against a fresh manager, asserting each outcome.
+async fn run_script(label: &str, steps: &[Step]) {
     let manager = manager();
+    let mut created = 0u32;
 
-    let created = manager.create(&spec("adesk")).await.unwrap();
-    assert_eq!(created.name, name("adesk"));
-    assert_eq!(created.id, MachineId::from("machine-1"));
-    assert_eq!(created.state, MachineState::Created);
-    assert!(!created.is_running());
-
-    let running = manager.start(&name("adesk")).await.unwrap();
-    assert_eq!(running.state, MachineState::Running);
-    assert!(running.is_running());
-
-    // `restart` stops then starts, so it runs while the machine is `Running`.
-    let restarted = manager.restart(&name("adesk")).await.unwrap();
-    assert_eq!(restarted.state, MachineState::Running);
-
-    let stopped = manager.stop(&name("adesk"), 0).await.unwrap();
-    assert_eq!(stopped.state, MachineState::Stopped);
-
-    // `remove` reports the status observed immediately before removal; a stopped
-    // machine needs no force.
-    let removed = manager.remove(&name("adesk"), false).await.unwrap();
-    assert_eq!(removed.state, MachineState::Stopped);
-
-    assert!(manager.list().await.unwrap().is_empty());
-    assert!(matches!(
-        manager.status(&name("adesk")).await.unwrap_err(),
-        MachineError::NotFound { .. }
-    ));
+    for step in steps {
+        match step {
+            Step::Create(machine) => {
+                created += 1;
+                let status = manager.create(&spec(machine)).await.unwrap();
+                assert_eq!(status.name, name(machine), "{label}: create name");
+                assert_eq!(
+                    status.id,
+                    MachineId::from(format!("machine-{created}")),
+                    "{label}: create id"
+                );
+                assert_eq!(status.state, MachineState::Created, "{label}: create state");
+                assert!(
+                    !status.is_running(),
+                    "{label}: a created machine is not running"
+                );
+            }
+            Step::Start(machine) => {
+                let status = manager.start(&name(machine)).await.unwrap();
+                assert_eq!(status.state, MachineState::Running, "{label}: start state");
+                assert!(status.is_running(), "{label}: start is running");
+            }
+            Step::Restart(machine) => {
+                assert_eq!(
+                    manager.restart(&name(machine)).await.unwrap().state,
+                    MachineState::Running,
+                    "{label}: restart state"
+                );
+            }
+            Step::Stop(machine) => {
+                assert_eq!(
+                    manager.stop(&name(machine), 0).await.unwrap().state,
+                    MachineState::Stopped,
+                    "{label}: stop state"
+                );
+            }
+            Step::Remove(machine, force, expected) => {
+                let status = manager.remove(&name(machine), *force).await.unwrap();
+                assert_eq!(
+                    &status.state, expected,
+                    "{label}: remove reports the pre-removal state"
+                );
+            }
+            Step::StartIsIllegal(machine, state) => {
+                let err = manager.start(&name(machine)).await.unwrap_err();
+                match &err {
+                    MachineError::InvalidState {
+                        state: actual,
+                        action,
+                        ..
+                    } => {
+                        assert_eq!(actual.as_str(), *state, "{label}: illegal state");
+                        assert_eq!(action.as_str(), "start", "{label}: illegal action");
+                    }
+                    other => panic!("{label}: expected an invalid-state error, got {other:?}"),
+                }
+            }
+            Step::StopIsIllegal(machine, state) => {
+                let err = manager.stop(&name(machine), 0).await.unwrap_err();
+                match &err {
+                    MachineError::InvalidState {
+                        state: actual,
+                        action,
+                        ..
+                    } => {
+                        assert_eq!(actual.as_str(), *state, "{label}: illegal state");
+                        assert_eq!(action.as_str(), "stop", "{label}: illegal action");
+                    }
+                    other => panic!("{label}: expected an invalid-state error, got {other:?}"),
+                }
+            }
+            Step::RemoveRunningIsIllegal(machine) => {
+                let err = manager.remove(&name(machine), false).await.unwrap_err();
+                match &err {
+                    MachineError::InvalidState { action, .. } => {
+                        assert_eq!(action.as_str(), "remove", "{label}: illegal action");
+                    }
+                    other => panic!("{label}: expected an invalid-state error, got {other:?}"),
+                }
+            }
+            Step::ListIsEmpty => {
+                assert!(
+                    manager.list().await.unwrap().is_empty(),
+                    "{label}: list is empty"
+                );
+            }
+            Step::StatusIsNotFound(machine) => {
+                let err = manager.status(&name(machine)).await.unwrap_err();
+                assert!(
+                    matches!(err, MachineError::NotFound { .. }),
+                    "{label}: status is not found, got {err:?}"
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
-async fn start_is_allowed_from_created_and_stopped() {
-    let manager = manager();
-    manager.create(&spec("adesk")).await.unwrap();
+async fn lifecycle_transitions_follow_the_state_machine() {
+    let cases: &[(&str, &[Step])] = &[
+        (
+            "full lifecycle through restart and removal",
+            &[
+                Step::Create("adesk"),
+                Step::Start("adesk"),
+                Step::Restart("adesk"),
+                Step::Stop("adesk"),
+                Step::Remove("adesk", false, MachineState::Stopped),
+                Step::ListIsEmpty,
+                Step::StatusIsNotFound("adesk"),
+            ],
+        ),
+        (
+            "start is allowed from created and stopped",
+            &[
+                Step::Create("adesk"),
+                Step::Start("adesk"),
+                Step::Stop("adesk"),
+                Step::Start("adesk"),
+            ],
+        ),
+        (
+            "illegal transitions are reported",
+            &[
+                Step::Create("adesk"),
+                Step::StopIsIllegal("adesk", "created"),
+                Step::Start("adesk"),
+                Step::StartIsIllegal("adesk", "running"),
+                Step::RemoveRunningIsIllegal("adesk"),
+                // The rejected removal left the machine intact, so a forced one
+                // still observes it running.
+                Step::Remove("adesk", true, MachineState::Running),
+            ],
+        ),
+    ];
 
-    // From `Created`.
-    assert_eq!(
-        manager.start(&name("adesk")).await.unwrap().state,
-        MachineState::Running
-    );
-
-    // From `Stopped`.
-    manager.stop(&name("adesk"), 0).await.unwrap();
-    assert_eq!(
-        manager.start(&name("adesk")).await.unwrap().state,
-        MachineState::Running
-    );
+    for (label, steps) in cases {
+        run_script(label, steps).await;
+    }
 }
 
 #[tokio::test]
@@ -113,39 +232,6 @@ async fn unknown_names_are_not_found() {
             "unexpected error: {err:?}"
         );
     }
-}
-
-#[tokio::test]
-async fn illegal_transitions_are_reported() {
-    let manager = manager();
-    manager.create(&spec("adesk")).await.unwrap();
-
-    // Stopping a machine that was never started is illegal.
-    let err = manager.stop(&name("adesk"), 0).await.unwrap_err();
-    assert!(
-        matches!(err, MachineError::InvalidState { ref state, ref action, .. }
-            if state == "created" && action == "stop"),
-        "unexpected error: {err:?}"
-    );
-
-    manager.start(&name("adesk")).await.unwrap();
-
-    // Starting an already-running machine is illegal.
-    let err = manager.start(&name("adesk")).await.unwrap_err();
-    assert!(
-        matches!(err, MachineError::InvalidState { ref state, .. } if state == "running"),
-        "unexpected error: {err:?}"
-    );
-
-    // Removing a running machine without force is illegal...
-    let err = manager.remove(&name("adesk"), false).await.unwrap_err();
-    assert!(
-        matches!(err, MachineError::InvalidState { ref action, .. } if action == "remove"),
-        "unexpected error: {err:?}"
-    );
-
-    // ...but the rejected removal left the machine intact, so a forced one works.
-    manager.remove(&name("adesk"), true).await.unwrap();
 }
 
 #[tokio::test]

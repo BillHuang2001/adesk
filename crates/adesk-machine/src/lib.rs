@@ -32,6 +32,8 @@ pub mod runtime;
 pub mod spec;
 pub mod state;
 
+mod sync;
+
 pub use approval::*;
 pub use error::*;
 pub use host::*;
