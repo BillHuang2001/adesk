@@ -8,13 +8,13 @@
 //! # Process-environment hazard
 //!
 //! Two tests in this binary apply the process environment (`with_apply_env(true)`):
-//! [`launch_app_starts_helper_window`] (the registry launches children with
-//! `LaunchEnv::from_process()`, so the helper needs this process's `WAYLAND_DISPLAY` and
-//! `XDG_RUNTIME_DIR`) and [`test_app_spawn_and_exit`] (the compositor binds its Wayland
-//! socket under the process `XDG_RUNTIME_DIR`, so the helper can only reach it when the
-//! env is scoped to the runtime). Every other runtime here disables it; the harness
-//! serializes env-scoped runtimes within one test binary itself, so no `--test-threads=1`
-//! is required.
+//! [`launch_app_starts_helper_window`] (the server builds the child's `LaunchEnv` from
+//! this process's `XDG_RUNTIME_DIR` and the compositor's `WAYLAND_DISPLAY`, so the env
+//! must be scoped to the runtime) and [`test_app_spawn_and_exit`] (the compositor binds
+//! its Wayland socket under the process `XDG_RUNTIME_DIR`, so the helper can only reach
+//! it when the env is scoped to the runtime). Every other runtime here disables it; the
+//! harness serializes env-scoped runtimes within one test binary itself, so no
+//! `--test-threads=1` is required.
 
 use std::path::Path;
 use std::time::Duration;

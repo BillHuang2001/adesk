@@ -9,9 +9,10 @@
 //!
 //! The process environment is global, and two parts of a runtime read it directly:
 //! `adesk-compositor` binds its Wayland listening socket under the process
-//! `XDG_RUNTIME_DIR`, and the app registry launches children with
-//! `LaunchEnv::from_process()`, i.e. whatever `XDG_RUNTIME_DIR` / `WAYLAND_DISPLAY` this
-//! *test process* has at launch time.
+//! `XDG_RUNTIME_DIR`, and `launch_app` builds the child's `LaunchEnv` from the *server
+//! process's* environment (`XDG_RUNTIME_DIR` from the process env, plus the
+//! compositor's `WAYLAND_DISPLAY`), so a child inherits whatever env this process has
+//! at launch time.
 //!
 //! [`TestRuntime::start_with`](crate::TestRuntime::start_with) therefore serializes every
 //! env mutation on the process-wide `lock_process_env` guard and always scopes the

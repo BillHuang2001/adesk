@@ -105,7 +105,8 @@ async fn launch_observe_input_close_round_trip() -> Result<()> {
     assert_eq!(app_id, *spec.app_id());
 
     // ---------------------------------------------------------------- phase 2
-    // The registry launches children with `LaunchEnv::from_process()`, so this
+    // The server derives the child's launch environment from this process's env
+    // (`XDG_RUNTIME_DIR`, plus the compositor's `WAYLAND_DISPLAY`), so this
     // runtime must scope the process env (and the harness serializes that
     // process-wide mutation itself, so the default parallel test run is safe).
     let runtime = TestRuntime::start_with(
