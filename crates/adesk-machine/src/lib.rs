@@ -34,13 +34,7 @@ pub mod state;
 
 pub use approval::*;
 pub use error::*;
-// `host` and `manager` are placeholders in this foundation layer, so their glob
-// re-exports currently bring no items into scope. Keep them (and silence the
-// otherwise-transient `unused_imports` lint on just these two lines) so the
-// crate root exposes their items the moment those modules are implemented.
-#[allow(unused_imports)]
 pub use host::*;
-#[allow(unused_imports)]
 pub use manager::*;
 pub use registry::*;
 pub use runtime::*;
