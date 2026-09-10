@@ -56,10 +56,32 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
   Do not tighten this back to "zero strays after the response" — that flakes on a correct server.
 - Window-creating E2E (tiling/focus/input delivery) belongs to the next wave and needs
   `adesk-testkit`; it is not covered here.
+- §1 `seq` domain (`sequence.rs`): one global monotonic `seq` domain spans compositor- and
+  server-emitted events (gaps allowed, reuse not). `app_launched` and `inspect_frame` reserve their
+  number from the compositor's central counter (`RuntimeCommand::ReserveSeq`; server side
+  `src/dispatch/windows.rs::reserve_seq`). A test can probe that counter out-of-band through the public
+  `ServerContext::compositor` handle: `ReserveSeq` advances the counter and emits nothing, so a
+  synthesized event must land strictly above a probe reserved before it and strictly below a probe
+  reserved after it — `server_synthesized_seqs_interleave_with_the_compositor_counter` brackets both
+  emission sites this way, which is the client-free interleaving proof.
+- Watermark technique (`sequence.rs`): `observe(until=timeout)`'s `result.observation.seq` is the
+  observer's global watermark — a pure read that reserves nothing. On an idle no-client runtime it is
+  `0`, so `seq > watermark` is degenerate there; the teeth are the strict increases and the counter
+  probes. The pump feeds the observer before the fan-out (`event_pump::handle_event`), so a frame read
+  off the wire proves the observer already covers its `seq`: a re-sampled watermark comparison is
+  race-free, not timing-based.
+- No compositor-emitted `RuntimeEvent` is triggerable without a Wayland client (every emitter in
+  `adesk-compositor` sits behind a protocol handler; `ActivateWindow` needs a mapped window a client
+  must create, input commands emit nothing on their own, no feature-gated injection path exists).
+  `sequence.rs` therefore cannot interleave a raw compositor emission after a server reservation —
+  that cross-domain half is covered by `crates/adesk-compositor/tests/reserve_seq.rs`
+  (test 2 drives a real Wayland client via `adesk-testkit`). Do not hand-inject into the broadcast
+  (`compositor.events().send`) to fake it — a hand-picked `seq` proves nothing.
 - Launch correlation IS covered here without a Wayland client:
   `subscriptions.rs::window_created_event_carries_the_correlated_launch_id` records a launch via
   `launch_app` (fixture `Exec=true`, so no `/bin/true` on the Nix dev shell) and injects a synthetic
   `WindowCreated { launch_id: None, pid }` through `ServerContext::compositor.events()`, then asserts the
   fanned-out frame carries `Some(launch_id)` while a direct tap on the same broadcast still sees `None`.
-  The `None` half is the compositor-side gap (no `RuntimeCommand` feeds `WmBridge::note_launch`), not a
-  server bug — do not "fix" it by re-emitting events.
+  The `None` half is inherent to the injection: the synthetic event bypasses the compositor's own
+  emission path, so the tap sees exactly what the test sent — not a server bug. Do not "fix" it by
+  re-emitting events (a real mapping is stamped by the compositor ledger fed via `RuntimeCommand::NoteLaunch`).
