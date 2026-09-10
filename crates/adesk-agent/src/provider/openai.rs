@@ -50,18 +50,6 @@ Coordinates are window-relative; prefer normalized positions. After an input act
 quiet before assuming the UI settled — quiet is evidence, not proof. Do not repeat an action that \
 failed; re-list windows/apps to refresh stale ids.";
 
-/// How much image detail to request from the endpoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ImageDetail {
-    /// Let the provider choose.
-    #[default]
-    Auto,
-    /// Cheap 512px-budget processing.
-    Low,
-    /// Tiled high-detail processing (more visual tokens).
-    High,
-}
-
 /// Fully resolved configuration for [`OpenAiCompatProvider`].
 #[derive(Debug, Clone)]
 pub struct OpenAiConfig {
@@ -77,8 +65,6 @@ pub struct OpenAiConfig {
     pub max_tokens: u32,
     /// Per-request HTTP timeout.
     pub timeout_ms: u64,
-    /// Image detail hint.
-    pub image_detail: ImageDetail,
     /// System prompt override; defaults to [`DEFAULT_SYSTEM_PROMPT`].
     pub system_prompt: String,
 }
@@ -92,7 +78,6 @@ impl Default for OpenAiConfig {
             temperature: 0.0,
             max_tokens: 1024,
             timeout_ms: DEFAULT_TIMEOUT_MS,
-            image_detail: ImageDetail::Auto,
             system_prompt: String::from(DEFAULT_SYSTEM_PROMPT),
         }
     }
@@ -106,21 +91,15 @@ pub struct OpenAiCompatProvider {
     config: OpenAiConfig,
 }
 
-/// Wire name of an [`ImageDetail`] hint.
-fn detail_name(detail: ImageDetail) -> &'static str {
-    match detail {
-        ImageDetail::Auto => "auto",
-        ImageDetail::Low => "low",
-        ImageDetail::High => "high",
-    }
-}
-
 /// One `image_url` content part for a PNG payload.
 ///
 /// Returns `None` for non-PNG payloads: `rgba8` is never sent, because the
 /// runtime always encodes PNG for providers and endpoints cannot decode raw
 /// pixels.
-fn image_url_part(image: &ImagePayload, detail: ImageDetail) -> Option<serde_json::Value> {
+///
+/// The `detail` hint is hard-coded to `"auto"`: the runtime exposes no image-detail
+/// knob, so the endpoint chooses its own processing level per image.
+fn image_url_part(image: &ImagePayload) -> Option<serde_json::Value> {
     if image.format != ImageFormat::Png {
         tracing::warn!(
             format = ?image.format,
@@ -134,7 +113,7 @@ fn image_url_part(image: &ImagePayload, detail: ImageDetail) -> Option<serde_jso
         "type": "image_url",
         "image_url": {
             "url": format!("data:image/png;base64,{}", image.data),
-            "detail": detail_name(detail),
+            "detail": "auto",
         },
     }))
 }
@@ -238,11 +217,6 @@ impl OpenAiCompatProvider {
         Ok(Self { http, config })
     }
 
-    /// The resolved configuration.
-    pub fn config(&self) -> &OpenAiConfig {
-        &self.config
-    }
-
     /// Build the JSON request body for one decision.
     ///
     /// Pure and unit-testable: embeds `ctx.image`/`ctx.keyframe` as
@@ -259,7 +233,7 @@ impl OpenAiCompatProvider {
         let images: Vec<serde_json::Value> = [ctx.keyframe.as_ref(), ctx.image.as_ref()]
             .into_iter()
             .flatten()
-            .filter_map(|image| image_url_part(image, config.image_detail))
+            .filter_map(image_url_part)
             .collect();
 
         let content = if images.is_empty() {
@@ -374,26 +348,7 @@ impl LlmProvider for OpenAiCompatProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Minimal bounded context (no socket, no runtime).
-    fn context(task: &str) -> AgentContext {
-        AgentContext {
-            task: task.to_owned(),
-            success_criteria: None,
-            step: 0,
-            max_steps: 20,
-            runtime: None,
-            windows: Vec::new(),
-            active_window: None,
-            apps: Vec::new(),
-            recent_actions: Vec::new(),
-            recent_events: Vec::new(),
-            observation: None,
-            last_error: None,
-            image: None,
-            keyframe: None,
-        }
-    }
+    use crate::provider::test_context;
 
     fn png(data: &str) -> ImagePayload {
         ImagePayload {
@@ -419,7 +374,7 @@ mod tests {
 
     #[test]
     fn request_without_images_uses_a_plain_string_content() {
-        let ctx = context("open the settings dialog");
+        let ctx = test_context("open the settings dialog");
         let body = OpenAiCompatProvider::build_chat_request(&ctx, &config());
 
         assert_eq!(body["model"], "test-model");
@@ -438,15 +393,11 @@ mod tests {
 
     #[test]
     fn images_are_attached_as_png_data_urls_keyframe_first() {
-        let mut ctx = context("look at the window");
+        let mut ctx = test_context("look at the window");
         ctx.keyframe = Some(png("S0VZRlJBTUU="));
         ctx.image = Some(png("Q1VSUkVOVA=="));
-        let config = OpenAiConfig {
-            image_detail: ImageDetail::High,
-            ..config()
-        };
 
-        let body = OpenAiCompatProvider::build_chat_request(&ctx, &config);
+        let body = OpenAiCompatProvider::build_chat_request(&ctx, &config());
         let parts = body["messages"][1]["content"]
             .as_array()
             .expect("image requests send content parts");
@@ -460,7 +411,7 @@ mod tests {
             parts[2]["image_url"]["url"],
             "data:image/png;base64,Q1VSUkVOVA=="
         );
-        assert_eq!(parts[1]["image_url"]["detail"], "high");
+        assert_eq!(parts[1]["image_url"]["detail"], "auto");
 
         // The base64 payloads must not be duplicated inside the text prompt.
         let text = parts[0]["text"].as_str().expect("text part");
@@ -469,19 +420,8 @@ mod tests {
     }
 
     #[test]
-    fn image_detail_defaults_to_auto() {
-        let mut ctx = context("look");
-        ctx.image = Some(png("QUJD"));
-        let body = OpenAiCompatProvider::build_chat_request(&ctx, &config());
-        assert_eq!(
-            body["messages"][1]["content"][1]["image_url"]["detail"],
-            "auto"
-        );
-    }
-
-    #[test]
     fn rgba8_payloads_are_never_sent() {
-        let mut ctx = context("look");
+        let mut ctx = test_context("look");
         ctx.image = Some(ImagePayload {
             width: 2,
             height: 2,
@@ -584,8 +524,6 @@ mod tests {
         let provider = OpenAiCompatProvider::new(config()).unwrap();
         assert_eq!(provider.name(), "openai");
         assert!(provider.supports_images());
-        assert_eq!(provider.config().model, "test-model");
-        assert_eq!(provider.config().timeout_ms, DEFAULT_TIMEOUT_MS);
     }
 
     #[test]
@@ -593,12 +531,5 @@ mod tests {
         assert_eq!(truncate("abc", 5), "abc");
         assert_eq!(truncate("日本語です", 2), "日本…");
         assert_eq!(truncate("", 0), "");
-    }
-
-    #[test]
-    fn detail_names_match_the_api() {
-        assert_eq!(detail_name(ImageDetail::Auto), "auto");
-        assert_eq!(detail_name(ImageDetail::Low), "low");
-        assert_eq!(detail_name(ImageDetail::High), "high");
     }
 }

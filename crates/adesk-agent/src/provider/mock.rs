@@ -215,26 +215,7 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-
-    /// Minimal bounded context (no socket, no runtime).
-    fn ctx(task: &str) -> AgentContext {
-        AgentContext {
-            task: task.to_owned(),
-            success_criteria: None,
-            step: 0,
-            max_steps: 20,
-            runtime: None,
-            windows: Vec::new(),
-            active_window: None,
-            apps: Vec::new(),
-            recent_actions: Vec::new(),
-            recent_events: Vec::new(),
-            observation: None,
-            last_error: None,
-            image: None,
-            keyframe: None,
-        }
-    }
+    use crate::provider::test_context;
 
     fn finish() -> AgentDecision {
         AgentDecision::Finish {
@@ -249,11 +230,11 @@ mod tests {
 
         assert_eq!(provider.remaining(), 2, "dry run has two decisions");
         assert_eq!(
-            provider.complete(&ctx("dry run")).await.unwrap(),
+            provider.complete(&test_context("dry run")).await.unwrap(),
             AgentDecision::ListWindows
         );
         assert_eq!(provider.remaining(), 1);
-        match provider.complete(&ctx("dry run")).await.unwrap() {
+        match provider.complete(&test_context("dry run")).await.unwrap() {
             AgentDecision::Finish { success, summary } => {
                 assert!(success);
                 assert!(summary.contains("dry run"), "summary: {summary}");
@@ -272,10 +253,13 @@ mod tests {
         assert_eq!(provider.context_count(), 0);
 
         assert_eq!(
-            provider.complete(&ctx("first")).await.unwrap(),
+            provider.complete(&test_context("first")).await.unwrap(),
             AgentDecision::ListWindows
         );
-        assert_eq!(provider.complete(&ctx("second")).await.unwrap(), finish());
+        assert_eq!(
+            provider.complete(&test_context("second")).await.unwrap(),
+            finish()
+        );
 
         assert_eq!(provider.context_count(), 2);
         let contexts = provider.contexts();
@@ -288,9 +272,9 @@ mod tests {
     #[tokio::test]
     async fn exhausted_script_fails_loudly_instead_of_repeating() {
         let provider = MockProvider::scripted(vec![AgentDecision::ListWindows]);
-        provider.complete(&ctx("one")).await.unwrap();
+        provider.complete(&test_context("one")).await.unwrap();
 
-        let err = provider.complete(&ctx("two")).await.unwrap_err();
+        let err = provider.complete(&test_context("two")).await.unwrap_err();
         let message = err.to_string();
         assert!(message.contains("exhausted"), "message: {message}");
         // The failed call is still recorded, but the cursor never moves past the
@@ -306,7 +290,7 @@ mod tests {
             ScriptEntry::decision(finish()),
         ]);
 
-        let err = provider.complete(&ctx("retry")).await.unwrap_err();
+        let err = provider.complete(&test_context("retry")).await.unwrap_err();
         assert!(
             matches!(err, ProviderError::Transport(ref message) if message == "boom"),
             "unexpected error: {err}"
@@ -314,7 +298,10 @@ mod tests {
         assert_eq!(provider.remaining(), 1, "the failure must be consumed");
 
         // A retry reaches the next entry rather than the same failure again.
-        assert_eq!(provider.complete(&ctx("retry")).await.unwrap(), finish());
+        assert_eq!(
+            provider.complete(&test_context("retry")).await.unwrap(),
+            finish()
+        );
         assert_eq!(provider.context_count(), 2);
     }
 
@@ -323,7 +310,7 @@ mod tests {
         let provider = MockProvider::new(vec![ScriptEntry::decision(finish()).with_latency(5)]);
 
         let started = Instant::now();
-        provider.complete(&ctx("slow")).await.unwrap();
+        provider.complete(&test_context("slow")).await.unwrap();
         assert!(
             started.elapsed() >= Duration::from_millis(5),
             "simulated latency must be observable, got {:?}",
@@ -334,13 +321,13 @@ mod tests {
     #[tokio::test]
     async fn reset_rewinds_the_script_and_forgets_contexts() {
         let mut provider = MockProvider::scripted(vec![AgentDecision::ListWindows, finish()]);
-        provider.complete(&ctx("first")).await.unwrap();
+        provider.complete(&test_context("first")).await.unwrap();
 
         provider.reset();
         assert_eq!(provider.remaining(), 2);
         assert_eq!(provider.context_count(), 0);
         assert_eq!(
-            provider.complete(&ctx("second")).await.unwrap(),
+            provider.complete(&test_context("second")).await.unwrap(),
             AgentDecision::ListWindows
         );
     }
