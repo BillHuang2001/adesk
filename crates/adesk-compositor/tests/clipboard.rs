@@ -37,10 +37,9 @@
 //!
 //! # Timing
 //!
-//! Nothing sleeps or retries. Ordering between a peer's Wayland connection and the
-//! compositor's command channel is established with `roundtrip()` — a sync callback is
-//! answered only after every earlier request of that client was dispatched — and every
-//! asynchronous observation is a bounded wait on the event that proves it.
+//! Nothing sleeps or retries. `roundtrip()` flushes and waits for one reader cycle of server
+//! activity — a flush, not a `wl_display.sync` barrier — and every asynchronous observation
+//! is a bounded wait on the event that proves it.
 //!
 //! # What the runtime never sees
 //!
@@ -112,9 +111,9 @@ struct Peer {
 /// Creates a client, maps its toplevel and resolves the runtime's id for the window.
 ///
 /// The first buffer commit maps the surface (and allocates the window id); the round trip
-/// after it proves the compositor processed that commit — and therefore mapped, tiled and
-/// activated the window — before the id is read back, so every later assertion works against
-/// an observed window rather than a hoped-for one.
+/// after it flushes the commit and waits for the server activity it causes (the map's focus
+/// transfer reaches this connection only once the commit is processed), so the id read back
+/// below names an observed window rather than a hoped-for one.
 async fn map_peer(runtime: &TestRuntime, app_id: &str, title: &str) -> Result<Peer> {
     let mut client = runtime.wayland_client()?;
     let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;

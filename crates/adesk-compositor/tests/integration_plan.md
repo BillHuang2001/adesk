@@ -1,7 +1,8 @@
 # adesk-compositor integration tests
 
-`tests/window_lifecycle.rs`, `tests/input_delivery.rs`, `tests/popups.rs` and
-`tests/clipboard.rs` hold the 15 integration tests that prove the compositor core end to end.
+`tests/window_lifecycle.rs`, `tests/input_delivery.rs`, `tests/popups.rs`,
+`tests/clipboard.rs`, `tests/reserve_seq.rs` and `tests/output_composition.rs` hold the 20
+integration tests that prove the compositor core end to end.
 Each starts a **real in-process runtime** — one compositor thread, one virtual output, the real
 protocol handlers and seat — and drives it the way an ordinary application does: a
 `wayland-client` connection (`adesk-testkit`) over the runtime's own socket, `RuntimeCommand`s
@@ -28,10 +29,14 @@ They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
   assert on `seq` order, then assert state via `QueryState`. Deadlines are explicit (a 10 s
   `DEADLINE`; a 250 ms `QUIET_BOUND` for negative claims) and no test sleeps or polls in a loop.
   The broadcast never replays, so a tap is installed *before* the action it must observe.
-- **`RenderWindow` only where pixels are the assertion**; it is a command, not a frame loop.
-  (`RenderOutput` is not used by these suites.)
+- **`roundtrip` is a flush, not a synchronization barrier** (it waits one reader poll cycle).
+  An assertion that must come after a client request commits on the same connection and awaits
+  the resulting `surface_commit` — the late-app-id test in `window_lifecycle.rs` is the model.
+- **`RenderWindow`/`RenderOutput` only where pixels are the assertion**; they are commands, not
+  frame loops. (`RenderOutput` is used by `output_composition.rs` to prove output-level
+  composition; the other suites assert on `RenderWindow`.)
 - **GL-only paths** (renderer selection, DMA-BUF readback) sit behind `ADESK_TEST_GL=1` and skip
-  cleanly when it is unset (`adesk_testkit::{gl_enabled, require_gl}`). Every test in these four
+  cleanly when it is unset (`adesk_testkit::{gl_enabled, require_gl}`). Every test in these six
   files runs under pixman and is ungated.
 - **One file per scenario group**, each test independent: its own runtime, its own Wayland
   connection(s), its own window ids.
@@ -48,6 +53,13 @@ They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
   `Active`, `geometry == tiled_rect()`, `last_commit_seq >= 1`, `active_window_id ==
   keyboard_focus == id`. `RenderWindow` returns a frame at the tiled size whose `commit_seq` is
   the window's and whose pixels match the committed checker fill (and differ from a blank frame).
+- `late_app_id_reaches_the_window_model` — after the mapped toplevel has committed once, the client
+  sets `app_id` again (a post-map mutation through the real protocol) and `QueryState` must report
+  the late value: the write-back is verified through the public observation path after a *commit
+  barrier* (a commit on the same connection whose `surface_commit` event is awaited, since
+  `roundtrip` is not a `wl_display.sync` barrier), whose own single event and commit step are
+  accounted for; geometry, state, title, focus, window count and configure state stay unchanged,
+  and the write-back itself emits nothing.
 
 ## 2. Focus follows activation — `tests/window_lifecycle.rs`
 
@@ -64,7 +76,7 @@ They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
 `[WmAction::Activate { id }]`, and `ConfigureWindow` — the only action that sends
 `xdg_toplevel.configure` — comes from `on_map` and `on_output_size` only. An activation therefore
 sends no configure to either connection: `last_configure`/`pending_configure` are asserted
-unchanged on both clients (after round trips flush the protocol), and the tiling state that a
+unchanged on both clients (after flushes give the protocol time to deliver any configure), and the tiling state that a
 configure would have carried is asserted positively instead (`geometry == tiled_rect()` for both
 windows, `A`'s last configure being the full-output tiling configure with `activated`).
 
@@ -149,13 +161,38 @@ selection target by being *activated*, never by synthesized input. The composito
 selection bytes at all (`SelectionHandler::SelectionUserData` is `()`), so nothing clipboard-shaped
 exists to log or to put in an event.
 
+## 6. Server-synthesized seqs — `tests/reserve_seq.rs`
+
+- `reserving_is_strictly_increasing_and_silent` — two `ReserveSeq`s on a fresh runtime: the values
+  strictly increase, the `QueryState` watermark equals the reserved number (one seq domain — a
+  second counter would show up as a mismatch here), the window model is untouched, and a tap
+  installed before the reservations receives nothing (bounded by `QUIET_BOUND`).
+- `later_events_do_not_reuse_reserved_seqs` — two reservations, then a real toplevel map over the
+  Wayland path: the first event after the reservations is exactly `second + 1`, every event of the
+  tail sits strictly above the reserved watermark, and the closing `QueryState` covers both the
+  reservations and the later event. Gaps are allowed, reuse is not (`docs/protocol.md` §1).
+
+## 7. Single visible toplevel composition — `tests/output_composition.rs`
+
+- `composition_renders_only_the_active_window` — two clients map toplevels with distinct opaque
+  fills. Activating one and capturing the composed output (`RuntimeCommand::RenderOutput` with
+  overlays disabled) matches the ACTIVE window's fill on *every* pixel and differs from the
+  inactive window's own `RenderWindow` frame — rendered first as non-vacuity, which proves the
+  excluded pixels really exist and that observing them neither activates them nor emits an event.
+  `QueryState` proves exactly one `Active`/one `Inactive` at each capture; the roles are then
+  reversed and the proof repeated.
+- `output_without_active_window_is_a_clear_frame` — a fresh runtime (nothing ever mapped) composes
+  to the pipeline's default clear color; after the only window is closed via `CloseWindow` and
+  destroyed by its client, the composition is a clear frame again and differs from the frame
+  captured while the window was alive.
+
 ## Testkit surface used
 
 | Helper | Used for |
 |---|---|
 | `TestRuntime::start_with(TestRuntimeConfig)` | in-process compositor + private temp `XDG_RUNTIME_DIR` + bound socket |
 | `TestRuntimeConfig::{new, with_apply_env}` | pixman renderer, `1280x800` output, env scoping |
-| `runtime.compositor() -> &CompositorHandle` | command channel (`RuntimeCommand` + reply oneshots) |
+| `runtime.compositor() -> &CompositorHandle` | command channel (`RuntimeCommand` + reply oneshots, incl. `RenderOutput` capture and `ReserveSeq`) |
 | `runtime.wayland_client() -> WaylandTestClient` | one `wayland-client` connection (absolute socket path) |
 | `runtime.output_size()`, `runtime.tiled_rect()` | expected geometry from the wm policy |
 | `runtime.shutdown()` | bounded runtime teardown |
@@ -164,12 +201,12 @@ exists to log or to put in an event.
 | `Expected::{WindowCreatedFor, WindowActivated, WindowDestroyed, SurfaceCommit, PopupAppeared, Any, custom}` | event matchers |
 | `EventAssert::{wait_for_expected, wait_for, expect_none, drain, seen, assert_seen_order}` | waits, bounded negative claims, history scans |
 | `WaylandTestClient::{create_toplevel(ToplevelSpec), create_popup(&TestWindow, PopupSpec)}` | protocol-path surfaces |
-| `WaylandTestClient::{roundtrip, flush, close}` | protocol barriers and connection teardown |
+| `WaylandTestClient::{roundtrip, flush, close}` | flush (`roundtrip` = flush + one reader cycle — not a `wl_display.sync` barrier) and connection teardown |
 | `WaylandTestClient::{pointer_events, keyboard_events, clear_input_events, wait_for_pointer_event, wait_for_pointer_button, wait_for_keyboard_event, wait_for_key, last_modifiers}` | recorded `PointerEvent`/`KeyboardEvent` history as assertion source |
 | `WaylandTestClient::{set_selection, read_selection, read_selection_with_timeout, selection_offer_count, wait_for_selection_offer}` | `wl_data_device` clipboard |
-| `TestWindow::{wait_for_configure, apply_configure, commit_frame(FillPattern), destroy, size, damage_hint, pending_configure, last_configure}` | toplevel lifecycle |
+| `TestWindow::{wait_for_configure, apply_configure, commit_frame(FillPattern), set_app_id, commit_pending, destroy, size, damage_hint, pending_configure, last_configure}` | toplevel lifecycle |
 | `TestPopup::{wait_for_configure, apply_configure, commit_frame, destroy}` | popup lifecycle |
 | `ToplevelSpec::{new, with_fill}`, `PopupSpec::{new, with_offset}` | surface parameters (size, app id, title, fill, positioner offset) |
 | `FillPattern::{default, solid_rgb, checker}` + `FillPattern::at` | known pixel patterns and their expected pixels |
-| `ImageAssert::{new, pixel, matches_pattern, differs_from}`, `ImageBuffer::new_rgba` | pixel assertions on `RenderedFrame` payloads |
+| `ImageAssert::{new, pixel, matches_pattern, matches_solid, differs_from}`, `ImageBuffer::new_rgba` | pixel assertions on `RenderedFrame` payloads |
 | `BTN_LEFT`, `KEY_LEFTCTRL`, `KEY_C`, `AxisKind`, `ButtonState`, `KeyState` | properties asserted on recorded seat events |
