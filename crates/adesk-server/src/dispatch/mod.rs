@@ -23,6 +23,8 @@ pub mod apps;
 /// §5.4 capture and observation methods (`capture_window`, `capture_region`,
 /// `observe`, `wait_for_change`, `wait_for_quiet`).
 pub mod capture;
+/// The compositor-command seam shared by the groups (`command + reply + await`).
+pub mod command;
 /// §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`).
 pub mod events;
 /// §5.5 input methods (11 methods, all returning `ActionResult` except

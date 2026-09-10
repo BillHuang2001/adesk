@@ -17,9 +17,9 @@ use adesk_proto::{
     ActionResult, ActivateWindowParams, CloseWindowParams, GetFocusParams, GetFocusResult,
     GetWindowParams, GetWindowResult, ListWindowsParams, ListWindowsResult,
 };
-use tokio::sync::oneshot;
 
 use crate::context::ServerContext;
+use crate::dispatch::command::{send_infallible, send_result};
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 
@@ -37,11 +37,7 @@ use crate::error::{Result, ServerError};
 /// can only mean the compositor thread is gone, i.e. the runtime is shutting
 /// down (`crates/adesk-server/CONTEXT.md`, error mapping).
 pub(crate) async fn state(server: &ServerContext) -> Result<StateSnapshot> {
-    let (reply, answer) = oneshot::channel();
-    server
-        .compositor
-        .send(RuntimeCommand::QueryState { reply })?;
-    answer.await.map_err(|_| ServerError::ShuttingDown)
+    send_infallible(server, |reply| RuntimeCommand::QueryState { reply }).await
 }
 
 /// Reserves the next event sequence number from the compositor's counter.
@@ -62,11 +58,7 @@ pub(crate) async fn state(server: &ServerContext) -> Result<StateSnapshot> {
 /// can only mean the compositor thread is gone, i.e. the runtime is shutting
 /// down (`crates/adesk-server/CONTEXT.md`, error mapping).
 pub(crate) async fn reserve_seq(server: &ServerContext) -> Result<u64> {
-    let (reply, answer) = oneshot::channel();
-    server
-        .compositor
-        .send(RuntimeCommand::ReserveSeq { reply })?;
-    answer.await.map_err(|_| ServerError::ShuttingDown)
+    send_infallible(server, |reply| RuntimeCommand::ReserveSeq { reply }).await
 }
 
 /// `list_windows`: all live windows plus the active window id.
@@ -107,18 +99,17 @@ pub async fn activate_window(
         ctx.server
             .observer
             .record_action(ActionKind::ActivateWindow, Some(params.window_id), None);
-    let (reply, answer) = oneshot::channel();
-    ctx.server.compositor.send(RuntimeCommand::ActivateWindow {
-        window_id: params.window_id,
-        reply,
-    })?;
-    match answer.await {
-        Ok(Ok(())) => Ok(ActionResult { action_id }),
-        Ok(Err(error)) => Err(command_error(Some(params.window_id), error)),
-        Err(_) => Err(ServerError::Internal(
-            "compositor dropped the activate_window reply".to_owned(),
-        )),
-    }
+    send_result(
+        ctx.server,
+        Some(params.window_id),
+        || ServerError::Internal("compositor dropped the activate_window reply".to_owned()),
+        |reply| RuntimeCommand::ActivateWindow {
+            window_id: params.window_id,
+            reply,
+        },
+    )
+    .await?;
+    Ok(ActionResult { action_id })
 }
 
 /// `close_window`: runtime-native close, recorded as an action.
@@ -131,18 +122,17 @@ pub async fn close_window(
         ctx.server
             .observer
             .record_action(ActionKind::CloseWindow, Some(params.window_id), None);
-    let (reply, answer) = oneshot::channel();
-    ctx.server.compositor.send(RuntimeCommand::CloseWindow {
-        window_id: params.window_id,
-        reply,
-    })?;
-    match answer.await {
-        Ok(Ok(())) => Ok(ActionResult { action_id }),
-        Ok(Err(error)) => Err(command_error(Some(params.window_id), error)),
-        Err(_) => Err(ServerError::Internal(
-            "compositor dropped the close_window reply".to_owned(),
-        )),
-    }
+    send_result(
+        ctx.server,
+        Some(params.window_id),
+        || ServerError::Internal("compositor dropped the close_window reply".to_owned()),
+        |reply| RuntimeCommand::CloseWindow {
+            window_id: params.window_id,
+            reply,
+        },
+    )
+    .await?;
+    Ok(ActionResult { action_id })
 }
 
 /// `get_focus`: active window and the surface-level keyboard focus.
