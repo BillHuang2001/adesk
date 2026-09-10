@@ -115,7 +115,7 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
 - `close()` can block up to the 250 ms grace only when the peer never answers; the happy path returns as soon as the server's `bye`/EOF arrives.
-- Implementing `ViewerBackend` is still pending in `adesk-server` (planned: `RenderOutput` full-output render through `adesk-server::images::encode_png` → `ImagePayload`, `CursorTracker` for the cursor, `QueryState` for the window list/active window, and the seat input helpers for `apply_input` returning an `ActionId`).
+- `adesk-server` is the real consumer: `crates/adesk-server/src/viewer/backend.rs` implements `ViewerBackend` (render via `inspection::refresh` + `images::encode_png`, state via `dispatch::windows::state`, input via the widened `pub(crate)` `dispatch::input` helpers) and `crates/adesk-server/src/viewer/listener.rs` binds the Unix/TCP transports and serves one `ViewerServer` per runtime.
 
 ## Status
 Implementation-complete, documented and tested: all modules, the client SDK and the headless binary are landed, and the crate's own test/clippy/fmt/doc gates are green (counts in Test Strategy).
