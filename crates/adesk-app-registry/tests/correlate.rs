@@ -1,7 +1,7 @@
 //! Integration tests for launch ↔ window correlation.
 //!
 //! Public API only: evidence-tier ordering, tie-breaks, timeout expiry and the
-//! `pending`/`expire` bookkeeping, all driven by the shared `support::FakeClock`.
+//! `pending` bookkeeping, all driven by the shared `support::FakeClock`.
 
 mod support;
 
@@ -13,7 +13,7 @@ use adesk_app_registry::{
 };
 use adesk_core::{LaunchId, WindowId};
 
-use support::{app_info, as_clock, correlation, fake_clock, launch_record, window, FakeClock};
+use support::{app, app_info, as_clock, correlation, fake_clock, launch_record, window, FakeClock};
 
 fn new_correlator(clock: &Arc<FakeClock>) -> Correlator {
     Correlator::new(as_clock(clock))
@@ -43,6 +43,7 @@ fn pid_evidence_beats_wm_class_and_substring() {
     let matched = correlation(&outcome);
     assert_eq!(matched.window_id, WindowId(7));
     assert_eq!(matched.launch.launch_id, LaunchId(1));
+    assert_eq!(matched.launch.app_id, app("app.alpha"));
     assert_eq!(matched.evidence, CorrelationEvidence::Pid);
     assert_eq!(
         correlator.pending(),
@@ -150,6 +151,21 @@ fn window_without_app_id_or_title_never_matches() {
     assert_eq!(correlator.pending(), 1);
 }
 
+#[test]
+fn substring_ignores_empty_needles() {
+    let clock = fake_clock(0);
+    let mut correlator = new_correlator(&clock);
+    // Empty desktop-file id and empty `Name`: every needle is empty, so the
+    // substring tier must not match anything.
+    correlator.record_launch(launch_record(1, "", None, 0), &app_info("", "", None));
+
+    assert_eq!(
+        correlator.correlate(&window(1, None, Some("anything"), Some("anything"))),
+        CorrelationOutcome::Uncorrelated
+    );
+    assert_eq!(correlator.pending(), 1, "the launch stays pending");
+}
+
 // --- tie-breaks ------------------------------------------------------------
 
 #[test]
@@ -235,7 +251,7 @@ fn a_window_at_the_exact_deadline_still_correlates() {
 }
 
 #[test]
-fn expire_returns_records_in_insertion_order_and_prunes_them() {
+fn expired_launches_are_pruned_in_insertion_order() {
     let clock = fake_clock(0);
     let mut correlator = new_correlator_with(Duration::from_millis(100), &clock);
     correlator.record_launch(
@@ -248,22 +264,27 @@ fn expire_returns_records_in_insertion_order_and_prunes_them() {
         &app_info("app.two", "Two", None),
     );
 
-    assert!(correlator.expire().is_empty(), "nothing is old enough yet");
+    // A non-matching window forces the prune `correlate` performs; at clock 50
+    // neither launch is old enough yet, so both stay pending.
+    assert_eq!(
+        correlator.correlate(&window(99, None, None, None)),
+        CorrelationOutcome::Uncorrelated
+    );
     assert_eq!(correlator.pending(), 2);
 
+    // At clock 110 the first-recorded launch (age 110) has expired while the
+    // second (age 60) is still live: the older launch is pruned first.
     clock.advance(60);
-    assert_eq!(
-        correlator.expire(),
-        vec![launch_record(1, "app.one", Some(1), 0)]
-    );
+    let outcome = correlator.correlate(&window(1, Some(2), None, None));
+    assert_eq!(correlation(&outcome).launch.launch_id, LaunchId(2));
     assert_eq!(correlator.pending(), 1);
 
-    clock.advance(100);
+    // At clock 160 the second launch (age 110) expires too.
+    clock.advance(50);
     assert_eq!(
-        correlator.expire(),
-        vec![launch_record(2, "app.two", Some(2), 50)]
+        correlator.correlate(&window(99, None, None, None)),
+        CorrelationOutcome::Uncorrelated
     );
-    assert!(correlator.expire().is_empty());
     assert_eq!(correlator.pending(), 0);
 }
 
@@ -276,16 +297,16 @@ fn zero_timeout_expires_on_the_next_millisecond() {
         &app_info("app.one", "One", None),
     );
 
-    assert!(
-        correlator.expire().is_empty(),
-        "age 0 is not past a zero timeout"
-    );
+    // Age 0 is not past a zero timeout, so the launch still correlates.
+    let outcome = correlator.correlate(&window(1, Some(1), None, None));
+    assert_eq!(correlation(&outcome).evidence, CorrelationEvidence::Pid);
     assert_eq!(correlator.pending(), 1);
 
+    // One millisecond later it is stale and is pruned before matching.
     clock.advance(1);
     assert_eq!(
-        correlator.expire(),
-        vec![launch_record(1, "app.one", Some(1), 0)]
+        correlator.correlate(&window(2, Some(1), None, None)),
+        CorrelationOutcome::Uncorrelated
     );
     assert_eq!(correlator.pending(), 0);
 }
@@ -319,15 +340,16 @@ fn a_non_monotonic_clock_never_expires_or_panics() {
         &app_info("app.one", "One", None),
     );
 
-    // The clock jumps backwards: the age saturates at zero, so nothing expires.
+    // The clock jumps backwards: the age saturates at zero, so nothing expires
+    // and the launch still correlates.
     clock.set(500);
-    assert!(correlator.expire().is_empty());
     assert_eq!(correlator.pending(), 1);
     let outcome = correlator.correlate(&window(1, Some(10), None, None));
     assert_eq!(correlation(&outcome).evidence, CorrelationEvidence::Pid);
+    assert_eq!(correlator.pending(), 1);
 }
 
-// --- bookkeeping and accessors ---------------------------------------------
+// --- bookkeeping -----------------------------------------------------------
 
 #[test]
 fn one_launch_correlates_several_windows() {
@@ -354,7 +376,6 @@ fn uncorrelated_when_nothing_is_pending() {
     let mut correlator = new_correlator(&clock);
     let outcome = correlator.correlate(&window(1, Some(42), Some("firefox"), Some("Firefox")));
     assert_eq!(outcome, CorrelationOutcome::Uncorrelated);
-    assert!(outcome.launch().is_none());
     assert_eq!(correlator.pending(), 0);
 }
 
@@ -410,32 +431,60 @@ fn pid_tier_needs_both_sides_to_report_a_pid() {
         mismatched.correlate(&window(1, Some(11), None, None)),
         CorrelationOutcome::Uncorrelated
     );
+
+    // When the pid tier cannot fire, a lower tier still matches.
+    let mut wm_class_fallback = new_correlator(&clock);
+    wm_class_fallback.record_launch(
+        launch_record(1, "app.one", None, 0),
+        &app_info("app.one", "One", Some("one-wm")),
+    );
+    let outcome = wm_class_fallback.correlate(&window(1, Some(10), Some("one-wm"), None));
+    assert_eq!(
+        correlation(&outcome).evidence,
+        CorrelationEvidence::StartupWmClass
+    );
+
+    let mut substring_fallback = new_correlator(&clock);
+    substring_fallback.record_launch(
+        launch_record(1, "org.mozilla.firefox", Some(10), 0),
+        &app_info("org.mozilla.firefox", "Firefox", None),
+    );
+    let outcome = substring_fallback.correlate(&window(1, None, Some("org.mozilla.firefox"), None));
+    assert_eq!(
+        correlation(&outcome).evidence,
+        CorrelationEvidence::AppIdOrTitleSubstring
+    );
 }
 
 #[test]
-fn outcome_launch_accessor_reports_the_record() {
-    let clock = fake_clock(0);
-    let mut correlator = new_correlator(&clock);
-    let launched = launch_record(3, "app.one", Some(1), 0);
-    correlator.record_launch(launched.clone(), &app_info("app.one", "One", None));
-
-    let outcome = correlator.correlate(&window(1, Some(1), None, None));
-    assert_eq!(outcome.launch(), Some(&launched));
-    assert_eq!(CorrelationOutcome::Uncorrelated.launch(), None);
-}
-
-#[test]
-fn default_timeout_is_ten_seconds() {
-    let clock = fake_clock(0);
+fn default_timeout_is_a_ten_second_window() {
     assert_eq!(DEFAULT_CORRELATION_TIMEOUT, Duration::from_secs(10));
-    assert_eq!(
-        new_correlator(&clock).timeout(),
-        DEFAULT_CORRELATION_TIMEOUT
+
+    // A launch recorded exactly ten seconds ago is still within the default
+    // window and correlates...
+    let clock = fake_clock(0);
+    let mut at_deadline = new_correlator(&clock);
+    at_deadline.record_launch(
+        launch_record(1, "app.one", Some(1), 0),
+        &app_info("app.one", "One", None),
     );
-    assert_eq!(
-        new_correlator_with(Duration::from_millis(250), &clock).timeout(),
-        Duration::from_millis(250)
+    clock.set(10_000);
+    let outcome = at_deadline.correlate(&window(1, Some(1), None, None));
+    assert_eq!(correlation(&outcome).launch.launch_id, LaunchId(1));
+
+    // ...while one recorded 10_001 ms ago has expired.
+    let later = fake_clock(0);
+    let mut past_deadline = new_correlator(&later);
+    past_deadline.record_launch(
+        launch_record(1, "app.one", Some(1), 0),
+        &app_info("app.one", "One", None),
     );
+    later.set(10_001);
+    assert_eq!(
+        past_deadline.correlate(&window(1, Some(1), None, None)),
+        CorrelationOutcome::Uncorrelated
+    );
+    assert_eq!(past_deadline.pending(), 0);
 }
 
 #[test]
