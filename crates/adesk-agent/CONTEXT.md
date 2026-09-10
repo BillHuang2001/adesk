@@ -43,7 +43,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 ## Constraints
 - Dependencies come only from root `[workspace.dependencies]`; never add inline versions.
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]` in the lib; every public item is documented.
-- No test may need a socket, compositor, GPU, network or installed app — use `MockProvider` + `ScriptedClient`.
+- No test may need a socket, compositor, GPU, network or installed app — use `MockProvider`/`DummyVlmProvider` + `ScriptedClient`.
 - `src/agp.rs` is the only module that adapts `adesk-client`/`adesk-proto` wire plumbing; the loop, context and providers speak domain types (`adesk_core`) plus `adesk_proto::ImagePayload`.
 - The crate contains no `todo!()`/`unimplemented!()`; `unwrap`/`expect`/panics exist only inside `#[cfg(test)]` modules or the `testing` scaffolding module (`#[cfg(any(test, feature = "test-support"))]`), which panics by design on an exhausted or mismatched script.
 - The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait` with explicit timeouts; tests use `retry_backoff_ms = 0`.
