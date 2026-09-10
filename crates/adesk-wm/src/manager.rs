@@ -5,7 +5,7 @@ use adesk_core::{AppId, Point, Position, Rect, Region, Size, WindowId, WindowInf
 use crate::action::WmAction;
 use crate::config::PolicyConfig;
 use crate::error::Result;
-use crate::model::{MapRequest, SurfaceKey, WindowModel, WindowRecord};
+use crate::model::{MapRequest, WindowModel, WindowRecord};
 use crate::policy;
 
 /// The window model and tiling policy of one ADesk runtime.
@@ -21,7 +21,7 @@ use crate::policy;
 ///
 /// Method bodies are thin delegations to the crate-internal `policy` module;
 /// that module is the seam where a multi-window policy is added.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct WindowManager {
     config: PolicyConfig,
     model: WindowModel,
@@ -161,12 +161,6 @@ impl WindowManager {
     /// [`WindowRecord::info`]: `wm.windows().iter().map(WindowRecord::info)`.
     pub fn windows(&self) -> &[WindowRecord] {
         policy::windows(&self.model)
-    }
-
-    /// The id of the window owning `key`, or `None` when the surface key is not
-    /// tracked. Used to route events for subsurfaces/popups to their toplevel.
-    pub fn window_by_surface(&self, key: SurfaceKey) -> Option<WindowId> {
-        policy::window_by_surface(&self.model, key)
     }
 
     /// Projects `id` into the wire-facing [`WindowInfo`] (AGP §4), or `None`
