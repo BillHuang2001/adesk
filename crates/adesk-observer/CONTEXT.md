@@ -11,7 +11,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Event pump: `handle_event(&RuntimeEvent)` (sync, cheap, called per broadcast event in `seq` order), `resync(StateSnapshot) -> ResyncReport` (broadcast-lag recovery).
 - Actions: `record_action(kind, Option<WindowId>, Option<Position>) -> ActionId`, `action(ActionId) -> Option<ActionRecord>`, `action_seq(ActionId) -> Option<u64>`, `action_registry() -> ActionRegistry`.
 - Waits (async): `wait_for_change(WaitSpec)`, `wait_for_quiet(QuietSpec)`, `observe(ObserveSpec)`, all `-> Result<Observation>`.
-- Queries (sync, never wait): `snapshot() -> ObserverSnapshot`, `window_state(WindowId) -> Option<WindowTemporalState>`, `window_ids() -> Vec<WindowId>`, `watermark() -> u64`, `now_ms() -> u64`, `is_quiet(WindowId, quiet_ms) -> Option<bool>`.
+- Queries (sync, never wait): `snapshot() -> ObserverSnapshot`, `window_state(WindowId) -> Option<WindowTemporalState>`, `window_geometry(WindowId) -> Option<Rect>`, `window_ids() -> Vec<WindowId>`, `watermark() -> u64`, `now_ms() -> u64`, `is_quiet(WindowId, quiet_ms) -> Option<bool>`.
 ### Specs (`src/spec.rs`)
 - `WaitSpec { window_id, since_commit, timeout_ms }`, `QuietSpec { window_id, quiet_ms, timeout_ms, after_action }`, `ObserveSpec { window_id, after_action, until, timeout_ms }`; all with `Default`, `new()` and chainable setters; protocol defaults are `timeout_ms = 5000` and `QuietSpec.quiet_ms = 250`, while `observe`'s `until` is required on the wire and `ObserveSpec::default()` supplies `Condition::Quiet { quiet_ms: 250 }`.
 - `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()` (public helper: `Quiet` → its own `quiet_ms`; `Change`/`Timeout` → the `DEFAULT_QUIET_MS` constant).
