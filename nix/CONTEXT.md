@@ -13,6 +13,16 @@ wiring layer. The flake imports everything here (no standalone entry points).
   companion agent as `adesk-agent.service`. It takes the flake's `self` so its
   `services.adesk.package` default resolves to
   `self.packages.<system>.adesk`.
+- `services.adesk.socketPath` (`types.str`, default `/run/adesk/adesk.sock`) is
+  the writable AGP Unix-socket path; `services.adesk.socket` is a `readOnly`
+  `types.str` alias of it. Other modules consume
+  `config.services.adesk.socket` (always defined, even when the service is
+  disabled) instead of re-deriving the path.
+- `services.adesk.agent.*` is the pluggable companion-agent submodule
+  (`enable`, `package`, `command`, `extraArgs`, `execStart`, `environment`,
+  `user`, `group`, `restart`, `restartSec`). The AGP socket is injected as
+  `ADESK_SOCKET`; the default `command` is the flake's `adesk-agent`, which can
+  be driven without network via `extraArgs = [ "--provider" "dummy" ]`.
 
 ## Constraints
 
