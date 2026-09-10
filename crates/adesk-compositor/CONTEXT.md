@@ -86,7 +86,7 @@ Code rules:
 | Protocol handler impls + delegate macros | `src/protocols/` |
 | Input injection internals (keycode, keymap, injector) | `src/input/` |
 | Headless renderer + element collection | `src/render/` |
-| Smoke tests (public API only) + integration test plan | `tests/` |
+| `compositor_smoke.rs` (public API only) + `window_lifecycle.rs`/`input_delivery.rs`/`popups.rs`/`clipboard.rs` integration suites + `integration_plan.md` scenario/suite map | `tests/` |
 
 `src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
 `src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions + keyboard/pointer handle getters).
