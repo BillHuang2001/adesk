@@ -139,13 +139,9 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 ## Performance Notes
 
 Cost centers on the per-request and per-event paths (identified by inspection; the crate has no benchmarks):
-- Every inbound event is deep-cloned once per live subscriber by `EventFanout::send` (`src/transport.rs:177-186`); an `inspect_frame`'s multi-MiB base64 image is therefore copied once per stream, even when there is a single subscriber.
-- Every response's `result` `Value` is deep-cloned in `wire::from_frame` (`src/wire.rs:154`, `payload.as_value().clone()`); `adesk_proto::ResultPayload`'s tuple field is public, so the `Value` could be moved out with no copy.
-- Event decode re-serialises: `wire::event_name` calls `serde_json::to_value` (`src/wire.rs:93`) and `EventPayload::to_data` re-serialises the typed payload to a fresh `Value` (`src/wire.rs:171`).
-- `events::runtime_event` clones the whole event `data` object into a new map plus three inserts per core runtime event (`src/events.rs:252-259`).
-- `agp_event_from_raw` clones the `image` value for `inspect_frame` (`src/events.rs:201`) and clones `data` for `quiet` (`src/events.rs:217`).
-- `EventFilter::matches` re-parses an `Other` event's name through serde per event (`src/events.rs:167`) and linearly scans `kinds` (`src/events.rs:155`).
-- `read_line` allocates and grows a fresh `Vec` per inbound line (`src/transport.rs:583-603`).
+- The inbound event path re-serialises: `EventPayload::to_data` re-serialises the typed payload to a fresh `Value`, and `events::runtime_event` clones the whole event `data` object into a new map plus three inserts per core runtime event.
+- `agp_event_from_raw` clones `data` for the `quiet` arm (the `inspect_frame` image is now moved out of `data` with `Value::take`, so it is not copied).
+- `EventFilter::matches` linearly scans `kinds` (a `Vec::contains` over at most 11 entries). A precomputed bitset is deliberately NOT used: `EventFilter.kinds` is a public mutable field, so a mask cached in the struct could go stale on external reassignment; making `kinds` private or adding a mutation-tracking setter would be a public-API change.
 
 ## Known Issues
 
