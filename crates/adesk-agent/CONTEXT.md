@@ -47,7 +47,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `src/agp.rs` is the only module that adapts `adesk-client`/`adesk-proto` wire plumbing; the loop, context and providers speak domain types (`adesk_core`) plus `adesk_proto::ImagePayload`.
 - The crate contains no `todo!()`/`unimplemented!()`; `unwrap`/`expect`/panics exist only inside `#[cfg(test)]` modules or the `testing` scaffolding module (`#[cfg(any(test, feature = "test-support"))]`), which panics by design on an exhausted or mismatched script.
 - The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait` with explicit timeouts; tests use `retry_backoff_ms = 0`.
-- Keep files well under the ~1000-line concern threshold; `src/agent_loop.rs` is at 992 lines and must be split along module boundaries before growing further.
+- Keep files well under the ~1000-line concern threshold; the loop is already split into `src/agent_loop/` (`mod.rs`, `config.rs`, `execute.rs`, `step.rs`), so grow it by adding a module rather than by extending `execute.rs`.
 
 ## Known Issues
 - The gated suites use a crate-root `#![cfg(feature = ...)]` instead of `[[test]] required-features` (the manifest uses `required-features` for the `adesk-e2e-app` example only), so `cargo test -p adesk-agent` still compiles, links and runs three 0-test binaries (`agent_loop`, `scenarios`, `e2e_runtime`) and prints "running 0 tests" for each.
