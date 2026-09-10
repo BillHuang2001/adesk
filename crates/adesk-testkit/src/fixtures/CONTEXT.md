@@ -16,8 +16,9 @@ Everything a test needs to pretend an application is installed and launch it: `.
 
 - `FixtureDir` is a *share* root; `adesk-app-registry` appends `/applications` to every search dir.
 - Returned `AppId`s must equal the registry's own id rule (path relative to the applications dir, `.desktop` stripped, `/` → `.`).
-- `.desktop` `Exec` args are space-joined: fixture arguments must not require shell quoting.
-- Every process wait is deadline-bounded; `TestApp::exit` kills on deadline.
+- `Exec` arguments are space-joined and auto-quoted by `exec_arg` when empty or containing ASCII whitespace, `"` or `\`; unit tests prove the registry tokenizer returns them unchanged and no shell is involved.
+- `write_raw` rejects absolute paths but does not resolve `..`: relative paths must stay inside the share root by caller discipline (`write_entry` rejects escaping stems before writing).
+- Every process wait is deadline-bounded; `TestApp::exit` kills on deadline and returns the resulting (signal) status, so callers must assert `status.success()`.
 - Integration tests of this package may also use `env!("CARGO_BIN_EXE_adesk-test-app")`.
 
 ## Routing Table
