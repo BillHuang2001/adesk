@@ -11,11 +11,10 @@
 //! The service owns the waiting loop (`service.rs`); everything here is
 //! synchronous and unit-testable without tokio.
 
-use adesk_core::{ActionId, Observation, Region, WindowId};
+use adesk_core::{ActionId, Observation, Rect, Region, WindowId};
 
 use crate::journal::{CountedEvent, CountedKind};
 use crate::state::WindowTemporalState;
-use crate::DEFAULT_QUIET_MS;
 
 /// Which counted events a waiter counts (`docs/protocol.md` §5.4).
 ///
@@ -81,13 +80,15 @@ pub(crate) enum WaitCondition {
 }
 
 impl WaitCondition {
-    /// The quiet threshold used for the `quiet` evidence flag when the condition
-    /// is quiet; for `Change`/`Timeout` the service uses
-    /// `ObserverConfig::default_quiet_ms` instead.
-    pub(crate) fn quiet_threshold_ms(self) -> u64 {
+    /// The quiet threshold used for the `quiet` evidence flag.
+    ///
+    /// Single source of truth for the mapping: a `Quiet` condition carries its
+    /// own threshold, while `Change`/`Timeout` are resolved against the service's
+    /// configured `ObserverConfig::default_quiet_ms` (passed by the caller).
+    pub(crate) fn quiet_threshold_ms(self, default_quiet_ms: u64) -> u64 {
         match self {
             WaitCondition::Quiet { quiet_ms } => quiet_ms,
-            WaitCondition::Change | WaitCondition::Timeout => DEFAULT_QUIET_MS,
+            WaitCondition::Change | WaitCondition::Timeout => default_quiet_ms,
         }
     }
 }
@@ -205,7 +206,20 @@ impl Accumulator {
                 self.last_commit_seq = self.last_commit_seq.max(*commit_seq);
                 self.last_commit_ts = Some(event.ts_ms);
                 match clip {
-                    Some(geometry) => self.damage.extend(&damage.clip(&geometry)),
+                    Some(geometry) => {
+                        // Window-relative damage is usually already inside the
+                        // window: extend the union directly and only clip the
+                        // rects that escape the geometry. This is exactly
+                        // `damage.clip(&geometry)` folded in, without allocating
+                        // a temporary `Region` per counted commit.
+                        for rect in damage.iter() {
+                            if contained_in(rect, &geometry) {
+                                self.damage.push(*rect);
+                            } else if let Some(part) = rect.intersect(&geometry) {
+                                self.damage.push(part);
+                            }
+                        }
+                    }
                     None => self.damage.extend(damage),
                 }
             }
@@ -229,12 +243,15 @@ impl Accumulator {
     }
 
     /// Produces the protocol `Observation` at resolution time.
-    pub(crate) fn resolve(&self, ctx: &ResolveContext<'_>) -> Observation {
+    ///
+    /// The damage union is consumed (`mem::take`): the accumulator is dropped
+    /// right after resolution, so there is no reason to keep it behind `&self`.
+    pub(crate) fn resolve(&mut self, ctx: &ResolveContext<'_>) -> Observation {
         Observation {
             window_id: ctx.window_id,
             after_action: ctx.after_action,
             commits: self.commits,
-            changed_regions: self.damage.simplified(),
+            changed_regions: std::mem::take(&mut self.damage).simplified(),
             focus_changed: self.focus_changed,
             title_changed: self.title_changed,
             new_windows: self.new_windows.clone(),
@@ -261,6 +278,15 @@ impl Accumulator {
             seq: ctx.watermark,
         }
     }
+}
+
+/// `true` when `rect` lies entirely inside `bounds` (half-open), so clipping it
+/// to `bounds` would return it unchanged.
+fn contained_in(rect: &Rect, bounds: &Rect) -> bool {
+    rect.x >= bounds.x
+        && rect.y >= bounds.y
+        && rect.right() <= bounds.right()
+        && rect.bottom() <= bounds.bottom()
 }
 
 /// Everything `resolve` needs beyond the accumulator.
@@ -312,6 +338,7 @@ pub(crate) fn condition_met(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::DEFAULT_QUIET_MS;
     use adesk_core::Rect;
 
     fn wid(id: u64) -> WindowId {
@@ -729,7 +756,7 @@ mod tests {
 
     #[test]
     fn resolve_elapsed_ms_saturates_when_clock_moved_backwards() {
-        let acc = acc();
+        let mut acc = acc();
         let observation = acc.resolve(&resolve_ctx(Some(wid(7)), 100, 60, None));
 
         assert_eq!(observation.elapsed_ms, 0);
@@ -737,7 +764,7 @@ mod tests {
 
     #[test]
     fn resolve_quiet_flag_is_exact_at_the_threshold() {
-        let acc = acc();
+        let mut acc = acc();
 
         // No commit in the filter: the anchor is the wait start.
         let at_threshold = acc.resolve(&resolve_ctx(Some(wid(7)), 100, 350, None));
@@ -762,7 +789,7 @@ mod tests {
 
     #[test]
     fn resolve_quiet_flag_uses_the_context_threshold() {
-        let acc = acc();
+        let mut acc = acc();
 
         let mut ctx = resolve_ctx(Some(wid(7)), 0, 100, None);
         ctx.quiet_threshold_ms = 100;
@@ -844,5 +871,34 @@ mod tests {
 
         assert!(!condition_met(WaitCondition::Timeout, &acc, 0, 10));
         assert!(!condition_met(WaitCondition::Timeout, &acc, 0, u64::MAX));
+    }
+
+    // ------------------------------------------------------ quiet_threshold_ms
+
+    #[test]
+    fn quiet_threshold_ms_is_own_or_configured_default() {
+        // A quiet condition carries its own threshold; the passed default is
+        // ignored for it.
+        assert_eq!(
+            WaitCondition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(DEFAULT_QUIET_MS),
+            33
+        );
+        assert_eq!(
+            WaitCondition::Quiet { quiet_ms: 33 }.quiet_threshold_ms(999),
+            33
+        );
+
+        // Non-quiet conditions honour the configured default (the fix for the
+        // "custom `default_quiet_ms` ignored" issue), not the crate constant.
+        assert_eq!(
+            WaitCondition::Change.quiet_threshold_ms(DEFAULT_QUIET_MS),
+            DEFAULT_QUIET_MS
+        );
+        assert_eq!(
+            WaitCondition::Timeout.quiet_threshold_ms(DEFAULT_QUIET_MS),
+            DEFAULT_QUIET_MS
+        );
+        assert_eq!(WaitCondition::Change.quiet_threshold_ms(777), 777);
+        assert_eq!(WaitCondition::Timeout.quiet_threshold_ms(777), 777);
     }
 }

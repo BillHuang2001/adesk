@@ -201,10 +201,10 @@ impl Condition {
     /// [`crate::DEFAULT_QUIET_MS`]. The service resolves the `quiet` evidence
     /// flag of a non-quiet condition against `ObserverConfig::default_quiet_ms`
     /// (which defaults to this constant).
+    ///
+    /// Thin wrapper over the single mapping in `WaitCondition::quiet_threshold_ms`
+    /// (via `wait_condition`), so the two cannot drift apart.
     pub fn quiet_threshold_ms(&self) -> u64 {
-        match self {
-            Condition::Quiet { quiet_ms } => *quiet_ms,
-            Condition::Change | Condition::Timeout => DEFAULT_QUIET_MS,
-        }
+        crate::service::wait_condition(*self).quiet_threshold_ms(DEFAULT_QUIET_MS)
     }
 }
