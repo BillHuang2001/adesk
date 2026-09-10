@@ -165,10 +165,18 @@ where
     scene_from_elements(elements, 0)
 }
 
-/// Build the scene of the whole virtual output: every window at its geometry
-/// origin, then the requested debug overlays on top.
+/// Build the scene of the whole virtual output: the single **visible** window at
+/// its geometry origin, then the requested debug overlays on top.
 ///
-/// An empty `windows` slice yields an empty scene, which
+/// `windows` is the *candidate* list of every tracked window; `active` marks the
+/// one `adesk-wm` tiled to fill the output. ADesk shows exactly one toplevel at a
+/// time, so [`visible_index`] selects at most one candidate and every other
+/// window is deliberately **not** composed — being tracked must never make a
+/// window visible. The selected window's popups ride along: they are appended by
+/// [`window_elements`] via [`popup_surfaces`], so this function needs no popup
+/// logic of its own.
+///
+/// With no active candidate the scene is empty, which
 /// [`adesk_render::render_scene`] renders as a cleared (clear-color) frame — a
 /// valid composition, not an error. `commit_seq` is `0`: an output composition is
 /// not tied to a single window's commit counter.
@@ -182,16 +190,33 @@ where
     R::TextureId: Clone + 'static,
 {
     let mut scene = Scene::new(0);
-    for window in windows {
-        let origin = Point::<i32, Physical>::from((window.geometry.x, window.geometry.y));
-        for element in window_elements(renderer, &window.surface, origin) {
-            push_element(&mut scene, OutputRenderElements::Surface(element));
-        }
+    let visible = visible_index(windows.iter().map(|window| window.active))
+        .and_then(|index| windows.get(index));
+    let Some(window) = visible else {
+        return scene;
+    };
+
+    let origin = Point::<i32, Physical>::from((window.geometry.x, window.geometry.y));
+    for element in window_elements(renderer, &window.surface, origin) {
+        push_element(&mut scene, OutputRenderElements::Surface(element));
     }
-    for overlay in overlay_elements(windows, overlays) {
+    // Overlays are computed from the composed window alone: a debug marker must
+    // never point at a window the frame does not show.
+    for overlay in overlay_elements(std::slice::from_ref(window), overlays) {
         push_element(&mut scene, OutputRenderElements::Overlay(overlay));
     }
     scene
+}
+
+/// Index of the one window output composition may draw.
+///
+/// The candidate list is every tracked window; the `active` flag marks the
+/// toplevel `adesk-wm` tiled to fill the output. At most one index is ever
+/// returned — the first active candidate — so composition cannot stack two
+/// toplevels even if the window model were to report more than one active
+/// window. `None` means "nothing is visible": the output is a clear frame.
+fn visible_index(active: impl IntoIterator<Item = bool>) -> Option<usize> {
+    active.into_iter().position(|active| active)
 }
 
 /// Collect the elements of a window's tree into a scene, bottom-to-top.
@@ -227,7 +252,9 @@ struct OverlayMarker {
 /// Build the solid-color elements of the requested debug overlays.
 ///
 /// Overlays are debug-only (`docs/protocol.md` §5.7) and never part of
-/// agent-facing captures. See [`overlay_markers`] for what each kind paints.
+/// agent-facing captures. [`output_scene`] passes the composed (visible) window
+/// only, so a marker can never point at a window the frame does not show. See
+/// [`overlay_markers`] for what each kind paints.
 pub(crate) fn overlay_elements(
     windows: &[OutputWindow],
     overlays: &[OverlayKind],
@@ -247,6 +274,10 @@ pub(crate) fn overlay_elements(
 }
 
 /// The markers one set of overlay kinds paints over a list of windows.
+///
+/// The list is the **composed** set — one window, per the
+/// single-visible-toplevel invariant — so "every window" below means the window
+/// the frame actually shows.
 ///
 /// Overlay rendering is deliberately minimal: the compositor's render pipeline
 /// has no text renderer and no seat state, so it draws **color-coded geometry**,
@@ -375,8 +406,17 @@ fn dimension(value: u32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::pixman::PixmanRenderer;
     use smithay::backend::renderer::utils::{DamageSet, OpaqueRegions};
     use smithay::utils::{Buffer as BufferCoords, Size};
+
+    /// Creates the software renderer; pixman needs no display, GPU or EGL.
+    ///
+    /// It is only needed to satisfy `output_scene`'s `Renderer` bound: with no
+    /// visible candidate the function returns before touching the renderer.
+    fn pixman() -> PixmanRenderer {
+        PixmanRenderer::new().expect("pixman renderer")
+    }
 
     /// Minimal `Element` double: fixed geometry, stable id, no buffer.
     struct Stub {
@@ -477,6 +517,63 @@ mod tests {
         assert_eq!(scene.commit_seq(), 0);
     }
 
+    /// Single-visible-toplevel: output composition draws at most one window.
+    ///
+    /// `adesk-wm` tiles the active window to fill the virtual output and only
+    /// *tracks* the other windows, so the candidate list must never be composed
+    /// as a stack: `visible_index` is the selector `output_scene` uses.
+    ///
+    /// Popups are not part of the selection: the composed window's popups are
+    /// appended by `window_elements` (which calls `popup_surfaces`), so they ride
+    /// along with their owner automatically. Asserting that needs a real
+    /// `WlSurface` plus `PopupManager` state — reachable only from
+    /// `adesk-testkit` — so it is documented here and covered by the queued
+    /// `tests/integration_plan.md` scenarios, which assert real pixels.
+    #[test]
+    fn output_composition_selects_only_the_active_window() {
+        // Candidates in creation order: [inactive, active, inactive].
+        assert_eq!(visible_index([false, true, false]), Some(1));
+        assert_eq!(visible_index([true, false, false]), Some(0));
+        assert_eq!(visible_index([false, false, true]), Some(2));
+
+        // No active candidate composes nothing at all — the output stays a clear
+        // frame. An empty candidate list is the same case.
+        assert_eq!(visible_index([false, false, false]), None);
+        assert_eq!(visible_index([]), None);
+
+        // Defensive: if the window model ever reported two active windows, the
+        // first one wins. Composition never shows two toplevels.
+        assert_eq!(visible_index([false, true, true]), Some(1));
+        assert_eq!(visible_index([true, true]), Some(0));
+    }
+
+    /// No visible window still composes a valid (empty) scene.
+    ///
+    /// `adesk_render::render_scene` turns an empty scene into a clear-color
+    /// frame, so "nothing visible" is a composition, not an error;
+    /// `headless.rs`'s `pixman_output_without_windows_is_a_clear_frame` and
+    /// `pixman_output_with_overlays_but_no_windows_is_still_a_clear_frame` assert
+    /// the resulting pixels. The pixel-level proof with a *tracked but inactive*
+    /// window needs a real `WlSurface` (`adesk-testkit`, see
+    /// `tests/integration_plan.md`); here the scene-level fact is asserted.
+    #[test]
+    fn output_scene_without_a_visible_window_is_empty() {
+        let mut renderer = pixman();
+        let scene = output_scene(
+            &mut renderer,
+            &[],
+            &[
+                OverlayKind::WindowIds,
+                OverlayKind::Focus,
+                OverlayKind::Damage,
+            ],
+        );
+
+        assert!(scene.is_empty(), "nothing is visible, so nothing is drawn");
+        assert!(scene.damage().is_empty());
+        assert_eq!(scene.commit_seq(), 0);
+    }
+
     #[test]
     fn border_rects_are_disjoint_and_inside_the_rect() {
         let rects = border_rects(Rect::new(5, 7, 40, 30), 2);
@@ -545,6 +642,40 @@ mod tests {
     fn overlay_markers_are_empty_without_windows_or_kinds() {
         assert!(overlay_markers([], &[OverlayKind::Focus]).is_empty());
         assert!(overlay_markers([(Rect::new(0, 0, 10, 10), true)], &[]).is_empty());
+    }
+
+    /// Debug overlays mark the composed window only.
+    ///
+    /// `output_scene` computes the markers from the selected candidate, so the
+    /// rectangle of a tracked-but-invisible window can never appear in an
+    /// inspection frame.
+    #[test]
+    fn composed_overlays_mark_only_the_selected_window() {
+        let candidates = [
+            (Rect::new(0, 0, 20, 20), false),
+            (Rect::new(20, 0, 20, 20), true),
+            (Rect::new(40, 0, 20, 20), false),
+        ];
+        let index = visible_index(candidates.iter().map(|(_, active)| *active))
+            .expect("one candidate is active");
+        let composed = candidates[index].0;
+        let markers = overlay_markers(
+            [candidates[index]],
+            &[OverlayKind::WindowIds, OverlayKind::Focus],
+        );
+
+        assert_eq!(markers.len(), 8, "two kinds, four border rects each");
+        for marker in &markers {
+            assert_eq!(
+                marker.rect.intersect(&composed),
+                Some(marker.rect),
+                "{:?} marks a window that is not composed",
+                marker.rect
+            );
+        }
+
+        // Nothing selected: `output_scene` returns before building any overlay.
+        assert!(overlay_markers([], &[OverlayKind::WindowIds]).is_empty());
     }
 
     #[test]
