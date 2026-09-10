@@ -16,7 +16,7 @@ Frames (`src/frame.rs`):
 - `Frame::{Request, Response, Event}` with `From<RequestFrame|ResponseFrame|EventFrame>` and manual `Serialize`/`Deserialize` that discriminate by keys (`method` → request, `id` + exactly one of `result`/`error` → response, `event` → event).
 - `RequestFrame { id: u64, method: Method }` (`new`).
 - `ResponseFrame { id, outcome: ResponseOutcome }` with `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}` (an ordinary enum consumers pattern-match), constructors `ResponseFrame::result::<R>(id, &R)` and `::error(id, ErrorPayload)`.
-- `ResultPayload(serde_json::Value)` with `new::<R>(&R)`, `decode::<R>()`, `as_value()`.
+- `ResultPayload(serde_json::Value)` with `new::<R>(&R)`, `decode::<R>()` (borrowing, clones the `Value`) and `into_decode::<R>()` (consuming, no clone), plus the borrow-only `as_value()`.
 - `ErrorPayload { code: ErrorCode, message: String, data: Option<Value> }` with `new`, `with_data`.
 - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }` with `new`, `from_runtime(&RuntimeEvent)`, `to_runtime() -> Option<RuntimeEvent>`.
 - Crate-internal `Frame::from_value(serde_json::Value) -> Result<Frame>` — the decoder every entry point routes through (see Design Decisions).
