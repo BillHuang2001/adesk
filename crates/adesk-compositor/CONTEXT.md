@@ -257,6 +257,7 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 ## Known Issues
 
+- The debug-overlay marker code in `src/render/elements.rs` (`overlay_elements`/`overlay_markers`/`overlay_color`/`border_rects`) is production-dead — the only constructor of `RuntimeCommand::RenderOutput` in the workspace (`adesk-server/src/inspection.rs`) passes `overlays: Vec::new()` — and it duplicates `adesk-inspector`'s painter (`adesk-inspector/src/paint/`) for all eight `adesk_core::OverlayKind`s with a contradictory palette; deleting it is pending cross-crate coordination with `adesk-inspector` (full analysis in `src/render/CONTEXT.md`).
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
