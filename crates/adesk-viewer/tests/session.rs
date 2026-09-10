@@ -1,0 +1,538 @@
+//! Integration tests for the viewer **server session** (`docs/viewer.md` §2–§6).
+//!
+//! These drive [`ViewerServer::serve`] over an in-memory `tokio::io::duplex`
+//! stream — no display, GPU, network or socket — against a fake
+//! [`ViewerBackend`]. They exercise the behaviour the crate's unit tests in
+//! `src/` do not reach through the public API: the handshake reply's metadata,
+//! the refusal paths (version mismatch, non-hello first message, handshake
+//! timeout, malformed line), the on-demand `request_frame`/`request_state`
+//! round-trip, change-driven frame push, input forwarding + `input_ack`,
+//! `set_control`, `bye` and forward-compatible unknown-type handling.
+//!
+//! Everything that could hang is wrapped in [`tokio::time::timeout`], so the
+//! suite is deterministic without any fixed-sleep synchronization.
+
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size};
+use adesk_proto::{ImagePayload, KeySpec, RendererKind};
+use adesk_viewer::{
+    ChangeSignal, PeerInfo, ViewerBackend, ViewerError, ViewerInput, ViewerServer,
+    ViewerServerConfig,
+};
+use adesk_viewer_proto::{
+    decode_server, encode_client, ClientMessage, ControlOwner, CursorState, DesktopState,
+    KeyAction, ServerHello, ServerMessage, ViewerFrame, ViewerHello, PROTOCOL_VERSION,
+};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf,
+    WriteHalf,
+};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
+
+/// The `serve` task's result type.
+type Session = JoinHandle<adesk_viewer::Result<()>>;
+
+/// The buffered client-side reader half.
+type ClientRead = BufReader<ReadHalf<DuplexStream>>;
+
+/// The client-side writer half.
+type ClientWrite = WriteHalf<DuplexStream>;
+
+/// In-memory duplex capacity, comfortably above any test frame.
+const CAPACITY: usize = 1 << 16;
+
+/// A generous upper bound for "this must happen"; the assertions are about the
+/// protocol, not about timing.
+const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A backend that records every input and control owner and can be told to
+/// report a desktop change. State is behind interior mutability and no lock is
+/// ever held across an `.await`.
+struct FakeBackend {
+    /// The "desktop changed" source the session awaits.
+    change: ChangeSignal,
+    /// Frame sequence counter.
+    seq: AtomicU64,
+    /// Inputs `apply_input` received, in submission order.
+    inputs: Mutex<Vec<ViewerInput>>,
+    /// Control owners `set_control` received, in submission order.
+    controls: Mutex<Vec<ControlOwner>>,
+}
+
+impl FakeBackend {
+    fn new() -> Arc<FakeBackend> {
+        Arc::new(FakeBackend {
+            change: ChangeSignal::new(),
+            seq: AtomicU64::new(0),
+            inputs: Mutex::new(Vec::new()),
+            controls: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// The inputs recorded so far.
+    fn recorded_inputs(&self) -> Vec<ViewerInput> {
+        self.inputs.lock().expect("inputs lock").clone()
+    }
+
+    /// The control owners recorded so far.
+    fn recorded_controls(&self) -> Vec<ControlOwner> {
+        self.controls.lock().expect("controls lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ViewerBackend for FakeBackend {
+    fn display(&self) -> ServerHello {
+        ServerHello {
+            protocol_version: PROTOCOL_VERSION,
+            runtime_version: "test".to_owned(),
+            output: Size::new(1280, 800),
+            renderer: RendererKind::Pixman,
+            cursor: CursorState::hidden(),
+            control: ControlOwner::Ai,
+        }
+    }
+
+    async fn render_frame(&self) -> adesk_viewer::Result<ViewerFrame> {
+        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+        Ok(ViewerFrame {
+            seq,
+            ts_ms: 0,
+            image: ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0)
+                .expect("a valid rgba8 payload"),
+            cursor: CursorState::hidden(),
+            active_window_id: None,
+        })
+    }
+
+    async fn desktop_state(&self) -> adesk_viewer::Result<DesktopState> {
+        Ok(DesktopState {
+            active_window_id: None,
+            windows: Vec::new(),
+        })
+    }
+
+    async fn apply_input(&self, input: ViewerInput) -> adesk_viewer::Result<Option<ActionId>> {
+        self.inputs.lock().expect("inputs lock").push(input);
+        Ok(Some(ActionId(7)))
+    }
+
+    fn change_signal(&self) -> ChangeSignal {
+        self.change.clone()
+    }
+
+    async fn set_control(&self, owner: ControlOwner) -> adesk_viewer::Result<()> {
+        self.controls.lock().expect("controls lock").push(owner);
+        Ok(())
+    }
+}
+
+/// Spawns a server over one half of an in-memory duplex, returning the session
+/// task and the client half of the stream.
+fn start(backend: Arc<FakeBackend>, config: ViewerServerConfig) -> (Session, DuplexStream) {
+    let server = ViewerServer::new(backend).with_config(config);
+    let (server_stream, client_stream) = tokio::io::duplex(CAPACITY);
+    let handle = tokio::spawn(async move {
+        server
+            .serve(server_stream, PeerInfo::Other("test".to_owned()))
+            .await
+    });
+    (handle, client_stream)
+}
+
+/// Splits a client stream into a buffered line reader and a writer.
+fn split(stream: DuplexStream) -> (ClientRead, ClientWrite) {
+    let (read, write) = tokio::io::split(stream);
+    (BufReader::new(read), write)
+}
+
+/// Encodes, writes and flushes one client message.
+async fn send<W>(writer: &mut W, message: &ClientMessage)
+where
+    W: AsyncWrite + Unpin,
+{
+    write_line(writer, &encode_client(message)).await;
+}
+
+/// Writes and flushes one raw line, for malformed/unknown-type tests.
+async fn send_raw<W>(writer: &mut W, line: &str)
+where
+    W: AsyncWrite + Unpin,
+{
+    write_line(writer, line).await;
+}
+
+/// Writes `line`, a `\n`, then flushes.
+async fn write_line<W>(writer: &mut W, line: &str)
+where
+    W: AsyncWrite + Unpin,
+{
+    writer.write_all(line.as_bytes()).await.expect("write line");
+    writer.write_all(b"\n").await.expect("write terminator");
+    writer.flush().await.expect("flush line");
+}
+
+/// Reads one `\n`-terminated server message; `None` on a clean EOF.
+async fn recv<R>(reader: &mut R) -> Option<ServerMessage>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = String::new();
+    let read = reader.read_line(&mut line).await.expect("read a line");
+    if read == 0 {
+        return None;
+    }
+    Some(decode_server(line.trim_end_matches('\n')).expect("a valid server message"))
+}
+
+/// Awaits the next server message, failing the test if none arrives in time.
+async fn recv_some<R>(reader: &mut R) -> ServerMessage
+where
+    R: AsyncBufRead + Unpin,
+{
+    timeout(REPLY_TIMEOUT, recv(reader))
+        .await
+        .expect("a server message must arrive in time")
+        .expect("the connection must stay open")
+}
+
+/// Asserts the server closed the connection (EOF instead of a message).
+async fn assert_closed<R>(reader: &mut R)
+where
+    R: AsyncBufRead + Unpin,
+{
+    let next = timeout(REPLY_TIMEOUT, recv(reader))
+        .await
+        .expect("EOF must arrive after the server closes the connection");
+    assert!(
+        next.is_none(),
+        "expected the connection to close, got {next:?}"
+    );
+}
+
+/// Sends a hello and returns the server's first reply.
+async fn handshake(
+    reader: &mut ClientRead,
+    writer: &mut ClientWrite,
+    hello: ViewerHello,
+) -> ServerMessage {
+    send(writer, &ClientMessage::Hello(hello)).await;
+    recv_some(reader).await
+}
+
+/// Starts a server, performs a default handshake and asserts the server hello.
+async fn connected(backend: Arc<FakeBackend>) -> (Session, ClientRead, ClientWrite) {
+    let (handle, stream) = start(backend, ViewerServerConfig::default());
+    let (mut reader, mut writer) = split(stream);
+    match handshake(&mut reader, &mut writer, ViewerHello::new()).await {
+        ServerMessage::Hello(_) => {}
+        other => panic!("expected the server hello, got {other:?}"),
+    }
+    (handle, reader, writer)
+}
+
+/// Ends a connection with `bye`, then awaits a clean session exit.
+async fn bye_and_finish(handle: Session, writer: &mut ClientWrite) {
+    send(writer, &ClientMessage::Bye { reason: None }).await;
+    finish(handle).await;
+}
+
+/// Awaits a clean `Ok(())` session exit within the reply timeout.
+async fn finish(handle: Session) {
+    timeout(REPLY_TIMEOUT, handle)
+        .await
+        .expect("the session must finish in time")
+        .expect("the server task must not panic")
+        .expect("the session must return Ok");
+}
+
+/// §2: the handshake reply carries the backend's `display()` metadata.
+#[tokio::test]
+async fn handshake_replies_with_backend_display_metadata() {
+    let backend = FakeBackend::new();
+    let (handle, stream) = start(backend, ViewerServerConfig::default());
+    let (mut reader, mut writer) = split(stream);
+
+    match handshake(&mut reader, &mut writer, ViewerHello::new()).await {
+        ServerMessage::Hello(hello) => {
+            assert_eq!(hello.protocol_version, PROTOCOL_VERSION);
+            assert_eq!(hello.runtime_version, "test");
+            assert_eq!(hello.output, Size::new(1280, 800));
+            assert_eq!(hello.renderer, RendererKind::Pixman);
+            assert_eq!(hello.cursor, CursorState::hidden());
+            assert_eq!(hello.control, ControlOwner::Ai);
+        }
+        other => panic!("expected the server hello, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §2: a version mismatch is a hard error that closes the connection, while
+/// `serve` still reports success.
+#[tokio::test]
+async fn version_mismatch_is_refused_and_closes() {
+    let backend = FakeBackend::new();
+    let (handle, stream) = start(backend, ViewerServerConfig::default());
+    let (mut reader, mut writer) = split(stream);
+
+    let mut hello = ViewerHello::new();
+    hello.protocol_version = PROTOCOL_VERSION + 1;
+    send(&mut writer, &ClientMessage::Hello(hello)).await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, .. } => {
+            assert_eq!(code, ErrorCode::ProtocolVersionMismatch);
+        }
+        other => panic!("expected a version mismatch error, got {other:?}"),
+    }
+    assert_closed(&mut reader).await;
+    finish(handle).await;
+}
+
+/// §2: a first message that is not a hello is refused and the connection closes.
+#[tokio::test]
+async fn a_non_hello_first_message_is_refused_and_closes() {
+    let backend = FakeBackend::new();
+    let (handle, stream) = start(backend, ViewerServerConfig::default());
+    let (mut reader, mut writer) = split(stream);
+
+    send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidRequest),
+        other => panic!("expected an invalid_request error, got {other:?}"),
+    }
+    assert_closed(&mut reader).await;
+    finish(handle).await;
+}
+
+/// §2: no hello within the handshake timeout fails `serve` with a handshake
+/// error (the client stream is kept alive so this is a timeout, not an EOF).
+#[tokio::test]
+async fn a_silent_viewer_hits_the_handshake_timeout() {
+    let backend = FakeBackend::new();
+    let config = ViewerServerConfig::default().with_handshake_timeout(Duration::from_millis(50));
+    let (handle, _client) = start(backend, config);
+
+    let result = timeout(REPLY_TIMEOUT, handle)
+        .await
+        .expect("the handshake timeout must fire")
+        .expect("the server task must not panic");
+    assert!(
+        matches!(result, Err(ViewerError::Handshake(_))),
+        "expected a handshake error, got {result:?}"
+    );
+}
+
+/// §4/§5: `request_frame` answers a `frame` and `request_state` answers a
+/// `state`.
+#[tokio::test]
+async fn request_frame_and_request_state_round_trip() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(frame) => assert!(frame.seq >= 1, "a rendered frame has a seq"),
+        other => panic!("expected a frame, got {other:?}"),
+    }
+
+    send(&mut writer, &ClientMessage::RequestState { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::State(state) => assert!(state.windows.is_empty()),
+        other => panic!("expected a state, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5: a desktop change pushes a frame without a `request_frame`.
+#[tokio::test]
+async fn a_desktop_change_pushes_a_frame_on_demand() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    backend.change.notify();
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(_) => {}
+        other => panic!("expected a pushed frame, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: a pointer move is applied through the backend and acknowledged with
+/// the recorded action id.
+#[tokio::test]
+async fn pointer_move_is_forwarded_and_acknowledged() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(&mut writer, &ClientMessage::PointerMove { x: 0.5, y: 0.25 }).await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::InputAck { id, action_id } => {
+            assert_eq!(id, None);
+            assert_eq!(action_id, ActionId(7));
+        }
+        other => panic!("expected an input_ack, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_inputs(),
+        vec![ViewerInput::PointerMove { x: 0.5, y: 0.25 }]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: every other input variant is forwarded verbatim and in submission
+/// order.
+#[tokio::test]
+async fn every_input_variant_is_forwarded_in_order() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    let messages = vec![
+        ClientMessage::PointerButton {
+            button: Button::Right,
+            state: ButtonState::Pressed,
+            x: Some(0.1),
+            y: None,
+        },
+        ClientMessage::Scroll {
+            dx: 0.0,
+            dy: -3.0,
+            x: None,
+            y: None,
+        },
+        ClientMessage::Key {
+            keys: KeySpec::Chord(vec!["CTRL".to_owned(), "L".to_owned()]),
+            action: KeyAction::Tap,
+        },
+        ClientMessage::Text {
+            text: "hello".to_owned(),
+        },
+    ];
+
+    for message in &messages {
+        send(&mut writer, message).await;
+        match recv_some(&mut reader).await {
+            ServerMessage::InputAck { id, action_id } => {
+                assert_eq!(id, None);
+                assert_eq!(action_id, ActionId(7));
+            }
+            other => panic!("expected an input_ack, got {other:?}"),
+        }
+    }
+
+    assert_eq!(
+        backend.recorded_inputs(),
+        vec![
+            ViewerInput::PointerButton {
+                button: Button::Right,
+                state: ButtonState::Pressed,
+                x: Some(0.1),
+                y: None,
+            },
+            ViewerInput::Scroll {
+                dx: 0.0,
+                dy: -3.0,
+                x: None,
+                y: None,
+            },
+            ViewerInput::Key {
+                keys: KeySpec::Chord(vec!["CTRL".to_owned(), "L".to_owned()]),
+                action: KeyAction::Tap,
+            },
+            ViewerInput::Text {
+                text: "hello".to_owned(),
+            },
+        ]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5: `set_control` is echoed as `control` and announced to the backend.
+#[tokio::test]
+async fn set_control_is_echoed_and_recorded() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::SetControl {
+            owner: ControlOwner::Human,
+        },
+    )
+    .await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Control { owner } => assert_eq!(owner, ControlOwner::Human),
+        other => panic!("expected a control message, got {other:?}"),
+    }
+    assert_eq!(backend.recorded_controls(), vec![ControlOwner::Human]);
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4: `bye` is acknowledged and then closes the connection.
+#[tokio::test]
+async fn bye_is_echoed_and_closes_the_connection() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::Bye {
+            reason: Some("done".to_owned()),
+        },
+    )
+    .await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Bye { reason } => assert_eq!(reason, "done"),
+        other => panic!("expected a bye, got {other:?}"),
+    }
+    assert_closed(&mut reader).await;
+    finish(handle).await;
+}
+
+/// §6: a malformed line is answered with `error` and then closes the
+/// connection.
+#[tokio::test]
+async fn a_malformed_line_is_refused_and_closes() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send_raw(&mut writer, "not json").await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, ErrorCode::InvalidRequest),
+        other => panic!("expected an invalid_request error, got {other:?}"),
+    }
+    assert_closed(&mut reader).await;
+    finish(handle).await;
+}
+
+/// §1/§7: an unrecognised message type is ignored; the connection stays usable.
+#[tokio::test]
+async fn an_unknown_message_type_is_ignored() {
+    let backend = FakeBackend::new();
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send_raw(&mut writer, r#"{"type":"future_thing"}"#).await;
+    send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(_) => {}
+        other => panic!("expected a frame after the ignored message, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
