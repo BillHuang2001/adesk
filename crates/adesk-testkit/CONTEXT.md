@@ -86,8 +86,6 @@ Status: complete — `src/` and `tests/` contain no `todo!()`/`unimplemented!()`
 ## Known Issues
 
 - `tests/fixtures.rs` prints `Io error: Broken pipe (os error 32)` on stdout while still passing — log noise from the helper-process path, not a failure.
-- Superseded SHM buffer ranges are never returned to the pool (`src/wayland/CONTEXT.md` Known Issues): the 16 MiB pool grows one frame per `commit_frame` and exhausts after ~3 fresh 1280x800 frames; latent today because in-tree tests commit at most two fresh frames per client.
-- `tests/e2e_launch_observe.rs:159-161` states window↔launch attribution is not implemented (`launch_id: None`), but `tests/fixtures.rs:142` asserts `launch_id == Some(launched.launch_id)` for the same flow — the comment is stale and the capstone omits a correlation assertion already proven elsewhere.
 
 ## Notes for Agents
 
