@@ -37,11 +37,17 @@
 //!
 //! # Timing
 //!
-//! Nothing sleeps or retries. `roundtrip()` is a flush plus one buffered notification of the
-//! peer's own reader — not a `wl_display.sync` barrier, because a notification left over from
-//! an earlier read satisfies it immediately — so it orders nothing against a command sent on
-//! the compositor's command channel. That ordering comes from [`publish`]'s commit barrier,
-//! and every other asynchronous observation is a bounded wait on the event that proves it.
+//! Nothing sleeps or retries: every asynchronous observation is a bounded wait on the event
+//! that proves it. None of those waits is `roundtrip()`, which only flushes and waits for one
+//! notification of the peer's own reader — a notification left over from an earlier read
+//! satisfies it immediately — so it proves nothing about whether the compositor has dispatched
+//! the requests made before it (it is not a `wl_display.sync` barrier). The two places that need
+//! that ordering — the mapping commit in [`map_peer`] and the publication in [`publish`] — use
+//! the same **commit barrier** instead: a commit on the connection that made the request, plus
+//! the `RuntimeEvent::SurfaceCommit` of that commit awaited from a tap installed before it, with
+//! the per-window `commit_seq` the commit must reach. One connection's requests are dispatched
+//! in order, so observing the commit proves every earlier request of that connection was already
+//! dispatched.
 //!
 //! # What the runtime never sees
 //!
@@ -106,31 +112,106 @@ struct Peer {
     client: WaylandTestClient,
     /// The mapped toplevel this peer publishes or reads through.
     window: TestWindow,
-    /// The runtime's own id for that toplevel, read over the command channel (never assumed).
+    /// The runtime's own id for that toplevel, taken from the window's creation event and
+    /// cross-checked against the model `QueryState` reports (never assumed).
     id: WindowId,
 }
 
+/// The commit counter a peer's mapping commit reaches.
+///
+/// A toplevel enters the window model — and is allocated its window id — only on its first
+/// *buffer* commit, so that commit is always commit `1` of the new window's surface tree. It is
+/// also the frame [`publish`] builds on: the first publication barrier commit is therefore `2`.
+const MAPPING_COMMIT_SEQ: u64 = 1;
+
 /// Creates a client, maps its toplevel and resolves the runtime's id for the window.
 ///
-/// The first buffer commit maps the surface (and allocates the window id), and the snapshot
-/// read back below is the evidence for it: the record for this app id has to be listed and
-/// mapped, so the id names a window the runtime really reports. `roundtrip()` only flushes and
-/// drains this client's own reader (module docs), so it is not what proves the commit landed.
-async fn map_peer(runtime: &TestRuntime, app_id: &str, title: &str) -> Result<Peer> {
-    let mut client = runtime.wayland_client()?;
+/// The first buffer commit maps the surface (and allocates the window id), and the snapshot read
+/// back below is the evidence for it: the record for this app id has to be listed and mapped, so
+/// the id names a window the runtime really reports. Reading that snapshot only means anything
+/// once the compositor has **dispatched** that commit, and `roundtrip()` cannot prove it (module
+/// docs), so the mapping is ordered by a commit barrier: `events` must already tap the runtime
+/// when this is called, and the two waits below await the events the mapping commit itself
+/// produces — the window's `WindowCreated`, which names the id this map allocated, and its
+/// `SurfaceCommit` at `MAPPING_COMMIT_SEQ` — before the `QueryState` command is sent. Both are
+/// emitted while that commit is dispatched and the broadcast never replays, so a tap installed
+/// before the commit cannot match an event left over from an earlier map; `commit_frame` flushes,
+/// so the events cannot be missed either.
+async fn map_peer(
+    runtime: &TestRuntime,
+    events: &mut EventAssert,
+    app_id: &str,
+    title: &str,
+) -> Result<Peer> {
+    let client = runtime.wayland_client()?;
     let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;
     window.wait_for_configure(DEADLINE)?;
     window.apply_configure()?;
+    // The mapping commit: the first commit of this connection that carries a buffer, and with it
+    // the commit that puts the window in the model.
     window.commit_frame(FillPattern::default())?;
-    client.roundtrip().await?;
 
+    // Barrier, part 1: the creation event is emitted while the mapping commit is dispatched, and
+    // it names the id that commit allocated. This is the only way to learn the id *before*
+    // reading the model, so the `SurfaceCommit` wait below can be scoped to this very window.
     let app = AppId::from(app_id);
+    let created = events
+        .wait_for(
+            DEADLINE,
+            "window_created for the toplevel this peer maps",
+            |event| {
+                matches!(
+                    event,
+                    RuntimeEvent::WindowCreated {
+                        app_id: Some(created),
+                        ..
+                    } if *created == app
+                )
+            },
+        )
+        .await?;
+    let RuntimeEvent::WindowCreated {
+        window_id: created_id,
+        app_id: created_app,
+        ..
+    } = &created
+    else {
+        panic!("wait_for(window_created) returned {created:?}");
+    };
+    let id = *created_id;
+    assert_eq!(
+        created_app.as_ref(),
+        Some(&app),
+        "the creation event must belong to the toplevel this peer mapped"
+    );
+
+    // Barrier, part 2: the window's own commit counter reaching `MAPPING_COMMIT_SEQ` proves the
+    // commit that mapped it was dispatched — the compositor emits the creation before the
+    // commit, so this is the frame that mapped the window, not a later one.
+    events
+        .wait_for(
+            DEADLINE,
+            "the surface_commit that maps the toplevel this peer maps",
+            |event| {
+                matches!(
+                    event,
+                    RuntimeEvent::SurfaceCommit { window_id, commit_seq, .. }
+                        if *window_id == id && *commit_seq >= MAPPING_COMMIT_SEQ
+                )
+            },
+        )
+        .await?;
+
     let snapshot = query_state(runtime).await?;
     let info = snapshot
         .windows
         .iter()
         .find(|info| info.app_id.as_ref() == Some(&app))
         .unwrap_or_else(|| panic!("the mapped toplevel for {app} is listed, got {snapshot:?}"));
+    assert_eq!(
+        info.id, id,
+        "the window the model reports for {app} is the window its mapping commit created"
+    );
     assert!(info.mapped, "a committed toplevel is mapped: {info:?}");
     assert_eq!(
         info.geometry,
@@ -151,9 +232,12 @@ async fn map_peer(runtime: &TestRuntime, app_id: &str, title: &str) -> Result<Pe
 /// compositor demands before accepting a selection — goes to the newest toplevel, so the
 /// owner maps last and is the focused client when it publishes. The snapshot is asserted
 /// here so no test can silently start from a different focus state.
-async fn two_peers(runtime: &TestRuntime) -> Result<(Peer, Peer)> {
-    let reader = map_peer(runtime, READER_APP_ID, "Clipboard reader").await?;
-    let owner = map_peer(runtime, OWNER_APP_ID, "Clipboard owner").await?;
+///
+/// `events` must be a tap installed before either map: both [`map_peer`] barriers await events
+/// of the mapping commit, and the broadcast does not replay.
+async fn two_peers(runtime: &TestRuntime, events: &mut EventAssert) -> Result<(Peer, Peer)> {
+    let reader = map_peer(runtime, events, READER_APP_ID, "Clipboard reader").await?;
+    let owner = map_peer(runtime, events, OWNER_APP_ID, "Clipboard owner").await?;
 
     let snapshot = query_state(runtime).await?;
     assert_eq!(
@@ -243,7 +327,8 @@ async fn give_input_serial(runtime: &TestRuntime, peer: &Peer, position: Positio
 /// it produces: one connection's requests are dispatched in order, so observing the commit
 /// proves every earlier request of `peer` — the `set_selection` included — was already
 /// dispatched. `expected_commit_seq` is the per-window commit counter that commit must reach
-/// ([`map_peer`] commits the mapping frame, so the first barrier commit is `2`).
+/// ([`map_peer`] commits the mapping frame at `MAPPING_COMMIT_SEQ`, so the first barrier commit
+/// is `2`).
 async fn publish(
     peer: &Peer,
     events: &mut EventAssert,
@@ -286,9 +371,10 @@ async fn teardown(peers: Vec<Peer>, runtime: TestRuntime) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    // Tap before the publication: the barrier commit's `SurfaceCommit` event cannot be replayed.
+    // Tap before the maps: both barriers (each `map_peer`'s mapping commit and `publish`'s
+    // publication commit) await their own `SurfaceCommit` event, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
-    let (owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime, &mut events).await?;
 
     assert_eq!(
         reader.client.selection_offer_count(),
@@ -327,9 +413,10 @@ async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    // Tap before the first publication: the barrier commit's event cannot be replayed.
+    // Tap before the maps: the mapping barrier and the publication barrier both await
+    // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
-    let (owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime, &mut events).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
@@ -374,9 +461,10 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    // Tap before the publication: the barrier commit's event cannot be replayed.
+    // Tap before the maps: the mapping barrier and the publication barrier both await
+    // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
-    let (owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime, &mut events).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
@@ -406,9 +494,10 @@ async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    // Tap before the first publication: the barrier commit's event cannot be replayed.
+    // Tap before the maps: the mapping barrier and the publication barrier both await
+    // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
-    let (owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime, &mut events).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
@@ -451,9 +540,10 @@ async fn no_runtime_event_carries_clipboard_payload() -> Result<()> {
     const SECRET: &str = "adesk-clipboard-secret-8c41f2";
 
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    // Tap before anything happens: the event broadcast does not replay.
+    // Tap before anything happens: neither the mapping barrier's nor the publication barrier's
+    // `surface_commit` event is replayed by the broadcast.
     let mut events = EventAssert::tap(&runtime);
-    let (owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime, &mut events).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, SECRET.as_bytes(), 2).await?;
