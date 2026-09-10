@@ -34,6 +34,9 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
 - §4 (protocol.md:97-100) says `image` is `null` when no image was requested, but the server also returns `null` when an image was requested and no window is renderable (`crates/adesk-server/src/dispatch/capture.rs:186-189`); the doc does not state that case.
 - Popups are never explicitly excluded from `list_windows`; they surface only via `WindowInfo.popup_count` (protocol.md:81) and popup events/observation counters, not as `WindowInfo` entries.
 - `Observation.elapsed_ms` has no defined start point, and `launch_app`'s `args` placement relative to the expanded `Exec` line is unstated.
+- `activate_window` response timing is unspecified: §5.3 (protocol.md:135-137) says it mutates compositor state directly but never states whether the response awaits applied activation/focus (WM state, seat keyboard focus, data-device focus, `WindowActivated`/`FocusChanged` emission) or is fire-and-forget, and no doc advises a barrier request (`get_focus`, `list_windows`, `observe`) to confirm it.
+- Per-connection request ordering is documented only for input actions (protocol.md:191-192); architecture.md:230-232 says other requests are handled concurrently, so whether a request pipelined after `activate_window` observes its effect is unstated.
+- Publishing a clipboard/data-device selection after activation is unmentioned in every doc; `wl_data_device_manager` appears only as one line in the v1 protocol list (architecture.md:211).
 
 ## Routing Table
 
