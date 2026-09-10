@@ -56,5 +56,7 @@ Integration tests in `./tests/`, no display/GPU/network/socket:
 ## Notes for Agents
 - The framing (NDJSON, one object per line, 32 MiB cap) belongs to the transport, not this crate; `encode_*` return line-ready strings without a trailing newline (mirror `adesk-proto::encode_frame`).
 - Do not add `ImageFormat`-style closed enums without a catch-all: the viewer must stay forward-compatible.
+- Reconcile two `docs/viewer.md` (normative) vs this-surface differences before implementing: §3 defines the `state` message as `active_window_id`, `windows`, `focus`, but the `DesktopState` type here omits `focus`; and §8 describes the codec as `encode`/`decode` "over bytes" while the surface here is `String`-based (`str` in, `String` out). `docs/viewer.md` wins on the wire shape.
+- The `key` message field is named `state` in `docs/viewer.md` §4 but `action: KeyAction` in the `ClientMessage::Key` variant here — pick one name and keep `docs/viewer.md` §4 as the wire truth.
 ## Status
 Skeleton only: `src/lib.rs` carries the crate attributes and docs; every module above is **not yet implemented**. Implement the surface exactly as documented here.
