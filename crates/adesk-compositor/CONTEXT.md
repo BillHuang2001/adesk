@@ -34,7 +34,7 @@ Commands and replies:
 - `RuntimeCommand` — `docs/architecture.md` §3 plus `NoteLaunch` (compositor-side launch-ledger bookkeeping for `launch_app`) and `ReserveSeq` (silent `seq` allocation for server-synthesized events): `RenderWindow`, `RenderOutput`, `QueryState`, `NoteLaunch`, `ReserveSeq`, `ActivateWindow`, `CloseWindow`, `PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`, `Shutdown`.
 - Every result-bearing variant carries its own `tokio::sync::oneshot::Sender<adesk_core::Result<T>>`; `QueryState` replies `StateSnapshot` infallibly; `NoteLaunch` acknowledges `()` infallibly; `ReserveSeq` replies the next `seq` (`u64`) infallibly; `Shutdown` acknowledges `()`.
 - `RuntimeCommand::method() -> &'static str` is the stable tracing span name.
-- `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `len()`, `is_empty()`.
+- `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `is_empty()`.
 - `RenderedFrame { image: ImageBuffer, commit_seq: u64, damage: Vec<Rect> }` + `new()`, `size()`.
 
 Input vocabulary:
