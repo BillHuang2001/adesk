@@ -60,7 +60,8 @@ use std::time::{Duration, Instant};
 use adesk_client::{Client, ClientError};
 use adesk_compositor::{CompositorConfig, RendererKind};
 use adesk_core::{ErrorCode, Size};
-use adesk_server::{RunningServer, Server, ServerConfig, ServerContext, ServerError};
+use adesk_server::{RunningServer, Server, ServerConfig, ServerContext, ServerError, ViewerConfig};
+use adesk_viewer::{ViewerClient, ViewerTarget};
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -177,13 +178,61 @@ fn isolated_env() -> RuntimeDir {
     RuntimeDir::new(lock)
 }
 
+/// Chainable pre-start configuration for a [`TestRuntime`]'s viewer (VAP v1)
+/// endpoint.
+///
+/// A runtime binds its viewer at start, so the viewer must be chosen *before*
+/// [`TestRuntimeBuilder::start`] runs. The builders mirror
+/// [`adesk_server::ServerConfig`]'s own `with_viewer*` methods; the baseline
+/// ([`ViewerConfig::default`]) enables the endpoint at the AGP socket's sibling
+/// path, so a plain [`TestRuntime::start`] already serves VAP.
+#[derive(Debug, Clone, Default)]
+pub struct TestRuntimeBuilder {
+    /// The viewer endpoint the started runtime will bind.
+    viewer: ViewerConfig,
+}
+
+impl TestRuntimeBuilder {
+    /// Replaces the viewer endpoint configuration wholesale.
+    pub fn with_viewer(mut self, viewer: ViewerConfig) -> TestRuntimeBuilder {
+        self.viewer = viewer;
+        self
+    }
+
+    /// Enables the viewer endpoint on an explicit Unix socket path.
+    pub fn with_viewer_socket(mut self, path: impl Into<PathBuf>) -> TestRuntimeBuilder {
+        self.viewer.socket_path = Some(path.into());
+        self.viewer.enabled = true;
+        self
+    }
+
+    /// Disables the viewer endpoint entirely.
+    pub fn without_viewer(mut self) -> TestRuntimeBuilder {
+        self.viewer.enabled = false;
+        self
+    }
+
+    /// Starts the baseline runtime with this viewer configuration applied.
+    ///
+    /// # Panics
+    ///
+    /// Panics exactly like [`TestRuntime::start_with`] when the runtime cannot
+    /// start, including a viewer socket that cannot be bound (e.g. a live socket
+    /// already occupying the explicit path).
+    pub fn start(self) -> TestRuntime {
+        TestRuntime::start_with(move |config| config.with_viewer(self.viewer))
+    }
+}
+
 /// A live `adesk-server` runtime plus everything a test needs to drive it.
 ///
 /// Created with [`TestRuntime::start`] (pixman, 1280x720, no app dirs),
-/// [`TestRuntime::start_with`] (override any part of that baseline) or
-/// [`TestRuntime::start_with_app_dirs`] (fixture `.desktop` dirs). Dropping the
-/// guard shuts the runtime down, restores `XDG_RUNTIME_DIR` and removes the
-/// temp dir — even when the test panics.
+/// [`TestRuntime::start_with`] (override any part of that baseline),
+/// [`TestRuntime::start_with_app_dirs`] (fixture `.desktop` dirs) or a
+/// [`TestRuntimeBuilder`] from [`TestRuntime::builder`] /
+/// [`TestRuntime::without_viewer`] (configure the viewer endpoint first).
+/// Dropping the guard shuts the runtime down, restores `XDG_RUNTIME_DIR` and
+/// removes the temp dir — even when the test panics.
 pub struct TestRuntime {
     /// Owns the async executor; every `block_on*` helper drives it.
     runtime: tokio::runtime::Runtime,
@@ -254,11 +303,55 @@ impl TestRuntime {
         TestRuntime::start_with(move |config| config.with_app_dirs(dirs))
     }
 
+    /// Chainable viewer configuration for a runtime that has not started yet:
+    /// `TestRuntime::builder().with_viewer_socket(path).start()`.
+    pub fn builder() -> TestRuntimeBuilder {
+        TestRuntimeBuilder::default()
+    }
+
+    /// Builder shorthand for [`TestRuntimeBuilder::with_viewer`].
+    pub fn with_viewer(viewer: ViewerConfig) -> TestRuntimeBuilder {
+        TestRuntimeBuilder::default().with_viewer(viewer)
+    }
+
+    /// Builder shorthand for [`TestRuntimeBuilder::with_viewer_socket`].
+    pub fn with_viewer_socket(path: impl Into<PathBuf>) -> TestRuntimeBuilder {
+        TestRuntimeBuilder::default().with_viewer_socket(path)
+    }
+
+    /// Builder shorthand for [`TestRuntimeBuilder::without_viewer`].
+    pub fn without_viewer() -> TestRuntimeBuilder {
+        TestRuntimeBuilder::default().without_viewer()
+    }
+
     /// The AGP socket the runtime listens on.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
+    /// The viewer (VAP v1) Unix socket this runtime bound, or `None` when the
+    /// endpoint is disabled ([`TestRuntime::without_viewer`]).
+    pub fn viewer_socket_path(&self) -> Option<&Path> {
+        self.running.viewer_socket_path()
+    }
+
+    /// The private `XDG_RUNTIME_DIR` this runtime owns.
+    ///
+    /// This is the directory the compositor's Wayland socket lives in, so it is
+    /// the `runtime_dir` argument of
+    /// `adesk_testkit::WaylandTestClient::connect_in`.
+    pub fn runtime_dir(&self) -> &Path {
+        &self.env.path
+    }
+
+    /// The compositor's Wayland display socket name (`None` before it is ready).
+    ///
+    /// `Server::start` awaits readiness, so this is `Some` for any started
+    /// runtime; it is the `display_name` argument of
+    /// `adesk_testkit::WaylandTestClient::connect_in`.
+    pub fn wayland_display_name(&self) -> Option<String> {
+        self.running.compositor().wayland_display_name()
+    }
     /// The live server handle (compositor, observer, registry, context).
     pub fn running(&self) -> &RunningServer {
         &self.running
@@ -329,6 +422,61 @@ impl TestRuntime {
                 path.display()
             ),
         }
+    }
+
+    /// Connects a typed [`ViewerClient`] to the runtime's viewer (VAP v1) socket.
+    ///
+    /// The connect and its handshake are bounded by [`REQUEST_TIMEOUT`] through
+    /// [`TestRuntime::block_on_timeout`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the viewer endpoint is disabled, or with the full
+    /// `adesk_viewer::ViewerError` if the connect or handshake fails.
+    pub fn connect_viewer(&self) -> ViewerClient {
+        let path = self.viewer_socket_path_or_panic().to_path_buf();
+        match self.block_on_timeout(ViewerClient::connect(ViewerTarget::Unix(path.clone()))) {
+            Ok(client) => client,
+            Err(error) => panic!(
+                "E2E harness: ViewerClient::connect({}) failed: {error:?}",
+                path.display()
+            ),
+        }
+    }
+
+    /// Connects a raw NDJSON [`RawClient`] to the viewer (VAP v1) socket.
+    ///
+    /// Use it to observe VAP traffic the typed client hides — an `error` frame
+    /// that answers an undeliverable input, or a hand-written wire message — and
+    /// to check that the connection stays open afterwards. The bytes are VAP
+    /// NDJSON (`adesk_viewer_proto::encode_client` / `decode_server`), not AGP:
+    /// [`RawClient`] is only a Unix-socket NDJSON pipe.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the viewer endpoint is disabled or the socket cannot be
+    /// connected.
+    pub fn connect_viewer_raw(&self) -> RawClient {
+        let path = self.viewer_socket_path_or_panic().to_path_buf();
+        match self.block_on_timeout(RawClient::connect(&path)) {
+            Ok(raw) => raw,
+            Err(error) => panic!(
+                "E2E harness: raw viewer connect to {} failed: {error}",
+                path.display()
+            ),
+        }
+    }
+
+    /// The viewer socket path, panicking with a clear message when the endpoint
+    /// is disabled.
+    fn viewer_socket_path_or_panic(&self) -> &Path {
+        self.viewer_socket_path().unwrap_or_else(|| {
+            panic!(
+                "E2E harness: the viewer (VAP v1) endpoint is disabled; start the runtime \
+                 with the default viewer configuration (`TestRuntime::start`) or \
+                 `TestRuntime::builder()`"
+            )
+        })
     }
 
     /// Shuts the runtime down and waits for the ordered teardown; idempotent.

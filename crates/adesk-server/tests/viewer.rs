@@ -1,0 +1,518 @@
+//! Viewer (VAP v1) endpoint suite (`docs/viewer.md`, `crates/adesk-server/CONTEXT.md`
+//! → `src/viewer/`).
+//!
+//! Coverage:
+//!
+//! | Test | Contract asserted |
+//! |---|---|
+//! | [`handshake_reports_the_protocol_output_and_renderer`] | §2 handshake: `protocol_version == PROTOCOL_VERSION`, `output == the 1280x720 virtual output`, renderer `pixman` |
+//! | [`request_frame_returns_a_full_output_png_and_a_strictly_increasing_seq`] | §4/§5 `request_frame` renders the whole output as PNG (the bytes' own `IHDR` agrees with the payload) and each frame reserves a strictly greater `seq` from the single global counter |
+//! | [`request_state_on_an_empty_runtime_reports_no_windows`] | §4 `request_state` on a runtime with no client: `active_window_id: null`, `windows: []` |
+//! | [`viewer_input_reaches_the_active_toplevel_through_the_seat`] | §4/§5 the important one: with a real `WaylandTestClient` toplevel activated over AGP, a viewer `pointer_button` and `key` each answer an `input_ack` with a real `ActionId`, and the *client* observes the delivered input in its own `wl_pointer`/`wl_keyboard` history (the AGP §5.5 seat path, no viewer-only shortcut) |
+//! | [`without_viewer_keeps_the_agp_endpoint_and_binds_no_viewer_socket`] | `without_viewer()`: `viewer_socket_path()` is `None`, no viewer socket file exists beside the AGP socket, AGP still serves and the runtime shuts down cleanly |
+//! | [`shutdown_removes_the_viewer_socket_and_a_new_runtime_can_rebind_the_path`] | teardown removes the viewer *and* AGP socket files, and a fresh runtime binds the very same viewer path (`with_viewer_socket`) |
+//! | [`input_without_a_toplevel_answers_a_vap_error_and_keeps_the_connection`] | §6 an input with no active window is answered with a VAP `error` (`invalid_request`) — not a disconnect — and the connection stays usable |
+//!
+//! `adesk-testkit` is a dev-dependency for exactly one reason: viewer input carries
+//! **no `window_id`** (§4/§5) and targets the runtime's *active* window, so a viewer
+//! input can only be delivered when a toplevel exists — which needs a real Wayland
+//! client. `adesk_testkit::WaylandTestClient::connect_in` connects the in-repo test
+//! client to the runtime's own display inside the harness's private
+//! `XDG_RUNTIME_DIR`. Every test is display/GPU/network-free: the runtime always
+//! uses the pixman renderer and a private temp socket.
+//!
+//! Wayland-client calls (`commit`, `roundtrip`, `pump`) block, so they stay
+//! **outside** `block_on`; every wait is deadline-bounded ([`DEADLINE`]), never a
+//! sleep.
+
+mod common;
+
+use std::time::Duration;
+
+use adesk_client::Client;
+use adesk_core::{Button, ButtonState, Size, WindowId};
+use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
+use adesk_testkit::{
+    ButtonState as RecordedButtonState, FillPattern, KeyState as RecordedKeyState, KeyboardEvent,
+    PointerEvent, ToplevelSpec, WaylandTestClient, BTN_LEFT, KEY_C, KEY_LEFTCTRL,
+};
+use adesk_viewer_proto::{encode_client, ClientMessage, KeyAction, ViewerHello, PROTOCOL_VERSION};
+use futures::StreamExt;
+
+use common::{expect_ok, output_size, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH};
+
+/// Every bounded wait and deadline in this file.
+const DEADLINE: Duration = Duration::from_secs(10);
+
+/// `app_id` of the toplevel the input test maps.
+const APP_ID: &str = "org.example.adesk.viewer";
+
+/// The normalized output centre a viewer input targets (the window is tiled to
+/// fill the output, so an output fraction always lands inside it).
+const CENTRE: (f64, f64) = (0.5, 0.5);
+
+/// §2 handshake: the server reports its protocol version, the virtual output and
+/// the renderer it selected.
+#[test]
+fn handshake_reports_the_protocol_output_and_renderer() {
+    let runtime = TestRuntime::start();
+    let client = runtime.connect_viewer();
+
+    let hello = client.hello();
+    assert_eq!(
+        hello.protocol_version, PROTOCOL_VERSION,
+        "the runtime speaks VAP v1: {hello:?}"
+    );
+    assert_eq!(
+        hello.output,
+        output_size(),
+        "the handshake reports the virtual output the harness started ({}x{})",
+        OUTPUT_WIDTH,
+        OUTPUT_HEIGHT
+    );
+    assert_eq!(
+        hello.renderer,
+        RendererKind::Pixman,
+        "the harness starts the runtime with the software renderer: {hello:?}"
+    );
+    assert!(
+        !hello.runtime_version.is_empty(),
+        "the handshake carries the runtime version for diagnostics: {hello:?}"
+    );
+
+    runtime
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+}
+
+/// §4/§5 `request_frame`: the rendered desktop is a PNG of exactly the output size
+/// (the encoded bytes say so, not just the payload's own fields), and each frame's
+/// `seq` comes from the single global monotonic counter.
+#[test]
+fn request_frame_returns_a_full_output_png_and_a_strictly_increasing_seq() {
+    let runtime = TestRuntime::start();
+    let client = runtime.connect_viewer();
+
+    let first = runtime
+        .block_on_timeout(client.request_frame())
+        .expect("the runtime answers request_frame");
+    assert!(
+        first.seq > 0,
+        "a frame's seq is reserved from the compositor counter, never the watermark: {first:?}"
+    );
+    assert_eq!(
+        first.active_window_id, None,
+        "no client connected here, so no window is active: {first:?}"
+    );
+    assert_eq!(
+        (first.image.width, first.image.height),
+        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        "the frame covers the whole virtual output"
+    );
+    assert_eq!(
+        png_size(&first.image),
+        (OUTPUT_WIDTH, OUTPUT_HEIGHT),
+        "the PNG's own IHDR carries the output size"
+    );
+
+    let second = runtime
+        .block_on_timeout(client.request_frame())
+        .expect("the runtime answers a second request_frame");
+    assert!(
+        second.seq > first.seq,
+        "frame seq is strictly increasing ({} then {}): frames reserve their \
+         number from the compositor's central counter",
+        first.seq,
+        second.seq
+    );
+
+    runtime
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+}
+
+/// §4 `request_state` on a runtime with no Wayland client: no active window, no
+/// windows at all.
+#[test]
+fn request_state_on_an_empty_runtime_reports_no_windows() {
+    let runtime = TestRuntime::start();
+    let client = runtime.connect_viewer();
+
+    let state = runtime
+        .block_on_timeout(client.request_state())
+        .expect("the runtime answers request_state");
+    assert_eq!(
+        state.active_window_id, None,
+        "no client mapped a window: {state:?}"
+    );
+    assert!(
+        state.windows.is_empty(),
+        "the desktop metadata lists no windows: {state:?}"
+    );
+
+    runtime
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+}
+
+/// §4/§5 end to end: viewer input goes through the **seat** (the same path AGP §5.5
+/// uses), so a real Wayland client observes it.
+///
+/// A viewer input carries no `window_id`, so it can only be delivered when a
+/// toplevel exists and is the runtime's active window — hence the
+/// `WaylandTestClient` plus the awaited AGP `activate_window` barrier.
+#[test]
+fn viewer_input_reaches_the_active_toplevel_through_the_seat() {
+    let mut runtime = TestRuntime::start();
+    let display = runtime
+        .wayland_display_name()
+        .expect("Server::start awaits compositor readiness, so the display name is known");
+    let wayland = WaylandTestClient::connect_in(runtime.runtime_dir(), &display)
+        .unwrap_or_else(|error| panic!("connect the Wayland test client to `{display}`: {error}"));
+
+    // Map one toplevel with a committed buffer so the runtime has a real window.
+    // `create_toplevel`/`commit_frame` flush; the configure wait never blocks the
+    // test thread on anything but the deadline, so this stays outside `block_on`.
+    let window = wayland
+        .create_toplevel(ToplevelSpec::new(
+            APP_ID,
+            "Viewer input",
+            Size::new(320, 200),
+        ))
+        .expect("the runtime accepts a toplevel");
+    window
+        .wait_for_configure(DEADLINE)
+        .expect("the tiling policy configures the mapped toplevel");
+    window
+        .apply_configure()
+        .expect("the configure is acknowledged");
+    window
+        .commit_frame(FillPattern::default())
+        .expect("the toplevel commits a buffer");
+
+    // The runtime must know the window before an AGP activation can name it.
+    let agp = runtime.connect();
+    let window_id = wait_for_the_first_window(&runtime, &agp);
+
+    // An *awaited* `activate_window` response is a full activation barrier
+    // (protocol §5.3): the WM active window, the seat's keyboard focus and the
+    // data-device focus are applied and the client sockets are flushed. So the
+    // viewer input below has a deterministic target.
+    let _ = expect_ok(
+        runtime.block_on_timeout(agp.activate_window(window_id)),
+        "activate_window on the mapped toplevel",
+    );
+
+    // Seat readiness: the client creates its `wl_pointer` and `wl_keyboard` from
+    // the same `wl_seat.capabilities` event, so a delivered keymap means both
+    // seat objects exist for an injection to reach.
+    wayland
+        .wait_for_keyboard_event(
+            DEADLINE,
+            "wl_keyboard.keymap",
+            |event| matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0),
+        )
+        .expect("the seat delivers the keymap to the client");
+
+    let viewer = runtime.connect_viewer();
+
+    // --- pointer input -------------------------------------------------------
+    // Input is fire-and-forget and the ack fan-out is a broadcast channel, so the
+    // ack stream is subscribed *before* the input is sent; otherwise the ack
+    // could already have been fanned out and missed.
+    let (pointer_id, pointer_action) = runtime
+        .block_on_timeout(async {
+            // `input_ack()` returns a non-`Unpin` stream, so it is boxed to poll it.
+            let mut acks = Box::pin(viewer.input_ack());
+            viewer
+                .pointer_button(Button::Left, ButtonState::Pressed, Some(CENTRE))
+                .await
+                .expect("the viewer pointer_button is written");
+            acks.next().await
+        })
+        .expect("the runtime acknowledges the viewer pointer input");
+    assert_eq!(pointer_id, None, "VAP input carries no client id");
+    assert!(
+        pointer_action.0 > 0,
+        "a viewer input records a real AGP action id, got {pointer_action:?}"
+    );
+    // The delivery proof: the *client* observes the move and the press in its own
+    // `wl_pointer` history, so the input really travelled through the seat.
+    wayland
+        .wait_for_pointer_event(
+            DEADLINE,
+            "the viewer pointer move lands on the mapped toplevel",
+            |event| {
+                matches!(
+                    event,
+                    PointerEvent::Enter { .. } | PointerEvent::Motion { .. }
+                )
+            },
+        )
+        .expect("the client observes the viewer's pointer move through the seat");
+    wayland
+        .wait_for_pointer_button(BTN_LEFT, RecordedButtonState::Pressed, DEADLINE)
+        .expect("the client observes the viewer's pointer press through the seat");
+
+    // --- keyboard input ------------------------------------------------------
+    // A chord tap is the keyboard input that deterministically delivers a press
+    // *and* a release through the seat (the compositor brackets a chord tap);
+    // it is also what proves the modifier arrives before the key it modifies.
+    let chord = KeySpec::Chord(vec!["CTRL".to_owned(), "C".to_owned()]);
+    let (key_id, key_action) = runtime
+        .block_on_timeout(async {
+            // `input_ack()` returns a non-`Unpin` stream, so it is boxed to poll it.
+            let mut acks = Box::pin(viewer.input_ack());
+            viewer
+                .key(chord, KeyAction::Tap)
+                .await
+                .expect("the viewer key is written");
+            acks.next().await
+        })
+        .expect("the runtime acknowledges the viewer key input");
+    assert_eq!(key_id, None, "VAP input carries no client id");
+    assert!(
+        key_action.0 > pointer_action.0,
+        "each viewer input allocates a fresh ActionId: {pointer_action:?} then {key_action:?}"
+    );
+    wayland
+        .wait_for_key(KEY_LEFTCTRL, RecordedKeyState::Pressed, DEADLINE)
+        .expect("the client observes the chord's modifier press");
+    wayland
+        .wait_for_key(KEY_C, RecordedKeyState::Pressed, DEADLINE)
+        .expect("the client observes the chord's key press");
+    wayland
+        .wait_for_key(KEY_C, RecordedKeyState::Released, DEADLINE)
+        .expect("the client observes the chord's key release");
+    wayland
+        .wait_for_key(KEY_LEFTCTRL, RecordedKeyState::Released, DEADLINE)
+        .expect("the client observes the chord's modifier release");
+
+    runtime
+        .block_on_timeout(viewer.close())
+        .expect("the viewer connection closes cleanly");
+    runtime
+        .block_on(wayland.close())
+        .expect("the Wayland test client closes cleanly");
+    runtime.shutdown().expect("the runtime shuts down cleanly");
+}
+
+/// `without_viewer()`: the endpoint is not served at all, and nothing else changes.
+#[test]
+fn without_viewer_keeps_the_agp_endpoint_and_binds_no_viewer_socket() {
+    let mut runtime = TestRuntime::without_viewer().start();
+
+    assert_eq!(
+        runtime.viewer_socket_path(),
+        None,
+        "a disabled viewer endpoint exposes no socket path"
+    );
+    let sibling = runtime.socket_path().with_file_name("adesk-viewer.sock");
+    assert!(
+        !sibling.exists(),
+        "a disabled viewer endpoint must not create {}",
+        sibling.display()
+    );
+
+    // The AGP endpoint is unaffected: it still serves requests.
+    let client = runtime.connect();
+    let ping = expect_ok(
+        runtime.block_on_timeout(client.ping()),
+        "ping with the viewer disabled",
+    );
+    assert_eq!(
+        ping.protocol_version,
+        adesk_server::PROTOCOL_VERSION,
+        "the AGP handshake is unchanged by the viewer setting"
+    );
+
+    runtime
+        .shutdown()
+        .expect("the runtime shuts down cleanly with the viewer disabled");
+    assert!(
+        !runtime.socket_path().exists(),
+        "the AGP socket file is removed by teardown"
+    );
+}
+
+/// Teardown removes both socket files, and the viewer path is free for a new
+/// runtime.
+#[test]
+fn shutdown_removes_the_viewer_socket_and_a_new_runtime_can_rebind_the_path() {
+    // Outside the harness's `XDG_RUNTIME_DIR`: the point is that the *path* is
+    // released, not that the temp dir is recycled. The AGP socket stays in each
+    // runtime's own private runtime dir.
+    let sockdir = tempfile::TempDir::new().expect("temp dir for the shared viewer socket");
+    let viewer_path = sockdir.path().join("adesk-viewer.sock");
+
+    let mut first = TestRuntime::with_viewer_socket(&viewer_path).start();
+    assert_eq!(
+        first.viewer_socket_path(),
+        Some(viewer_path.as_path()),
+        "the explicit viewer socket path is the one the runtime bound"
+    );
+    assert!(
+        viewer_path.exists(),
+        "the viewer socket file exists while the runtime serves"
+    );
+    let agp_path = first.socket_path().to_path_buf();
+    let client = first.connect_viewer();
+    assert_eq!(
+        client.hello().protocol_version,
+        PROTOCOL_VERSION,
+        "the viewer endpoint bound at the explicit path serves the handshake"
+    );
+    first
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+
+    first
+        .shutdown()
+        .expect("the first runtime shuts down cleanly");
+    assert!(
+        !viewer_path.exists(),
+        "teardown removes the viewer socket file"
+    );
+    assert!(!agp_path.exists(), "teardown removes the AGP socket file");
+    // Releases the harness's process-wide environment lock before the second
+    // runtime starts (never two live `TestRuntime`s in one test).
+    drop(first);
+
+    let mut second = TestRuntime::with_viewer_socket(&viewer_path).start();
+    assert_eq!(
+        second.viewer_socket_path(),
+        Some(viewer_path.as_path()),
+        "a fresh runtime binds the very same viewer socket path"
+    );
+    let client = second.connect_viewer();
+    assert_eq!(
+        client.hello().output,
+        output_size(),
+        "the runtime that rebound the viewer path serves the handshake"
+    );
+    second
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+    second
+        .shutdown()
+        .expect("the second runtime shuts down cleanly");
+}
+
+/// §6: an undeliverable input (`invalid_request` once no window is active) is a VAP
+/// `error`, and the connection stays usable afterwards.
+///
+/// The typed `ViewerClient` surfaces server errors only to an in-flight
+/// `request_*`, so the raw wire is how this case is observed: the handshake is sent
+/// by hand and the error frame is read directly.
+#[test]
+fn input_without_a_toplevel_answers_a_vap_error_and_keeps_the_connection() {
+    let runtime = TestRuntime::start();
+    let mut raw = runtime.connect_viewer_raw();
+
+    runtime
+        .block_on_timeout(raw.send_line(&encode_client(&ClientMessage::Hello(ViewerHello::new()))));
+    let hello = runtime.block_on_timeout(raw.expect_json(DEADLINE));
+    assert_eq!(
+        hello["type"], "hello",
+        "the handshake is answered before anything else: {hello}"
+    );
+
+    // No Wayland client ever connected, so no window is active: the runtime must
+    // answer `error` rather than dropping the connection.
+    let input = encode_client(&ClientMessage::PointerButton {
+        button: Button::Left,
+        state: ButtonState::Pressed,
+        x: Some(CENTRE.0),
+        y: Some(CENTRE.1),
+    });
+    runtime.block_on_timeout(raw.send_line(&input));
+    let error = runtime
+        .block_on_timeout(raw.expect_json_matching(DEADLINE, |value| value["type"] == "error"));
+    assert_eq!(
+        error["code"], "invalid_request",
+        "an input with no active window is an invalid_request, never a disconnect: {error}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "the error carries a human-readable message: {error}"
+    );
+
+    // The connection is still usable: the next request is answered normally.
+    runtime
+        .block_on_timeout(raw.send_line(&encode_client(&ClientMessage::RequestState { id: None })));
+    let state = runtime
+        .block_on_timeout(raw.expect_json_matching(DEADLINE, |value| value["type"] == "state"));
+    assert!(
+        state["active_window_id"].is_null(),
+        "no window is active: {state}"
+    );
+    assert_eq!(
+        state["windows"].as_array().map(Vec::len),
+        Some(0),
+        "the desktop metadata lists no windows: {state}"
+    );
+}
+
+/// Polls AGP `list_windows` until the runtime has registered a window, returning
+/// its id.
+///
+/// The Wayland client's commit is asynchronous with respect to the server's own
+/// bookkeeping, so the id is awaited rather than assumed; the poll is
+/// deadline-bounded ([`common::eventually`]), never a sleep.
+fn wait_for_the_first_window(runtime: &TestRuntime, client: &Client) -> WindowId {
+    let mut found: Option<WindowId> = None;
+    let registered = common::eventually(DEADLINE, || {
+        let list = runtime
+            .block_on_timeout(client.list_windows())
+            .expect("list_windows is answered while the runtime serves");
+        found = list.windows.first().map(|window| window.id);
+        found.is_some()
+    });
+    assert!(
+        registered,
+        "the runtime must register the toplevel the Wayland client mapped"
+    );
+    found.expect("`registered` is only true once a window was found")
+}
+
+/// The width and height declared by a PNG payload's `IHDR` chunk.
+///
+/// The runtime encodes frames as PNG, so the size has to be read out of the
+/// encoded bytes: trusting `ImagePayload::width`/`height` alone would not prove the
+/// image actually decodes to the output size.
+///
+/// # Panics
+///
+/// Panics when the payload is not a PNG or its bytes are not a well-formed PNG
+/// header — a failure here is the assertion, not an infrastructure error.
+fn png_size(payload: &ImagePayload) -> (u32, u32) {
+    assert_eq!(
+        payload.format,
+        ImageFormat::Png,
+        "the viewer frame is a PNG payload: {payload:?}"
+    );
+    let bytes = payload
+        .decode_data()
+        .expect("the payload data is valid base64");
+    // Signature (8) + length (4) + type (4) + width (4) + height (4).
+    assert!(
+        bytes.len() >= 24,
+        "a PNG is at least a signature plus an IHDR chunk, got {} bytes",
+        bytes.len()
+    );
+    assert_eq!(
+        &bytes[..8],
+        b"\x89PNG\r\n\x1a\n",
+        "the decoded bytes carry the PNG signature"
+    );
+    assert_eq!(
+        &bytes[12..16],
+        b"IHDR",
+        "the first PNG chunk is IHDR (a decoder reads the size from it)"
+    );
+    let width = u32::from_be_bytes(bytes[16..20].try_into().expect("4 width bytes"));
+    let height = u32::from_be_bytes(bytes[20..24].try_into().expect("4 height bytes"));
+    (width, height)
+}
