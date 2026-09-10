@@ -31,6 +31,13 @@ adesk-app-registry.workspace = true
 adesk-inspector.workspace = true
 adesk-render.workspace = true
 adesk-wm.workspace = true
+# VAP v1 wire types (`adesk-viewer-proto`) and the viewer server session +
+# `ViewerBackend` seam (`adesk-viewer`): the viewer endpoint (`src/viewer/`)
+# implements the trait and hands it to `ViewerServer::serve`; the runtime never
+# reimplements protocol or session logic.
+adesk-viewer-proto.workspace = true
+adesk-viewer.workspace = true
+async-trait.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 image.workspace = true
@@ -42,8 +49,10 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # E2E suites in ./tests/ drive a live runtime through the typed client SDK on
-# temp sockets; wire-only cases use the suites' own NDJSON `RawClient`, so
-# `futures` is not needed here. Suites that need a Wayland client live in
-# adesk-testkit / adesk-agent — see ./tests/CONTEXT.md.
+# temp sockets; wire-only AGP cases use the suites' own NDJSON `RawClient`. The
+# viewer suite polls the typed `adesk_viewer::ViewerClient` streams (frames,
+# input acks), so it is the one place that needs `futures`. Suites that need a
+# Wayland client live in adesk-testkit / adesk-agent — see ./tests/CONTEXT.md.
 adesk-client.workspace = true
+futures.workspace = true
 tempfile.workspace = true
