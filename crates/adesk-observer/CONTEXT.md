@@ -31,7 +31,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Dependencies: `adesk-core`, `tokio` (sync/time), `thiserror`, `tracing` only; versions come from the root `[workspace.dependencies]`. Dev-only: `tokio` + `test-util`.
 - Never hold the state mutex across an `.await`. The only await points are `watch::Receiver::changed()` and `tokio::time::sleep_until`.
 - Never poll, never sleep in a loop, never spawn background tasks inside the service.
-- `handle_event` is on the hot path (`SurfaceCommit` at animation rates): counters, damage union, timestamps only — no rendering, no logging above `trace`.
+- `handle_event` is on the hot path (`SurfaceCommit` at animation rates): counters, `last_damage` replacement, timestamps only — no rendering, no logging above `trace`.
 - No panics on request/event paths; no `todo!()` anywhere in the crate.
 - Public API is what this file documents; everything else stays `pub(crate)`. Production code stays under ~1000 lines per file; cohesive inline test modules may exceed that (see Notes for Agents).
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`.
