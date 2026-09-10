@@ -46,8 +46,10 @@ pub mod socket;
 pub mod subscriptions;
 /// Bridges between sibling crates' overlapping types.
 pub mod translate;
+/// Viewer-facing VAP v1 endpoint (backend, transport binding, accept loops).
+pub mod viewer;
 
-pub use config::{default_socket_path, ServerConfig};
+pub use config::{default_socket_path, default_viewer_socket_path, ServerConfig, ViewerConfig};
 pub use context::ServerContext;
 pub use error::{Result, ServerError};
 pub use server::{RunningServer, Server};

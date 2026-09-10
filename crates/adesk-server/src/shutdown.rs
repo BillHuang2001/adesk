@@ -1,5 +1,5 @@
 //! Shutdown coordination: stop accepting, fail in-flight requests with
-//! `shutting_down`, drop the Wayland display, remove the socket file.
+//! `shutting_down`, drop the Wayland display, remove the socket files.
 //!
 //! [`crate::shutdown::ShutdownHandle`] is a watch-based token so every task can
 //! await cancellation without polling; [`crate::shutdown::run`] performs the
@@ -60,7 +60,7 @@ impl Default for ShutdownHandle {
 /// 1. flag shutdown and stop accepting new connections
 /// 2. fail in-flight requests with `shutting_down` and drain connection tasks
 /// 3. drop the Wayland display (`CompositorHandle::shutdown`)
-/// 4. remove the socket file
+/// 4. remove the AGP socket file and the viewer socket file when enabled
 ///
 /// Step 1 is the only thing this function needs to do for step 2: the accept
 /// loop, every connection task and every background pump hold a clone of the
@@ -91,8 +91,11 @@ pub async fn run(context: &ServerContext) -> Result<()> {
         Err(error) => first_error = Some(error.into()),
     }
 
-    // 4. Remove the socket file, so the path is free before `wait()` resolves.
+    // 4. Remove the socket files, so the paths are free before `wait()` resolves.
     remove_socket_file(&context.config.socket_path);
+    if let Some(viewer) = context.config.viewer_socket_path() {
+        remove_socket_file(&viewer);
+    }
 
     match first_error {
         Some(error) => {

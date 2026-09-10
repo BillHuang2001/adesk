@@ -1,6 +1,6 @@
 //! [`Server::start`] and the [`RunningServer`] handle.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
@@ -28,12 +28,13 @@ impl Server {
     /// 2. build the app registry (`scan()` on a blocking task) and correlator
     /// 3. bind the Unix socket (stale file replaced, live socket refused)
     /// 4. spawn the event pump (observer + fan-out + `QueryState` resync)
-    /// 5. spawn the accept loop; install SIGINT/SIGTERM handlers
+    /// 5. bind the viewer (VAP v1) endpoint when it is enabled
+    /// 6. spawn the accept loop; install SIGINT/SIGTERM handlers
     ///
     /// # Errors
     ///
     /// Returns [`ServerError::Compositor`] if the compositor cannot start,
-    /// [`ServerError::Io`] if the socket cannot be bound and
+    /// [`ServerError::Io`] if the AGP or viewer socket cannot be bound and
     /// [`ServerError::Registry`] if the registry cannot be built.
     pub async fn start(config: ServerConfig) -> Result<RunningServer, ServerError> {
         let config = Arc::new(config);
@@ -82,7 +83,11 @@ impl Server {
         );
         let _pump = crate::event_pump::spawn(context.clone());
 
-        // 5. Signal handlers + accept loop.
+        // 5. Viewer endpoint (VAP v1): bound before returning, so a returned
+        //    `RunningServer` means the viewer socket accepts connections too.
+        let viewer_socket_path = crate::viewer::start(&config, &context).await?;
+
+        // 6. Signal handlers + accept loop.
         crate::shutdown::install_signal_handlers(context.shutdown.clone()).await?;
         let (done_tx, done_rx) = watch::channel(false);
         spawn_accept_loop(listener, context.clone(), done_tx);
@@ -98,6 +103,7 @@ impl Server {
                 shutdown,
                 done: done_rx,
                 context,
+                viewer_socket_path,
             }),
         })
     }
@@ -176,12 +182,19 @@ struct RunningInner {
     context: ServerContext,
     shutdown: ShutdownHandle,
     done: tokio::sync::watch::Receiver<bool>,
+    viewer_socket_path: Option<PathBuf>,
 }
 
 impl RunningServer {
     /// The socket the server is listening on.
     pub fn socket_path(&self) -> &Path {
         &self.inner.config.socket_path
+    }
+
+    /// The viewer (VAP v1) Unix socket this runtime bound, if the endpoint is
+    /// enabled.
+    pub fn viewer_socket_path(&self) -> Option<&Path> {
+        self.inner.viewer_socket_path.as_deref()
     }
 
     /// Handle to the compositor thread.

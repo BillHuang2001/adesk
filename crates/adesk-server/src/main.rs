@@ -3,6 +3,7 @@
 //! Every flag has an `ADESK_*` environment fallback (`clap`'s `env`), so the
 //! binary is usable both from a shell and from a service unit.
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -44,6 +45,24 @@ struct Cli {
         value_delimiter = ':'
     )]
     apps_dir: Vec<PathBuf>,
+    /// Viewer (VAP v1) Unix socket path.
+    #[arg(
+        long = "viewer-socket",
+        env = "ADESK_VIEWER_SOCKET",
+        value_name = "PATH"
+    )]
+    viewer_socket: Option<PathBuf>,
+    /// Viewer (VAP v1) TCP listen address (opt-in), e.g. `127.0.0.1:7100`.
+    #[arg(
+        long = "viewer-tcp",
+        env = "ADESK_VIEWER_TCP",
+        value_name = "HOST:PORT",
+        value_parser = parse_socket_addr
+    )]
+    viewer_tcp: Option<SocketAddr>,
+    /// Disable the viewer (VAP v1) endpoint entirely.
+    #[arg(long = "no-viewer")]
+    no_viewer: bool,
     /// `tracing-subscriber` env-filter directive.
     #[arg(long, env = "ADESK_LOG", value_name = "FILTER", default_value = "info")]
     log: String,
@@ -101,7 +120,25 @@ fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
     if !cli.apps_dir.is_empty() {
         config = config.with_app_dirs(cli.apps_dir.clone());
     }
+    // The viewer endpoint is enabled by default; an explicit socket or TCP
+    // address opts into it, and `--no-viewer` wins over both.
+    if let Some(path) = &cli.viewer_socket {
+        config = config.with_viewer_socket(path);
+    }
+    if let Some(addr) = cli.viewer_tcp {
+        config = config.with_viewer_tcp(addr);
+    }
+    if cli.no_viewer {
+        config = config.without_viewer();
+    }
     Ok(config)
+}
+
+/// Parses `HOST:PORT` with a friendlier message than the standard `SocketAddr` error.
+fn parse_socket_addr(value: &str) -> std::result::Result<SocketAddr, String> {
+    value.trim().parse::<SocketAddr>().map_err(|_| {
+        format!("invalid socket address `{value}`: expected HOST:PORT (e.g. 127.0.0.1:7100)")
+    })
 }
 
 /// Installs the global `tracing-subscriber` with the given filter.
@@ -130,6 +167,9 @@ mod tests {
             xkb_model: None,
             xkb_rules: None,
             apps_dir: Vec::new(),
+            viewer_socket: None,
+            viewer_tcp: None,
+            no_viewer: false,
             log: "info".to_owned(),
         }
     }
@@ -186,5 +226,58 @@ mod tests {
             config.app_dirs,
             Some(vec![PathBuf::from("/opt/apps"), PathBuf::from("/srv/apps")])
         );
+    }
+
+    #[test]
+    fn viewer_is_enabled_by_default_on_the_agp_sibling() {
+        let config = build_config(&cli()).unwrap();
+        assert!(config.viewer.enabled);
+        assert_eq!(
+            config.viewer_socket_path(),
+            Some(adesk_server::config::viewer_socket_sibling(
+                &adesk_server::default_socket_path()
+            ))
+        );
+    }
+
+    #[test]
+    fn viewer_socket_flag_overrides_the_derived_path() {
+        let mut cli = cli();
+        cli.viewer_socket = Some(PathBuf::from("/tmp/explicit-viewer.sock"));
+        let config = build_config(&cli).unwrap();
+        assert!(config.viewer.enabled);
+        assert_eq!(
+            config.viewer_socket_path(),
+            Some(PathBuf::from("/tmp/explicit-viewer.sock"))
+        );
+    }
+
+    #[test]
+    fn no_viewer_disables_the_endpoint_even_with_an_explicit_socket() {
+        let mut cli = cli();
+        cli.viewer_socket = Some(PathBuf::from("/tmp/explicit-viewer.sock"));
+        cli.viewer_tcp = Some("127.0.0.1:7100".parse().unwrap());
+        cli.no_viewer = true;
+        let config = build_config(&cli).unwrap();
+        assert!(!config.viewer.enabled);
+        assert_eq!(config.viewer_socket_path(), None);
+    }
+
+    #[test]
+    fn viewer_tcp_flag_is_recorded() {
+        let mut cli = cli();
+        cli.viewer_tcp = Some("127.0.0.1:7100".parse().unwrap());
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.viewer.tcp, Some("127.0.0.1:7100".parse().unwrap()));
+    }
+
+    #[test]
+    fn socket_addr_parser_reports_the_expected_shape() {
+        assert_eq!(
+            parse_socket_addr("127.0.0.1:7100").unwrap(),
+            "127.0.0.1:7100".parse::<SocketAddr>().unwrap()
+        );
+        let error = parse_socket_addr("7100").unwrap_err();
+        assert!(error.contains("HOST:PORT"), "{error}");
     }
 }

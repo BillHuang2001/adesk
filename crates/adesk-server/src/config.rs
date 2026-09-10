@@ -3,6 +3,7 @@
 //! [`ServerConfig`] is the single input of [`crate::Server::start`]; `adesk-testkit`
 //! constructs it directly, the `adesk-server` binary builds it from CLI flags.
 
+use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 
 use adesk_compositor::{CompositorConfig, RendererKind, XkbSettings};
@@ -21,6 +22,33 @@ pub struct ServerConfig {
     pub compositor: CompositorConfig,
     /// Extra `.desktop` search directories; `None` means the XDG default set.
     pub app_dirs: Option<Vec<PathBuf>>,
+    /// Viewer (VAP v1) endpoint configuration.
+    pub viewer: ViewerConfig,
+}
+
+/// Viewer (VAP v1) endpoint configuration.
+///
+/// The endpoint is enabled by default and binds the sibling of the AGP socket
+/// ([`viewer_socket_sibling`]); an explicit `socket_path` overrides that and
+/// `tcp` adds an optional second transport.
+#[derive(Debug, Clone)]
+pub struct ViewerConfig {
+    /// Whether the viewer endpoint is served at all.
+    pub enabled: bool,
+    /// Explicit Unix socket path; `None` derives the sibling of the AGP socket.
+    pub socket_path: Option<PathBuf>,
+    /// Optional TCP listener address (`None` = Unix socket only).
+    pub tcp: Option<SocketAddr>,
+}
+
+impl Default for ViewerConfig {
+    fn default() -> ViewerConfig {
+        ViewerConfig {
+            enabled: true,
+            socket_path: None,
+            tcp: None,
+        }
+    }
 }
 
 impl Default for ServerConfig {
@@ -29,6 +57,7 @@ impl Default for ServerConfig {
             socket_path: default_socket_path(),
             compositor: CompositorConfig::default(),
             app_dirs: None,
+            viewer: ViewerConfig::default(),
         }
     }
 }
@@ -43,6 +72,7 @@ impl ServerConfig {
             socket_path: socket_path.into(),
             compositor,
             app_dirs: None,
+            viewer: ViewerConfig::default(),
         }
     }
 
@@ -82,9 +112,47 @@ impl ServerConfig {
         self
     }
 
+    /// Replaces the viewer (VAP v1) endpoint configuration wholesale.
+    pub fn with_viewer(mut self, viewer: ViewerConfig) -> ServerConfig {
+        self.viewer = viewer;
+        self
+    }
+
+    /// Enables the viewer endpoint on an explicit Unix socket path.
+    pub fn with_viewer_socket(mut self, path: impl Into<PathBuf>) -> ServerConfig {
+        self.viewer.socket_path = Some(path.into());
+        self.viewer.enabled = true;
+        self
+    }
+
+    /// Adds a TCP listener to the viewer endpoint.
+    pub fn with_viewer_tcp(mut self, addr: SocketAddr) -> ServerConfig {
+        self.viewer.tcp = Some(addr);
+        self
+    }
+
+    /// Disables the viewer endpoint entirely.
+    pub fn without_viewer(mut self) -> ServerConfig {
+        self.viewer.enabled = false;
+        self
+    }
+
     /// The socket path this configuration will bind.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
+    }
+
+    /// The viewer Unix socket path this configuration will bind, or `None` when
+    /// the viewer endpoint is disabled: the explicit override if set, else the
+    /// sibling of `self.socket_path`.
+    pub fn viewer_socket_path(&self) -> Option<PathBuf> {
+        if !self.viewer.enabled {
+            return None;
+        }
+        Some(match &self.viewer.socket_path {
+            Some(path) => path.clone(),
+            None => viewer_socket_sibling(&self.socket_path),
+        })
     }
 }
 
@@ -104,6 +172,35 @@ pub fn default_socket_path() -> PathBuf {
         return PathBuf::from(dir).join("adesk.sock");
     }
     std::env::temp_dir().join("adesk.sock")
+}
+
+/// The default viewer Unix socket path: the sibling of [`default_socket_path`].
+///
+/// Note that this deliberately does **not** read `$ADESK_VIEWER_SOCKET`; the
+/// binary maps that variable onto `--viewer-socket`, which overrides the
+/// derived path through [`ServerConfig::with_viewer_socket`].
+pub fn default_viewer_socket_path() -> PathBuf {
+    viewer_socket_sibling(&default_socket_path())
+}
+
+/// Derives the viewer socket path beside the AGP socket `agp_socket_path`.
+///
+/// `…/adesk.sock` → `…/adesk-viewer.sock`: the file stem gains a `-viewer`
+/// suffix; directory and extension are preserved. A path with no file name (or
+/// an empty stem) yields `adesk-viewer.sock` in the same directory.
+pub fn viewer_socket_sibling(agp_socket_path: &Path) -> PathBuf {
+    let name = match agp_socket_path.file_stem().and_then(|stem| stem.to_str()) {
+        Some(stem) if !stem.is_empty() => {
+            let mut name = format!("{stem}-viewer");
+            if let Some(extension) = agp_socket_path.extension() {
+                name.push('.');
+                name.push_str(&extension.to_string_lossy());
+            }
+            name
+        }
+        _ => "adesk-viewer.sock".to_owned(),
+    };
+    agp_socket_path.with_file_name(name)
 }
 
 /// Parses an `WxH` output size for `--output` (e.g. `1280x800`).
@@ -286,5 +383,96 @@ mod tests {
 
         let replaced = config.with_socket_path("/tmp/other.sock");
         assert_eq!(replaced.socket_path(), Path::new("/tmp/other.sock"));
+    }
+
+    #[test]
+    fn viewer_socket_sibling_suffixes_the_file_stem() {
+        assert_eq!(
+            viewer_socket_sibling(Path::new("/run/user/1000/adesk.sock")),
+            PathBuf::from("/run/user/1000/adesk-viewer.sock")
+        );
+    }
+
+    #[test]
+    fn viewer_socket_sibling_preserves_the_directory() {
+        assert_eq!(
+            viewer_socket_sibling(Path::new("/tmp/nested/deeper/adesk.sock")),
+            PathBuf::from("/tmp/nested/deeper/adesk-viewer.sock")
+        );
+    }
+
+    #[test]
+    fn viewer_socket_sibling_preserves_the_extension() {
+        // The suffix goes on the stem, so a multi-dot name keeps its last
+        // extension: `adesk.v2` + `.sock` → `adesk.v2-viewer.sock`.
+        assert_eq!(
+            viewer_socket_sibling(Path::new("/tmp/adesk.v2.sock")),
+            PathBuf::from("/tmp/adesk.v2-viewer.sock")
+        );
+        assert_eq!(
+            viewer_socket_sibling(Path::new("/run/desk.custom")),
+            PathBuf::from("/run/desk-viewer.custom")
+        );
+    }
+
+    #[test]
+    fn viewer_socket_sibling_handles_a_path_without_a_file_name() {
+        // No file name (or an empty stem): the canonical default name in the
+        // same directory.
+        assert_eq!(
+            viewer_socket_sibling(Path::new("")),
+            PathBuf::from("adesk-viewer.sock")
+        );
+        assert_eq!(
+            viewer_socket_sibling(Path::new("/")),
+            PathBuf::from("/adesk-viewer.sock")
+        );
+    }
+
+    #[test]
+    fn viewer_socket_path_is_none_when_disabled() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_viewer_socket("/tmp/explicit.sock")
+            .without_viewer();
+        assert_eq!(config.viewer_socket_path(), None);
+    }
+
+    #[test]
+    fn viewer_socket_path_prefers_an_explicit_override() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_viewer_socket("/tmp/explicit.sock");
+        assert!(config.viewer.enabled);
+        assert_eq!(
+            config.viewer_socket_path(),
+            Some(PathBuf::from("/tmp/explicit.sock"))
+        );
+    }
+
+    #[test]
+    fn viewer_socket_path_defaults_to_the_agp_sibling() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default());
+        assert!(config.viewer.enabled);
+        assert_eq!(
+            config.viewer_socket_path(),
+            Some(PathBuf::from("/tmp/test-viewer.sock"))
+        );
+        assert_eq!(
+            viewer_socket_sibling(config.socket_path()),
+            PathBuf::from("/tmp/test-viewer.sock")
+        );
+    }
+
+    #[test]
+    fn viewer_tcp_is_recorded_independently_of_the_unix_path() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_viewer_tcp("127.0.0.1:7100".parse().unwrap());
+        assert_eq!(config.viewer.tcp, Some("127.0.0.1:7100".parse().unwrap()));
+        assert_eq!(
+            config.viewer_socket_path(),
+            Some(PathBuf::from("/tmp/test-viewer.sock"))
+        );
+
+        let disabled = config.without_viewer();
+        assert_eq!(disabled.viewer_socket_path(), None);
     }
 }

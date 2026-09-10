@@ -49,7 +49,8 @@ pub(crate) async fn state(server: &ServerContext) -> Result<StateSnapshot> {
 /// `seq` has one global monotonic domain covering compositor- **and**
 /// server-emitted events (`docs/protocol.md` §1), and the compositor owns the
 /// only counter. Server-synthesized events (`AppLaunched` §5.2, `inspect_frame`
-/// §5.7) therefore take their `seq` from here instead of deriving it from the
+/// §5.7, the viewer's `ViewerFrame` §5.7 of `docs/viewer.md`) therefore take
+/// their `seq` from here instead of deriving it from the
 /// observed watermark: the reservation advances the shared counter and emits
 /// nothing, so a later compositor event can never reuse the number. Gaps are
 /// allowed (a reserved number may go unused), reuse is not.
@@ -60,7 +61,7 @@ pub(crate) async fn state(server: &ServerContext) -> Result<StateSnapshot> {
 /// compositor drops the reply — `ReserveSeq` is infallible, so a dropped reply
 /// can only mean the compositor thread is gone, i.e. the runtime is shutting
 /// down (`crates/adesk-server/CONTEXT.md`, error mapping).
-pub(super) async fn reserve_seq(server: &ServerContext) -> Result<u64> {
+pub(crate) async fn reserve_seq(server: &ServerContext) -> Result<u64> {
     let (reply, answer) = oneshot::channel();
     server
         .compositor

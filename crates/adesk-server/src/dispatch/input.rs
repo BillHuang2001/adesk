@@ -331,9 +331,6 @@ pub(crate) async fn window_rect(server: &ServerContext, window_id: WindowId) -> 
 /// point is obtained by resolving the fraction against the output rect and is
 /// then expressed window-relative as pixels, so `Position::resolve(window)`
 /// recovers that output point for a window that fills the output.
-// The VAP viewer endpoint (`docs/viewer.md` §4) is the only intended caller;
-// nothing on the AGP path uses it yet, so the non-test build would flag it.
-#[allow(dead_code)]
 pub(crate) fn output_fraction_position(x: f64, y: f64, output: Size, window: Rect) -> Position {
     let point = Position::normalized(x, y).resolve(Rect {
         x: 0,
