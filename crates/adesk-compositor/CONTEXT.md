@@ -252,7 +252,8 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Dependencies
 
 - Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`create_target`/`render_scene`/readback/image conversion`); dev-dependency `adesk-testkit` (in-process runtime, Wayland test client, image assertions — used only by the crate-local integration suites).
-- External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `wayland-server 0.31`; `calloop 0.14`; `tokio 1` (sync/rt/time/net); `thiserror 2`; `tracing 0.1`; `libc 0.2`.
+- External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `calloop 0.14`; `tokio 1` (sync/rt/time/net — used in `src`, not only tests); `thiserror 2`; `tracing 0.1`.
+- Declared but unused by this crate's `src`/`tests` (`Cargo.toml:21` `libc`, `Cargo.toml:32` `wayland-server`): every `wayland_server` path is reached through `smithay::reexports::wayland_server` (never the direct crate name), and no `libc::` symbol is referenced anywhere in the crate — both lines are removal candidates, but removal touches the workspace dep graph, so treat as a deliberate cleanup, not a drive-by.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.
 
@@ -267,5 +268,6 @@ Hazards:
 - A Wayland socket needs a writable `XDG_RUNTIME_DIR`; the ambient one is read-only here, so tests must install a temp dir (see Test Strategy).
 - `WaylandTestClient::roundtrip()` is not a `wl_display.sync` barrier (it flushes and waits one reader poll cycle); to order an assertion after a client request, commit on the same connection and await the resulting `surface_commit` event (see the late-app-id test in `window_lifecycle.rs`).
 - Never log pixel payloads or clipboard bytes.
+- The GL gate in `src/render/headless.rs:398` is a hand-rolled `std::env::var("ADESK_TEST_GL").as_deref() != Ok("1")` check: it accepts only the literal `"1"`, whereas the sibling harness `adesk_testkit::gl_enabled` accepts `"1"`/`"true"`/`"TRUE"`. A non-`"1"` truthy value therefore skips the lib test while the `adesk-testkit` suites would run it. The duplication cannot be collapsed naively: `headless.rs` is lib code and `adesk-testkit` is only a dev-dependency.
 - `PointerButton`/`PointerAxis` reply `Ok(())` whenever any window is active but are silently dropped unless a prior `PointerMove` established pointer focus (Smithay's default grab sends only to the focused surface; initial pointer focus is `None`), so e2e tests must move before clicking or scrolling.
 - The compositor must never grow quiet/timer semantics: observation belongs to `adesk-observer`, which the server feeds.
