@@ -75,6 +75,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | `RunReport` artifact | `./src/report.rs` |
 | `Error`, `ProviderError`, error classification | `./src/error.rs` |
 | Socket-free fake client (test scaffolding) | `./src/testing.rs` |
+| Shared char-counted truncation helper | `./src/text.rs` |
 | CLI wiring | `./src/main.rs` |
 | Fixture application the launch tests start (example, gated on `e2e`) | `./examples/adesk-e2e-app.rs` |
 | Loop/budget/recovery tests | `./tests/agent_loop.rs` |
