@@ -20,7 +20,8 @@ Everything a test needs to pretend an application is installed and launch it: `.
 - `write_raw` rejects absolute paths but does not resolve `..`: relative paths must stay inside the share root by caller discipline (`write_entry` rejects escaping stems before writing).
 - Every process wait is deadline-bounded; `TestApp::exit` kills on deadline and returns the resulting (signal) status, so callers must assert `status.success()`.
 - Integration tests of this package may also use `env!("CARGO_BIN_EXE_adesk-test-app")`.
-- **No exec-path override.** `TestAppSpec::desktop_entry` and `TestApp::spawn` hard-code `helper_bin_path("adesk-test-app")` (`HELPER_APP`); no public constructor takes a caller-supplied program path, and `TestAppSpec::with_arg` only appends arguments. A downstream crate that needs its own fixture binary must compose the `DesktopEntryFixture` by hand (its `exec` field is public) and register it via `FixtureDir::write_entry` + `TestRuntimeConfig::with_fixture_dir`, then launch it over AGP instead of `TestApp::spawn`.
+- **Exec-path override.** `TestAppSpec::with_exec` sets the fixture program; `TestAppSpec::exec` reports it (`None` by default). Both program-resolution sites — `TestAppSpec::desktop_entry` (`mod.rs:504`) and `TestApp::spawn` (`mod.rs:554`) — fall back to `helper_bin_path("adesk-test-app")` (`HELPER_APP`, `mod.rs:68`) when the spec carries no program, so a downstream crate can run its own fixture binary as the program without hand-composing a `DesktopEntryFixture`. `TestAppSpec::with_arg` only appends helper arguments and never changes the program.
+- **`TestAppSpec::title` is the window title.** It defaults to the app id and `with_title` overrides it; it is what `desktop_entry` writes as `Name`.
 
 ## Notes for Agents
 
