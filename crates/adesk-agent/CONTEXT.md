@@ -5,8 +5,8 @@
 It is a prototype: its purpose is to demonstrate and *measure* the agent loop (actions per task, GPU readbacks, visual tokens, decision latency, failure/recovery rates), not to be a general agent framework.
 Invariants it upholds: runtime-native operations are never synthesized input; observations carry causal history via `after_action`; pixels are fetched only on demand; the LLM never receives a frame history.
 Status: Phase 2 complete — zero `todo!()`, zero `#[ignore]`, zero skeleton `#[allow]`; crate-wide `cargo fmt --check` and `clippy -D warnings` clean.
-Tests: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` = 80 passed / 0 failed / 0 ignored (60 with default features; the loop and scenario suites are feature-gated).
-The only unimplemented surface is `tests/e2e_runtime.rs`: a feature-gated (`e2e`) plan with no test bodies, waiting on the not-yet-landed `adesk-testkit` (Phase 3/4).
+Tests: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` = 80 passed / 0 failed / 0 ignored (60 with default features; the loop and scenario suites are feature-gated); `--features e2e` adds 14 real-runtime end-to-end tests (`tests/e2e_runtime.rs`).
+The capstone e2e suite is implemented: it drives `AgpClient` and `AgentLoop` against a live in-process runtime (pixman, no display/GPU/network) through `adesk-testkit`; `adesk-testkit` and `image` are workspace dev-dependencies. The suite is self-contained on a fresh checkout: its fixture application ships as this package's own `examples/adesk-e2e-app.rs`, which `cargo test --features e2e` builds, so no pre-built testkit helper is required.
 
 ## API Surface
 Flat re-exports at the crate root; the module list below is the authoritative surface.
@@ -65,11 +65,13 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | `Error`, `ProviderError`, error classification | `./src/error.rs` |
 | Socket-free fake client (test scaffolding) | `./src/testing.rs` |
 | CLI wiring | `./src/main.rs` |
+| Fixture application the launch tests start (example, gated on `e2e`) | `./examples/adesk-e2e-app.rs` |
 | Loop/budget/recovery tests | `./tests/agent_loop.rs` |
 | Context cap tests | `./tests/context_budget.rs` |
 | Metrics semantics tests | `./tests/metrics.rs` |
 | Scenario tests | `./tests/scenarios.rs` |
-| E2E plan against a real runtime (feature `e2e`; no bodies until `adesk-testkit` lands) | `./tests/e2e_runtime.rs` |
+| E2E suite against a real runtime (feature `e2e`; 14 tests) | `./tests/e2e_runtime.rs` |
+| E2E shared helpers (module of the e2e target, no tests) | `./tests/e2e_support/mod.rs` |
 
 ## Design Decisions
 - Two seams, one direction: `AgentLoop` depends only on `AgentClient` (runtime) and `LlmProvider` (LLM); both are object-safe-ish traits so tests replace either side, and `AgpClient`/`OpenAiCompatProvider` are the only concrete adapters.
@@ -92,14 +94,16 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `AgpClient::connect` disables the SDK's post-connect version ping so `LoopConfig::validate_protocol_version` stays authoritative.
 
 ## Test Strategy
-- Command: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` — 80 tests: 44 lib unit, 10 `tests/agent_loop.rs`, 7 `tests/context_budget.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`.
-- Default features run 60 (loop/scenario suites are `#![cfg(feature = "test-support")]`); CI must pass the feature flag.
+- Canonical commands: `./scripts/dev.sh cargo test -p adesk-agent` (60), `... --features test-support` (80), `... --features e2e` (74 = 60 + 14 e2e).
+- `--features test-support` = 80 tests: 44 lib unit, 10 `tests/agent_loop.rs`, 7 `tests/context_budget.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`; default features run 60 (loop/scenario suites are `#![cfg(feature = "test-support")]`).
+- `--features e2e` runs `tests/e2e_runtime.rs`: 14 tests against a live in-process runtime (pixman) driving both `AgpClient` directly and `AgentLoop`/`ScenarioRunner` with `MockProvider`.
+- Prerequisite for the two launch tests: none. `cargo test --features e2e` builds the package's `adesk-e2e-app` example, and `e2e_support::fixture_app_bin()` resolves it at `target/<profile>/examples/adesk-e2e-app` (falling back to a pre-built testkit `adesk-test-app`); when neither exists the panic names both build commands (`cargo test -p adesk-agent --features e2e --no-run`, `cargo build -p adesk-agent --example adesk-e2e-app --features e2e`).
 - `./scripts/dev.sh cargo check -p adesk-agent --all-targets [--features test-support,e2e]` and `clippy -D warnings` are clean; `cargo run -p adesk-agent -- --help` documents the CLI and a missing target exits 2.
-- `tests/e2e_runtime.rs` — feature-gated plan with no test bodies until `adesk-testkit` lands; it will drive `AgpClient` against a real in-process runtime with the pixman renderer (Phase 3/4 integration).
 - No test needs a display, GPU, network or installed application; the OpenAI HTTP path is untested by design — its pure `build_chat_request`/`parse_decision` helpers carry the coverage.
 
 ## Notes for Agents
 - Always run tests with `--features test-support`.
+- `AgpClient` is neither `Clone` nor `Debug`, and `ScenarioRunner::run` takes the client by value: connect one `AgpClient` per scenario. `StepRecord` retains the step's `Observation` but not its image; image bytes are reachable only via a shared `MockProvider`'s recorded contexts (`Arc` + forwarding `LlmProvider`, pattern in `tests/agent_loop.rs`) or `ContextBuilder::build(..).image`. The `e2e` feature does not enable `test-support`; `Scenario`/`ScenarioRunner`/`MockProvider` are available with default features.
 - `ScriptedClient` is `Clone` (shared script + call log, because the loop takes the client by value) and panics BY DESIGN on exhausted or mismatched scripts; script one `ScriptedResponse` per client call in the loop's exact order (see Design Decisions).
 - `MockProvider` records a context on every `complete` call (including failed ones); an empty script substitutes the built-in dry run, so `remaining()` == 2 for "no script".
 - `adesk-client` API divergences are adapted in `agp.rs` only — do not "fix" `client.rs`: `list_apps(query, include_hidden)`, `PingInfo.renderer` is an enum mapped to `String`, SDK request types are by-value `#[non_exhaustive]` with a mandatory `format`, `keypress` needs a `KeyChord`.
@@ -107,4 +111,14 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `main.rs` defines a private `BoxedProvider` newtype because `async-trait` provides no blanket `impl LlmProvider for Box<dyn LlmProvider>`.
 - `ActionKind::as_str()` returns AGP method names (`capture_window`) while serde/metrics keys use `capture` — intentional, easy to trip over.
 - `src/report.rs` is the only module that touches the filesystem (`RunReport::write`, binary-only).
+- E2E wiring (`tests/e2e_runtime.rs`): the `e2e` feature gates the test file and the `adesk-e2e-app` example (Cargo has no optional dev-dependencies), so the `adesk-testkit` dev-dep is compiled for every `cargo test -p adesk-agent` and pulls in `adesk-server`/compositor — always run it under `./scripts/dev.sh`.
+- E2E helpers live in `tests/e2e_support/mod.rs`, included with `mod e2e_support;`: a module of the e2e target, never a test target; put new shared plumbing there, not in the test file.
+- E2E fixture app: `examples/adesk-e2e-app.rs` is an **example**, not a `[[bin]]`, because examples are built together with this package's dev-dependencies and land next to the test binary in `target/<profile>/examples/` (a bin cannot use dev-deps, and `CARGO_BIN_EXE_*` is package-local so it cannot see testkit's helper). Its CLI grammar is byte-compatible with `TestAppSpec::cli_args()`; `e2e_support::write_app` composes the `.desktop` entry itself (`DesktopEntryFixture::new(spec title, [fixture_app_bin(), spec.cli_args()...])`, `StartupWMClass` = app id) because testkit's `TestAppSpec::desktop_entry`/`TestApp::spawn` hardcode `helper_bin_path("adesk-test-app")`, which a downstream crate cannot redirect — recommend testkit expose an exec-path override or a reusable app runner in a follow-up.
+- When the runtime shuts down before the fixture app's `--exit-after` elapses, the app prints `adesk-e2e-app: warning: cannot destroy the toplevel ...`/`Broken pipe` teardown diagnostics to stderr (harmless, inherited by the test).
+- E2E env lock: env-scoped runtimes (`with_apply_env(true)`) hold a process-global tokio lock for their lifetime, so at most one is alive per process; the two launch tests therefore serialize and must `shutdown().await`.
+- E2E timing fixtures are spawned tasks (popup destroyed ≈400 ms, `set_title` ≈800 ms after the click) and the assertions scan every retained `Observation`, so they do not depend on which step catches the event; `TestWindow` and `TestPopup` are `Send`.
+- `image.workspace = true` in `[dev-dependencies]` exists only for decoding captured PNGs in the e2e suite.
+- E2E fixture requirement: the built-in scenario scripts hard-code window ids — `WindowId(1)` for click/type/scroll/dialog/navigation and the error_recovery retry, `WindowId(2)` for activate (a *second* toplevel, the "editor"), `WindowId(9)` as the stale id that must NOT exist; a real runtime assigns ids at map time, so a test must create toplevels in the order that yields them (or supply custom scenarios).
+- E2E launch fixture: the `launch` scenario scripts `AppId("org.example.files")` (query `"files"`) and a `Wait { quiet(250) }`, so the runtime needs a `.desktop` fixture with that id — `e2e_support::write_app(&fixtures, &TestAppSpec::new(LAUNCHED_APP_ID)...)` writes it against the bundled example; the capstone additionally asserts the launched pixels match the spec's `--fill`.
+- `AgentLoop::run(&mut self, task)` and `ScenarioRunner::run(&self, scenario, client)` are the two entry points a capstone test uses; `MockProvider` (not feature-gated) is the network-free provider.
 - Tooling: format individual files with `rustfmt --edition 2021 <file>` if a crate-wide `cargo fmt -p adesk-agent` would drag in unrelated drift; the crate is currently crate-wide `fmt --check` clean.

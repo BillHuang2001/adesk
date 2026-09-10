@@ -21,6 +21,17 @@ path = "src/lib.rs"
 name = "adesk-agent"
 path = "src/main.rs"
 
+# Fixture application for the `e2e` suite: the launch tests write a `.desktop` entry whose
+# `Exec` points at this example (an example, not a bin, because examples are built together
+# with this package's dev-dependencies and are resolved next to the test binary by
+# `tests/e2e_support/mod.rs`). Gated on `e2e` so the default and `test-support` builds
+# never compile it.
+
+[[example]]
+name = "adesk-e2e-app"
+path = "examples/adesk-e2e-app.rs"
+required-features = ["e2e"]
+
 [features]
 default = []
 # Compiles `adesk_agent::testing` (ScriptedClient), the socket-free fake used by
@@ -28,7 +39,8 @@ default = []
 #   cargo test -p adesk-agent --features test-support
 test-support = []
 # Gates end-to-end tests that drive a real runtime through `adesk-testkit`.
-# The `adesk-testkit` dev-dependency is added when that crate lands.
+# Canonical command:
+#   cargo test -p adesk-agent --features e2e
 e2e = []
 
 [dependencies]
@@ -45,3 +57,9 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+
+[dev-dependencies]
+# Real in-process runtime harness (compositor + AGP server) for `--features e2e`.
+# `image` decodes the PNG payloads the runtime returns in e2e assertions.
+adesk-testkit.workspace = true
+image.workspace = true

@@ -5,7 +5,7 @@
 `adesk-testkit` makes the whole ADesk runtime testable without a display, GPU, network or installed application.
 It is the only supported way to run ADesk end-to-end tests: an in-process runtime on private temp paths, a real Wayland protocol client, `.desktop` fixtures, a helper process, and deadline-bounded image/event assertions.
 **Dev-dependency target only** — no runtime crate may depend on it, and the `adesk-test-app` binary is never shipped.
-Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnings` are clean, and `cargo test -p adesk-testkit` passes except two tests blocked on sibling crates (see Known Issues).
+Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!()` bodies, and the full `cargo test -p adesk-testkit` suite passes under the dev shell (46 tests + 3 doctests, 0 failures, 0 ignored test functions).
 
 ## API Surface
 
@@ -53,7 +53,7 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 - **One pixel ground truth.** `FillPattern::at(x, y, size)` is evaluated both by the SHM writer and by `ImageAssert::matches_pattern`, so the client and the assertion can never disagree. Only opaque patterns are accepted (`require_opaque`), committed as Argb8888.
 - **No `libc`.** SHM is a `tempfile`-backed anonymous file written through `FileExt::write_all_at`; no `mmap` and no `unsafe`.
 - **`Drop` never blocks.** `TestRuntime::drop` sends `RuntimeCommand::Shutdown` synchronously and detached-spawns the graceful server shutdown inside the current tokio runtime; only `shutdown().await` observes errors or applies `shutdown_timeout`.
-- **Process env is explicit.** `TestRuntimeConfig::apply_env` (default on) scopes the env for the runtime's lifetime because the app registry launches children with `LaunchEnv::from_process()`; the hazard for parallel tests is documented in `src/env.rs`.
+- **Process env is explicit.** `TestRuntimeConfig::apply_env` (default on) scopes the env for the runtime's lifetime because a launched child's `XDG_RUNTIME_DIR` is read from the *server process* env (`adesk-server/src/dispatch/apps.rs` builds `LaunchEnv` from `std::env::var_os("XDG_RUNTIME_DIR")`); the hazard for parallel tests is documented in `src/env.rs`.
 - **Fixtures speak the registry's language.** Share roots (`with_fixture_dir`/`with_app_dirs`) are translated to `<root>/applications` before the server sees them because the registry derives app ids relative to each configured dir, and `Exec` arguments are quoted iff empty or containing ASCII whitespace/`"`/`\` so `adesk_app_registry`'s tokenizer returns them unchanged; both rules live in `src/runtime.rs`/`src/fixtures/mod.rs` module docs.
 - **Close is observed, never assumed.** The reader records `xdg_toplevel.close` in the window slot and the client keeps the surface alive, so `TestWindow::close_requested()` lets `tests/e2e_close.rs` prove the AGP `close_window` request path instead of inferring it from the window's disappearance.
 - **GL is opt-in and fails loudly.** `test_renderer()` returns `RendererKind::Gl` when `ADESK_TEST_GL=1`, so a broken GL setup fails instead of silently falling back to pixman.
@@ -65,7 +65,7 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 - Self-tests live in `tests/`: `runtime.rs` (start/stop, ping, renderer, drop), `wayland_client.rs` (toplevel appears in `list_windows` with the tiling configure, commit → `SurfaceCommit`, captured pixels match the fill, popups, resize), `fixtures.rs` (`.desktop` writing, launch path, helper process), `assertions.rs` (ImageAssert/EventAssert/`wait_until` self-checks), `api_surface.rs` (signature stability), `e2e_launch_observe.rs` (capstone: launch → observe → capture → input → close round trip) and `e2e_close.rs` (cooperating-client proof that `close_window` really sends `xdg_toplevel.close`).
 - Unit tests inside `src/assert/`, `src/fixtures/` and `src/bin/adesk-test-app.rs` cover the already-implemented plumbing.
-- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; two tests fail only because of sibling crates (see Known Issues).
+- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; the full suite passes (46 tests + 3 doctests, 0 failures) and no test is `#[ignore]`d or env-gated except the GL paths (which skip cleanly without `ADESK_TEST_GL=1`).
 - No test needs a display, GPU, network or installed app; the helper binary is built by cargo (`env!("CARGO_BIN_EXE_adesk-test-app")` is available to this package's integration tests).
 - Launch tests mutate the process env; the harness serializes env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 
@@ -76,10 +76,14 @@ Status: implemented — `src/` has no `todo!()`, `cargo check`/`clippy -D warnin
 
 ## Known Issues
 
-- `wayland_client::popup_appears_and_disappears` fails with `Timeout { what: "xdg configure" }`: `adesk-compositor`'s `XdgShellHandler::new_popup` (`crates/adesk-compositor/src/protocols/xdg_shell.rs`) never sends the initial `xdg_popup.configure`. Sibling blocker in `adesk-compositor`.
+- The module-level doc comments in the frozen acceptance specs (`tests/wayland_client.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/api_surface.rs`) still describe the Phase-1 skeleton ("bodies are `todo!()`", "expected to fail at runtime until Phase 2"); `tests/wayland_client.rs` also still claims `--test-threads=1` is required. Both are stale — the specs must not be edited, so ignore the comments.
 
 ## Notes for Agents
 
 - **`adesk-server` coupling**: `runtime.rs` is the only file that touches `ServerConfig`/`Server::start`/`RunningServer` (contract in its module docs); adapt only `TestRuntime::start_with`/`shutdown` when that contract changes.
+- **Consumer wiring**: the crate is declared once in the root `[workspace.dependencies]` (`Cargo.toml:31`); a consumer adds it under `[dev-dependencies]`. No crate does yet — `adesk-agent` reserves an `e2e` feature for this, but its `tests/e2e_runtime.rs` is a plan-only stub behind `#![cfg(feature = "e2e")]`.
+- **Launch needs `apply_env(true)`; a `WaylandTestClient` does not.** The server reads the *process* `XDG_RUNTIME_DIR` to build a launched child's env, so AGP `launch_app` only works while the runtime's env is applied (and the runtime then holds the process-env lock for its lifetime — a second env-scoped runtime in the same test fails with `Timeout` after `PROCESS_ENV_LOCK_TIMEOUT` = 60 s). `wayland_client()` connects by absolute path, so windows can be mapped with `apply_env(false)`, which releases the lock as soon as the server is up.
+- **Window ids are per-runtime, not per-test.** In a fresh `TestRuntime` the first mapped toplevel is `WindowId(1)` and the second `WindowId(2)` (counter in `adesk-wm`, allocated on the first buffer commit; nothing else consumes ids). Popups use a separate `u64` popup-id space, never a `WindowId`, and never appear in `list_windows` (only `WindowInfo.popup_count`); they surface as `PopupAppeared/Disappeared` events and `Observation.popups_appeared/disappeared` keyed to the owning window.
+- **Capture forms.** `TestRuntime::capture(id)` returns an unscaled RGBA8 `ImageBuffer` at the window's natural size; AGP `observe` attaches a PNG `ImagePayload` inside the observation (decode with `ObserveResult::decode_image()`), and `max_dimension` downscales by longest edge with half-up rounding, never upscaling.
 - `wayland/mod.rs` documents the reader-thread, lock-order and teardown rules; `wayland/shm.rs` documents the Argb8888 byte order; `wayland/state.rs` holds every `Dispatch` impl.
 - The frozen acceptance specs (`tests/api_surface.rs`, `tests/assertions.rs`, `tests/fixtures.rs`, `tests/runtime.rs`, `tests/wayland_client.rs`) must not be edited; add new behavior proof in new test files instead.

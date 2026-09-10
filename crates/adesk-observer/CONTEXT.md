@@ -13,7 +13,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Waits (async): `wait_for_change(WaitSpec)`, `wait_for_quiet(QuietSpec)`, `observe(ObserveSpec)`, all `-> Result<Observation>`.
 - Queries (sync, never wait): `snapshot() -> ObserverSnapshot`, `window_state(WindowId) -> Option<WindowTemporalState>`, `window_ids() -> Vec<WindowId>`, `watermark() -> u64`, `now_ms() -> u64`, `is_quiet(WindowId, quiet_ms) -> Option<bool>`.
 ### Specs (`src/spec.rs`)
-- `WaitSpec { window_id, since_commit, timeout_ms }`, `QuietSpec { window_id, quiet_ms, timeout_ms, after_action }`, `ObserveSpec { window_id, after_action, until, timeout_ms }`; all with `Default` (protocol defaults), `new()` and chainable setters.
+- `WaitSpec { window_id, since_commit, timeout_ms }`, `QuietSpec { window_id, quiet_ms, timeout_ms, after_action }`, `ObserveSpec { window_id, after_action, until, timeout_ms }`; all with `Default` (protocol defaults), `new()` and chainable setters; `ObserveSpec::default().until` is `Condition::Quiet { quiet_ms: 250 }`.
 - `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()`.
 - Image parameters (`include_image`, `region`, `max_dimension`) are deliberately absent: the server renders after the wait resolves.
 ### Actions (`src/actions.rs`)
@@ -55,11 +55,13 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 | End-to-end harness that drives this crate | `../adesk-testkit/` (sibling — read-only) |
 ## Design Decisions
 - **Cloneable facade, one `Arc<Inner>`.** The event-pump task and every request task share one service; no channels between them are needed for state, only the broadcast stream from the compositor.
+  Ingestion is push-only: the observer has no broadcast subscription of its own — `handle_event` (one event per call, in `seq` order) and `resync` (lag recovery) are its only ingestion points, both driven by the server.
 - **Wakeups via `tokio::sync::watch<u64>` generation counter**, not `Notify`: a waiter subscribes *before* inspecting state and re-checks after every `changed()`, so no wakeup can be lost and no condition can be missed. `handle_event` and `resync` bump it.
 - **Clock anchoring.** Event `ts_ms` is monotonic ms since *compositor* start; the observer starts later. `Clock` keeps `(anchor_ts_ms, tokio::time::Instant)` and re-anchors forward on every event/snapshot, so `now_ms()` lives in the event domain and deadlines are `tokio::time::sleep_until(clock.deadline(t))`. Under `tokio::time::pause()` the clock freezes at the last event timestamp — deterministic tests with no real sleeps.
 - **Journal of 4096 counted events** matches the broadcast capacity floor (`docs/architecture.md` §1): a waiter can always be seeded over the same horizon after which a lagging subscriber would be told `Lagged`. Per-window aggregates (`commit_count`, `last_commit_seq`, `last_commit_at`) stay exact after eviction; only filter-relative counts degrade, and `state_uncertain` marks the hole.
 - **`since_commit` filters commits only.** Lifecycle, title, focus and popup events are not commit-numbered and always count — a new window is a change even when `since_commit` is set.
 - **`after_action` is a `seq` watermark captured at record time** (the highest processed event seq when the server accepted the action), so `seq > action_seq` means "after the action was accepted". An unknown action id is `Error::UnknownAction` — the observer never guesses a causal point.
+- **No window filter is a global observation.** `window_id: None` is legal for every wait (never `UnknownWindow`): the wait counts events from all windows, echoes `window_id: None` in the `Observation`, and reports the global maximum as `last_commit_seq`; only an explicit `Some(id)` the observer never saw (or that was destroyed) errors. The `Observation` also echoes the requested `after_action` id verbatim (`None` when none was given).
 - **Wait-start filter point.** `Filters::min_seq` is `after_action.seq` when set, otherwise the watermark at wait start: waits without `after_action` count only events after the wait began (a seeded lifecycle event must not resolve them instantly), so journal seeding matters only for `after_action`/`since_commit`.
 - **Stale snapshots are ignored.** A `resync` whose `snapshot.seq < watermark` changes nothing (no pruning, no window removal, no backward watermark) and returns a report carrying the current watermark.
 - **Quiet timer anchor** = `max(after_action.ts_ms, last counted commit ts)`, so a wait right after an action does not resolve instantly, and every counted commit re-arms it.
@@ -91,6 +93,11 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
 - The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
 - `Clock::now_ms()` truncates to whole milliseconds, so a deadline can fire up to ~1 ms early — inherent to the event-ts domain, consistent with "quiet is evidence, never a promise".
+- Popups have no state of their own: `PopupAppeared`/`PopupDisappeared` are owner-window counted events and `WindowSnapshot::popup_count` is accepted by `resync` but ignored.
+  A popup-driven `SurfaceCommit` carries the owner's `window_id` with popup-relative damage, so it advances the owner's `commit_seq`/`commit_count`, re-arms `wait_for_quiet`, and its damage is clipped against the owner's geometry — damage from a popup outside the window can be clipped away or misattributed.
+- `FocusChanged { window_id: None }` is invisible to window-filtered waits (the filter requires `Some(window_id)`); when an unfiltered wait counts it, `Observation::focus_changed` becomes `Some(true)` even though no window received focus.
+- `last_meaningful_change_at` is updated by every counted non-commit event but is not read by any production code path; it exists for server/inspector state queries only.
+- A window-scoped event for an unknown window (commit, title, activation, popup, focus) creates its `WindowTemporalState` on demand, so `window_ids()`/`snapshot()` can contain a window the observer never saw a `WindowCreated` for; a later `resync` removes it if the snapshot does not cover it.
 ## Status
 Phase 2 (implementation) complete — zero `todo!()` in the crate; every module body, wait loop, resync path and frozen spec body is implemented.
 Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets -- -D warnings` clean; `cargo test -p adesk-observer` → 125 passed, 0 failed, 0 ignored (85 lib unit + 5 api_surface + 34 frozen specs + 1 doctest).
@@ -99,6 +106,11 @@ Skeleton-phase module-level `#![allow(dead_code)]` blocks are gone; only `tests/
 - `src/service.rs` is ~838 production lines plus a ~990-line cohesive inline test module; the single-file layout is deliberate (one state machine, one lock, tests next to the code they pin). Do not split it to satisfy the ~1000-line soft threshold.
 - Item-level `#[allow(dead_code)]` remains on `Clock::until` and `EventJournal::oldest_seq` — test-only accessors; remove them only together with the tests that use them.
 - Waiters are cancellation-safe and `Send`: dropping the future unregisters the `PendingGuard`; never add a code path that registers a waiter without holding the guard.
+- `adesk_core::Observation` has **no `ts_ms` field**: resolution time is `elapsed_ms` (from the wait start) plus the `seq`/`last_commit_seq` watermarks. The crate exposes no event-history API; `snapshot()` returns counts only (`journal_len`, `events_dropped`).
+- `WaitSpec` has no `after_action`; action-correlated change waits use `ObserveSpec::new(Condition::Change).after_action(id)`.
+- Window-filtered `Observation::last_commit_seq` is the window's *absolute* commit watermark (non-zero even when `commits == 0`); unfiltered it is the global max across windows.
+- An already-quiet window does not resolve `wait_for_quiet` instantly: with no counted commit in the filter the anchor is the wait start (or the action `ts_ms`), so resolution is `anchor + quiet_ms` — or immediate with `quiet: false` when `after_action` is already older than `quiet_ms`.
+- `Observation::quiet` is the evidence flag above, *not* "condition met": `docs/protocol.md` §5.4 and the field's doc in `adesk-core` phrase it as the latter, but a timed-out `change` wait can legitimately carry `quiet: true`.
 ## Dependencies
 - `adesk-core` (landed): `RuntimeEvent`, `Observation`, `WindowId`, `ActionId`, `Position`, `Rect`, `Region`, `Error`/`ErrorCode`.
 - `tokio`: `sync` (`watch`), `time` (`Instant`, `sleep_until`); dev-only `test-util` for paused time.
