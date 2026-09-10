@@ -110,13 +110,19 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **105 passed / 0 failed / 0 ignored** (53 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
+## Known Issues
+- `capture::write_rgba8` is public and re-exported but has no caller anywhere in the workspace (only its own unit tests); `save_frame_png` and `FrameWriter` are the capture helpers the binary actually uses.
+- The `adesk-viewer` binary reads only `ADESK_LOG`; it has no `ADESK_VIEWER_SOCKET`/`ADESK_VIEWER_TCP` fallback and derives `$XDG_RUNTIME_DIR/adesk-viewer.sock` itself, so it cannot follow a runtime started with `--viewer-socket` unless `--unix` is passed. Those env vars exist only on `adesk-server`'s CLI.
+- `Cargo.toml` declares `serde` but no source file references it; the only JSON use is `serde_json` in `main.rs` overlay-name parsing.
+- `capture::tight_rgba8` (row de-padding) duplicates `adesk-server::images::tightly_packed`, and `capture::encode_rgba8_png` overlaps `adesk-server::images::encode_png`.
+
 ## Notes for Agents
 - The server session owns no transport: `serve` takes an already-connected stream; binding/accepting lives in `adesk-server`.
 - `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
 - `close()` can block up to the 250 ms grace only when the peer never answers; the happy path returns as soon as the server's `bye`/EOF arrives.
-- Implementing `ViewerBackend` is still pending in `adesk-server` (planned: `RenderOutput` full-output render through `adesk-server::images::encode_png` → `ImagePayload`, `CursorTracker` for the cursor, `QueryState` for the window list/active window, and the seat input helpers for `apply_input` returning an `ActionId`).
+- `adesk-server` is the real consumer: `crates/adesk-server/src/viewer/backend.rs` implements `ViewerBackend` (render via `inspection::refresh` + `images::encode_png`, state via `dispatch::windows::state`, input via the widened `pub(crate)` `dispatch::input` helpers) and `crates/adesk-server/src/viewer/listener.rs` binds the Unix/TCP transports and serves one `ViewerServer` per runtime.
 
 ## Status
 Implementation-complete, documented and tested: all modules, the client SDK and the headless binary are landed, and the crate's own test/clippy/fmt/doc gates are green (counts in Test Strategy).
-The viewer endpoint is not yet wired into the runtime — no `adesk-server` code references `adesk-viewer`/`ViewerBackend` yet, so nothing binds the transport or renders frames from the compositor; that integration is a separate task and is the only remaining work for an end-to-end viewer.
+`adesk-server` consumes the crate end to end: it implements `ViewerBackend`, binds both transports and serves the endpoint by default, and `crates/adesk-server/tests/` drives the typed `ViewerClient`, so the server session, `PeerInfo`, the config builders and the client SDK all have real callers.
