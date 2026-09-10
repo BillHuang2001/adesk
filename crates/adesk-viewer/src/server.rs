@@ -172,63 +172,18 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use adesk_core::Size;
-    use adesk_proto::{ImagePayload, RendererKind};
-    use adesk_viewer_proto::{ControlOwner, CursorState, DesktopState, ServerHello, ViewerFrame};
+    use crate::test_support::FakeBackend;
 
-    use crate::backend::{ChangeSignal, ViewerInput};
-
-    /// A minimal [`ViewerBackend`] for exercising the façade.
-    struct FakeBackend {
-        change: ChangeSignal,
-    }
-
-    #[async_trait::async_trait]
-    impl ViewerBackend for FakeBackend {
-        fn display(&self) -> ServerHello {
-            ServerHello {
-                protocol_version: adesk_viewer_proto::PROTOCOL_VERSION,
-                runtime_version: "0.1.0".to_owned(),
-                output: Size::new(8, 4),
-                renderer: RendererKind::Pixman,
-                cursor: CursorState::hidden(),
-                control: ControlOwner::Ai,
-            }
-        }
-
-        async fn render_frame(&self) -> Result<ViewerFrame> {
-            let data = vec![0u8; 8 * 4 * 4];
-            Ok(ViewerFrame {
-                seq: 1,
-                ts_ms: 0,
-                image: ImagePayload::from_rgba8(8, 4, &data, 1.0).expect("valid rgba8 payload"),
-                cursor: CursorState::hidden(),
-                active_window_id: None,
-            })
-        }
-
-        async fn desktop_state(&self) -> Result<DesktopState> {
-            Ok(DesktopState {
-                active_window_id: None,
-                windows: Vec::new(),
-            })
-        }
-
-        async fn apply_input(&self, _input: ViewerInput) -> Result<Option<adesk_core::ActionId>> {
-            Ok(None)
-        }
-
-        fn change_signal(&self) -> ChangeSignal {
-            self.change.clone()
-        }
-    }
-
+    /// A fake backend configured differently from the session-test default (an
+    /// `8x4` output reporting no action), so the façade is exercised over a
+    /// non-default [`ViewerBackend`] configuration.
     fn backend() -> Arc<FakeBackend> {
-        Arc::new(FakeBackend {
-            change: ChangeSignal::new(),
-        })
+        Arc::new(
+            FakeBackend::new()
+                .with_output_size(8, 4)
+                .with_action_id(None),
+        )
     }
-
     #[test]
     fn default_config_matches_the_protocol_defaults() {
         let config = ViewerServerConfig::default();
