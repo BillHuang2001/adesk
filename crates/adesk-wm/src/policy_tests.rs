@@ -14,9 +14,9 @@ use crate::config::PolicyConfig;
 use crate::error::Error;
 use crate::model::{MapRequest, SurfaceKey, WindowModel, WindowRecord};
 use crate::policy::{
-    activate, active_window, on_commit, on_destroy, on_map, on_output_size, on_popup_added,
-    on_popup_removed, on_title, require_window, resolve_position, window, window_by_surface,
-    window_info, windows,
+    activate, active_window, on_app_id, on_commit, on_destroy, on_map, on_output_size,
+    on_popup_added, on_popup_removed, on_title, require_window, resolve_position, window,
+    window_by_surface, window_info, windows,
 };
 
 fn default_config() -> PolicyConfig {
@@ -304,6 +304,99 @@ fn title_changes_update_the_record_and_return_no_actions() {
     );
     assert_eq!(on_title(&mut model, id, None), Vec::new());
     assert_eq!(window(&model, id).expect("record").title, None);
+    assert_invariants(&model, &config);
+}
+
+#[test]
+fn app_id_changes_update_the_record_and_return_no_actions() {
+    let config = default_config();
+    let mut model = WindowModel::new();
+    let id = map(&mut model, &config, 1);
+    assert_eq!(window_info(&model, id).expect("info").app_id, None);
+
+    assert_eq!(
+        on_app_id(&mut model, id, Some(AppId::from("org.kde.konsole"))),
+        Vec::new()
+    );
+    assert_eq!(
+        window(&model, id).expect("record").app_id,
+        Some(AppId::from("org.kde.konsole"))
+    );
+    assert_eq!(
+        window_info(&model, id).expect("info").app_id,
+        Some(AppId::from("org.kde.konsole"))
+    );
+    assert_eq!(
+        windows(&model)[0].info().app_id,
+        Some(AppId::from("org.kde.konsole"))
+    );
+
+    // A second change replaces the previous value.
+    assert_eq!(
+        on_app_id(&mut model, id, Some(AppId::from("org.gnome.Nautilus"))),
+        Vec::new()
+    );
+    assert_eq!(
+        window_info(&model, id).expect("info").app_id,
+        Some(AppId::from("org.gnome.Nautilus"))
+    );
+
+    // `None` clears the app id again.
+    assert_eq!(on_app_id(&mut model, id, None), Vec::new());
+    assert_eq!(window(&model, id).expect("record").app_id, None);
+    assert_eq!(window_info(&model, id).expect("info").app_id, None);
+    assert_invariants(&model, &config);
+}
+
+#[test]
+fn app_id_changes_have_no_policy_side_effects() {
+    let config = default_config();
+    let mut model = WindowModel::new();
+    let ids = map_windows(&mut model, &config, 2);
+    on_commit(&mut model, ids[0], 7, &Region::empty());
+    on_popup_added(&mut model, ids[0]);
+    let geometry = window(&model, ids[0]).expect("record").geometry;
+    let mru_before = model.mru.clone();
+
+    assert_eq!(
+        on_app_id(&mut model, ids[0], Some(AppId::from("org.kde.konsole"))),
+        Vec::new()
+    );
+
+    let record = window(&model, ids[0]).expect("record");
+    assert_eq!(record.geometry, geometry);
+    assert_eq!(
+        record.state,
+        WindowState::Inactive,
+        "app id changes never touch visibility"
+    );
+    assert_eq!(record.last_commit_seq, 7);
+    assert_eq!(record.popup_count, 1);
+    assert_eq!(active_window(&model), Some(ids[1]));
+    assert_eq!(model.mru, mru_before);
+    assert_invariants(&model, &config);
+}
+
+#[test]
+fn app_id_change_on_an_unknown_id_is_ignored() {
+    let config = default_config();
+    let mut model = WindowModel::new();
+    let id = map(&mut model, &config, 1);
+    let records_before = model.records.clone();
+    let mru_before = model.mru.clone();
+
+    assert_eq!(
+        on_app_id(
+            &mut model,
+            WindowId(99),
+            Some(AppId::from("org.kde.konsole"))
+        ),
+        Vec::new()
+    );
+
+    assert_eq!(model.records, records_before);
+    assert_eq!(model.mru, mru_before);
+    assert_eq!(active_window(&model), Some(id));
     assert_invariants(&model, &config);
 }
 

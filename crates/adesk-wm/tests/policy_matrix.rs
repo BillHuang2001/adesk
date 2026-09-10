@@ -198,6 +198,45 @@ fn mru_fallback_prefers_the_most_recently_used_window() {
 }
 
 #[test]
+fn late_app_id_change_flows_into_window_info_and_list_windows() {
+    let mut wm = manager();
+    let id = map(&mut wm, 1, "Konsole");
+    assert_eq!(
+        wm.window_info(id).expect("info").app_id,
+        Some(AppId::from("org.example.app"))
+    );
+
+    // A client may set `xdg_toplevel.app_id` after its first buffer commit, so
+    // the compositor applies the late value with `on_app_id`; it is metadata
+    // only, hence no actions and no configure/damage.
+    assert!(wm
+        .on_app_id(id, Some(AppId::from("org.kde.konsole")))
+        .is_empty());
+    assert_eq!(
+        wm.window_info(id).expect("info").app_id,
+        Some(AppId::from("org.kde.konsole"))
+    );
+    assert_eq!(
+        wm.windows()[0].info().app_id,
+        Some(AppId::from("org.kde.konsole"))
+    );
+    assert_consistent(&wm);
+
+    // `None` clears it (the compositor maps an empty app id to `None`).
+    assert!(wm.on_app_id(id, None).is_empty());
+    assert_eq!(wm.window_info(id).expect("info").app_id, None);
+    assert_eq!(wm.windows()[0].info().app_id, None);
+    assert_consistent(&wm);
+
+    // Unknown ids are ignored, never a panic.
+    assert!(wm
+        .on_app_id(WindowId(404), Some(AppId::from("org.kde.konsole")))
+        .is_empty());
+    assert_eq!(wm.windows().len(), 1);
+    assert_consistent(&wm);
+}
+
+#[test]
 fn destroyed_surface_key_gets_a_fresh_id_when_remapped() {
     let mut wm = manager();
     let first = map(&mut wm, 1, "One");

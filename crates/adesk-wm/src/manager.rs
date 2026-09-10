@@ -1,6 +1,6 @@
 //! [`WindowManager`] — the window-model façade owned by the compositor.
 
-use adesk_core::{Point, Position, Rect, Region, Size, WindowId, WindowInfo};
+use adesk_core::{AppId, Point, Position, Rect, Region, Size, WindowId, WindowInfo};
 
 use crate::action::WmAction;
 use crate::config::PolicyConfig;
@@ -87,6 +87,18 @@ impl WindowManager {
     /// are ignored.
     pub fn on_title(&mut self, id: WindowId, title: Option<String>) -> Vec<WmAction> {
         policy::on_title(&mut self.model, id, title)
+    }
+
+    /// Handles a late `xdg_toplevel.app_id` change (clients may set the app id
+    /// after the first buffer commit, so the map-time value can be stale).
+    ///
+    /// Sets the record's `app_id` to exactly the passed value, so `None` clears
+    /// it (the compositor maps an empty app id to `None`). Metadata-only: it
+    /// returns no actions and never re-configures or damages a window, and the
+    /// updated value is what `window_info` / `list_windows` report. Unknown ids
+    /// are ignored.
+    pub fn on_app_id(&mut self, id: WindowId, app_id: Option<AppId>) -> Vec<WmAction> {
+        policy::on_app_id(&mut self.model, id, app_id)
     }
 
     /// Handles a surface commit on the window's surface tree.

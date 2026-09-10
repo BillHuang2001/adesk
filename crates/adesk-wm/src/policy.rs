@@ -16,7 +16,7 @@
 //! ignored (returning no actions), because a compositor may legitimately
 //! observe an event for a window it has just destroyed.
 
-use adesk_core::{Point, Position, Rect, Region, Size, WindowId, WindowInfo, WindowState};
+use adesk_core::{AppId, Point, Position, Rect, Region, Size, WindowId, WindowInfo, WindowState};
 use tracing::{debug, trace};
 
 use crate::action::WmAction;
@@ -164,6 +164,24 @@ pub(crate) fn on_title(
     if let Some(record) = record_mut(model, id) {
         record.title = title;
         trace!(window_id = id.0, "title changed");
+    }
+    Vec::new()
+}
+
+/// Handles a late `xdg_toplevel.app_id` change.
+///
+/// Sets `app_id` on the record to exactly the passed value (`None` clears it)
+/// and returns no actions: the app id is metadata used for app↔window
+/// correlation and never influences the v1 tiling policy. Unknown ids are
+/// ignored.
+pub(crate) fn on_app_id(
+    model: &mut WindowModel,
+    id: WindowId,
+    app_id: Option<AppId>,
+) -> Vec<WmAction> {
+    if let Some(record) = record_mut(model, id) {
+        record.app_id = app_id;
+        trace!(window_id = id.0, "app id changed");
     }
     Vec::new()
 }
