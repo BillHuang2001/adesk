@@ -64,12 +64,9 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 - The only test scaffolding is in-file: `tests/codec.rs`'s `every_client_message()`/`every_server_message()` fixture vectors and `tests/wire.rs`'s `client()`/`server()` (`serde_json::to_value`) + `sample_window()` builders.
 - No test here defines transport plumbing: no `read_line`/`write_line`, no `BufReader`/socket/duplex, no fake peer, no line-splitting helper (NDJSON framing is transport-owned, e.g. `adesk-viewer::transport`).
 - `tests/wire.rs` exercises the `Serialize` impls directly (`serde_json::to_value`) and never calls `encode_*`/`decode_*`; only `tests/codec.rs` does.
-- Total: 23 + 14 + 1 doctest = **38 tests**.
-- No shared test module (`tests/common/` does not exist): each file defines its own helpers.
-  `wire.rs` defines `client(&ClientMessage) -> Value` (17-19), `server(&ServerMessage) -> Value` (22-24) — the local analog of `adesk-proto`'s `wire<T: Serialize>` — and the `sample_window() -> WindowInfo` fixture (26-39).
-  `codec.rs` defines `every_client_message()` (16-77) and `every_server_message()` (79-152); the latter inlines a `WindowInfo` fixture (80-91) copied from `sample_window()`.
-  There is no `image_payload()`/`observation()`/`damage()`/`app_info()`/`rect()`/`size()`/`position()` builder: `ImagePayload`, `Rect`, `Size` and `KeySpec` are built inline at each call site.
-- `wire.rs` re-pins (via the sibling crates' own serde impls, so byte-identical) the AGP/core shapes it embeds: `ImagePayload` `{"width","height","format","stride","data","scale"}` (355-362, 377-378), `Rect` `{"x","y","w","h"}` (396), `Size` `{"w","h"}` (331), `KeySpec` single/chord (198, 205), `RendererKind`/`ImageFormat` (332, 377, 577-583) and `WindowInfo` (392-403). It does NOT pin `Position`, `Condition`, `app_launched`/`RuntimeEvent` payloads or any AGP frame/envelope — this crate carries no event layer.
+- Total: 21 + 14 + 1 doctest = **36 tests**.
+- There is no `image_payload()`/`observation()`/`damage()`/`app_info()`/`rect()`/`size()`/`position()` builder: `ImagePayload`, `Rect`, `Size` and `KeySpec` are built inline at each call site (inside `tests/common/mod.rs` or the test that needs a file-specific value).
+- `wire.rs` re-pins (via the sibling crates' own serde impls, so byte-identical) the AGP/core shapes it embeds: `ImagePayload` `{"width","height","format","stride","data","scale"}`, `Rect` `{"x","y","w","h"}`, `Size` `{"w","h"}`, `KeySpec` single/chord, `RendererKind`/`ImageFormat` and `WindowInfo`. It does NOT pin `Position`, `Condition`, `app_launched`/`RuntimeEvent` payloads or any AGP frame/envelope — this crate carries no event layer.
 ## Notes for Agents
 - The framing (NDJSON, one object per line, 32 MiB cap) belongs to the transport, not this crate; `encode_*` return line-ready strings without a trailing newline (mirror `adesk-proto::encode_frame`).
 - Do not add `ImageFormat`-style closed enums without a catch-all: the viewer must stay forward-compatible.
