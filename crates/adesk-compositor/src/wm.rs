@@ -12,7 +12,8 @@
 //!
 //! # Bridge API
 //!
-//! Queries (frozen — other compositor code and the render/inject paths rely on them):
+//! Accessors and queries (frozen — other compositor code and the render/inject paths
+//! rely on them):
 //!
 //! - `new(output_size) -> WmBridge`
 //! - `active_window() -> Option<WindowId>`, `keyboard_focus() -> Option<WindowId>`

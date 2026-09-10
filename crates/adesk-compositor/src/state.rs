@@ -33,7 +33,7 @@ use smithay::{
         compositor::{get_parent, with_states, CompositorState, Damage, SurfaceAttributes},
         dmabuf::DmabufState,
         seat::WaylandFocus,
-        selection::data_device::DataDeviceState,
+        selection::data_device::{set_data_device_focus, DataDeviceState},
         shell::xdg::{
             decoration::XdgDecorationState, PopupSurface, ToplevelSurface, XdgShellState,
         },
@@ -387,15 +387,33 @@ impl State {
     }
 
     /// Move keyboard focus to `id` and publish the activation.
+    ///
+    /// Data-device (clipboard) focus moves with it, in the same call, because Smithay
+    /// only announces a selection (`wl_data_offer` + `wl_data_device.selection`) to the
+    /// client that currently holds the *data-device* focus. Without the
+    /// [`set_data_device_focus`] call below a publisher's
+    /// `wl_data_device.set_selection` is accepted — it only needs keyboard focus — and
+    /// then reaches nobody: the offered selection is never delivered to any client, so
+    /// the clipboard cannot work at all. The invariant is "data-device focus == keyboard
+    /// focus" (v1: single seat, focus is the active window); a target without a surface
+    /// clears the data-device focus, exactly like keyboard focus moving to nothing.
+    /// This function is the only keyboard-focus path in the crate (activation on map,
+    /// explicit activation and the `ActivatePrevious` fallback all flow through it).
     fn apply_activate(&mut self, id: WindowId, previous: Option<WindowId>) {
         // A popup grab of another window cannot survive its owner losing focus.
         self.dismiss_stale_grab(id);
         let target = self.wm.surface_of(id);
+        // Resolved before `set_focus` consumes the surface: the data-device focus is a
+        // *client* — the one that would receive `wl_data_offer` — not a surface.
+        let client = target.as_ref().and_then(|surface| surface.client());
         // The handle is cloned out of the seat so the seat is not borrowed while the
         // seat data (`self`) is passed to `set_focus`.
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, target, SERIAL_COUNTER.next_serial());
         }
+        // Free function (not a seat method): it records the focus on the seat and offers
+        // the current selection to the newly focused client.
+        set_data_device_focus(&self.display, &self.seat, client);
         self.events.window_activated(id, previous);
         self.events.focus_changed(Some(id));
         tracing::debug!(
