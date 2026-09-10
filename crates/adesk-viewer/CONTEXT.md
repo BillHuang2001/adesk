@@ -101,6 +101,17 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 - **Exit-code mapping is fixed** (`0`/`1`/`2`) so the binary is safe to script; unrecognized overlay names and unreadable `--input` files are usage errors, a missing socket is a runtime error.
 - **Test fakes are duplicated on purpose.** `tests/session.rs` and `tests/client.rs` each define their own fake backend so neither file depends on the other's internals.
 
+## Performance Notes (frame-streaming hot path)
+Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`), so memcpy/allocation of that string — not CPU — dominates per-frame cost; the sites below are where copies happen today.
+- **Server encode:** `session::send` (session.rs:394) calls `adesk_viewer_proto::encode_server`, which builds a `serde_json::Value` tree and then stringifies it (codec.rs:26-28).
+  That copies the whole base64 payload into a `Value::String` and again into the output `String`, plus a double `Map` allocation per frame (message.rs:372, 445-463).
+  It applies to both pushed frames (session.rs:387) and `request_frame` replies (session.rs:262).
+- **Client delivery:** `dispatch` moves each decoded frame into the bounded `broadcast` channel (client.rs:688); every `frames()`/`request_frame` `recv()` clones the full `ViewerFrame` including the base64 `String` (client.rs:335, 364).
+  `FRAME_CHANNEL_CAPACITY = 32` (client.rs:70) bounds how many frames are retained, but each retained slot holds a full payload.
+- **Capture:** `save_frame_png` base64-decodes the payload (capture.rs:30) and `tight_rgba8` clones it again when rows are already tight (capture.rs:136); `--follow` therefore does one broadcast clone + one decode + one repack copy + a PNG encode per frame.
+- **Framing:** `write_line` issues three writes plus a flush per line (transport.rs:60-64); `read_line` allocates a fresh `Vec` then `String` per inbound message (transport.rs:35) — the server's inbound is input only, not frames.
+- **No producer/consumer lock contention on the server:** one session task renders, encodes and writes each frame with no shared lock, and the `Notify`-based change signal (backend.rs) collapses a busy desktop to at most one queued frame, so there is no unbounded producer queue.
+
 ## Test Strategy
 No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex stream or a `tempfile` Unix socket.
 - `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
