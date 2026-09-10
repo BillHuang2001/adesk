@@ -175,6 +175,15 @@ post-processing to the server and drop the dependency.
 - Run with `./scripts/dev.sh cargo test -p adesk-inspector` (bare `cargo` cannot link outside the
   Nix dev shell).
 
+## Known Issues
+
+- Unreferenced public API (verified with a workspace-wide `rg`: no caller in this crate, in `adesk-server`, or in any other member): `Inspector::with_style` (`./src/inspector.rs`), `ActionKind::has_position` and `InspectionInputBuilder::active_window` (`./src/input.rs`), `Canvas::size` and `Canvas::set_clip` (`./src/canvas.rs`), `Color::TRANSPARENT`, `Color::BLACK`, `Color::with_alpha` and both `Color` ↔ `[u8; 4]` `From` impls (`./src/color.rs`), `Glyph::row` (`./src/font.rs`), and `paint::CANONICAL_ORDER` (`./src/paint/mod.rs`, named only from doc links — `order_index` is what encodes the order at runtime).
+- Test-only public API (exercised by `./tests/`, no production consumer): `Inspector::render_from_source`, `InspectionRequest::{new, region, max_dimension, is_identity}`, `InspectionInputBuilder::cursor_at`, `InspectionInput::size`, `Canvas::line`.
+- `Error::Render` (`./src/error.rs`) is never constructed: `./src/post.rs` delegates to the infallible `adesk_render::crop`/`downscale`, so the `#[from]` arm exists only for a hand-written value (the server's error-mapping tests).
+- `Inspector::render` allocates an `ImageBuffer::new_rgba` (which writes alpha `255` into every pixel) and then `render_into` overwrites every byte with the input frame — the zero-fill pass is wasted work.
+- `paint/mod.rs` encodes the overlay order three times: `CANONICAL_ORDER`, the `order_index` match arms, and the `overlay` dispatch; only the dispatch is mandatory.
+- A second, independent implementation of the same §5.7 overlays lives in `adesk-compositor` (`src/render/elements.rs`: `overlay_color`, `border_rects`, `with_alpha`). Its palette disagrees with `OverlayStyle` for the same `OverlayKind` (`focus` yellow vs green, `surface_bounds` green vs white, `cursor` orange vs yellow), and the server only ever sends `RenderOutput { overlays: vec![] }`, so that compositor path has no production caller.
+
 ## Notes for Agents
 
 - **What `adesk-server` must do** (the only consumer):
