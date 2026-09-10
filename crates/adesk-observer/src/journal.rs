@@ -10,8 +10,9 @@
 //! lagging subscriber is told `Lagged` and resyncs, and the observer still has the
 //! events needed to answer waits. Events older than the journal are dropped —
 //! `Observation.seq`/`last_commit_seq` stay exact (they come from per-window
-//! aggregates), only filter-relative counts degrade, and the per-window
-//! `state_uncertain` flag marks the degradation.
+//! aggregates) and only filter-relative counts degrade; the loss is counted by
+//! [`EventJournal::dropped`] and surfaces as `ObserverSnapshot::events_dropped`
+//! (`state_uncertain` is set by `resync`, never by journal eviction).
 
 use std::collections::VecDeque;
 

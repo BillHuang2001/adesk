@@ -195,10 +195,12 @@ pub enum Condition {
 }
 
 impl Condition {
-    /// The quiet threshold used for the observation's `quiet` evidence flag.
+    /// Quiet threshold carried by the condition.
     ///
-    /// `Condition::Quiet` uses its own threshold; the others use
-    /// [`crate::DEFAULT_QUIET_MS`].
+    /// `Condition::Quiet` returns its own threshold; `Change`/`Timeout` return
+    /// [`crate::DEFAULT_QUIET_MS`]. The service resolves the `quiet` evidence
+    /// flag of a non-quiet condition against `ObserverConfig::default_quiet_ms`
+    /// (which defaults to this constant).
     pub fn quiet_threshold_ms(&self) -> u64 {
         match self {
             Condition::Quiet { quiet_ms } => *quiet_ms,

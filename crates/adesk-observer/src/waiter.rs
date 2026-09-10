@@ -81,7 +81,9 @@ pub(crate) enum WaitCondition {
 }
 
 impl WaitCondition {
-    /// The quiet threshold used for the `quiet` evidence flag of the observation.
+    /// The quiet threshold used for the `quiet` evidence flag when the condition
+    /// is quiet; for `Change`/`Timeout` the service uses
+    /// `ObserverConfig::default_quiet_ms` instead.
     pub(crate) fn quiet_threshold_ms(self) -> u64 {
         match self {
             WaitCondition::Quiet { quiet_ms } => quiet_ms,
