@@ -11,11 +11,10 @@ use adesk_agent::{
     AgentDecision, AgentLoop, AgpClient, LoopConfig, MetricsReport, MockProvider, Scenario,
     ScenarioId, ScenarioReport, ScenarioRunner, StepRecord, TaskDescription,
 };
-use adesk_core::{AppId, Button, Observation, Position, WindowId};
+use adesk_core::{Button, Observation, Position, WindowId};
 use adesk_testkit::{
-    helper_bin_path, DesktopEntryFixture, EventAssert, Expected, FillPattern, FixtureDir, Size,
-    TestAppSpec, TestRuntime, TestRuntimeConfig, TestWindow, TestkitError, ToplevelSpec,
-    WaylandTestClient,
+    helper_bin_path, EventAssert, Expected, FillPattern, Size, TestRuntime, TestRuntimeConfig,
+    TestWindow, ToplevelSpec, WaylandTestClient,
 };
 
 /// Deadline for every bounded harness wait.
@@ -86,41 +85,6 @@ fn bundled_fixture_app() -> Option<PathBuf> {
 fn examples_dir() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.parent()?.parent()?.join("examples"))
-}
-
-/// Writes the `.desktop` entry that launches `spec` through this package's fixture app.
-///
-/// Mirrors [`TestAppSpec::desktop_entry`] exactly — `Name` = the spec's title,
-/// `StartupWMClass` = the app id (the registry's window↔app correlation depends on it),
-/// `Exec` = the program followed by [`TestAppSpec::cli_args`] — except that the program is
-/// [`fixture_app_bin`] rather than testkit's `adesk-test-app`, which a downstream crate
-/// cannot point at its own binary.
-pub fn write_app(fixtures: &FixtureDir, spec: &TestAppSpec) -> Result<AppId, TestkitError> {
-    let program = fixture_app_bin();
-    let program = program.to_str().ok_or_else(|| {
-        TestkitError::Fixture(format!(
-            "fixture app path {} is not valid UTF-8",
-            program.display()
-        ))
-    })?;
-    let mut exec = vec![program.to_string()];
-    exec.extend(spec.cli_args());
-    let mut entry = DesktopEntryFixture::new(spec_title(spec), exec);
-    entry.startup_wm_class = Some(spec.app_id().as_str().to_string());
-    fixtures.write_entry(spec.app_id().as_str(), &entry)
-}
-
-/// The window title `spec` carries.
-///
-/// [`TestAppSpec`] keeps its title private and exposes it only through
-/// [`TestAppSpec::cli_args`], whose grammar always contains `--title <TITLE>` before any
-/// extra arguments; the first occurrence is the spec's own title.
-fn spec_title(spec: &TestAppSpec) -> String {
-    let args = spec.cli_args();
-    args.iter()
-        .position(|arg| arg == "--title")
-        .and_then(|index| args.get(index + 1).cloned())
-        .unwrap_or_else(|| spec.app_id().as_str().to_string())
 }
 
 /// Loop config for real-runtime runs: no retry backoff (tests must never sleep).
