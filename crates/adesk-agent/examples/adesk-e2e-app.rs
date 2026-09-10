@@ -47,7 +47,8 @@
 //! 4. stay alive for `--exit-after` while the client's reader thread keeps dispatching
 //!    events (no manual event loop: the window must simply remain mapped and responsive
 //!    while the test observes, injects input into and captures it); the reader thread
-//!    reports EOF when the runtime goes away, which ends the wait early;//! 5. destroy the surface, flush, close the connection and exit 0.
+//!    reports EOF when the runtime goes away, which also ends the wait early;
+//! 5. best-effort destroy the surface, flush and close the connection, then exit 0.
 //!
 //! A connect or protocol failure prints the error to stderr and exits 2. A usage error
 //! (unknown flag, missing value, malformed `--size`/`--fill`/`--exit-after`, missing
@@ -57,7 +58,7 @@
 //!
 //! | Code | Meaning |
 //! |---|---|
-//! | 0 | clean exit (`--exit-after` elapsed) |
+//! | 0 | clean exit (`--exit-after` elapsed, or the runtime closed the connection) |
 //! | 2 | Wayland connect/protocol failure |
 //! | 64 | usage error |
 //!

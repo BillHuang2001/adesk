@@ -17,6 +17,7 @@ use adesk_testkit::{
     TestAppSpec, TestRuntime, TestRuntimeConfig, TestWindow, TestkitError, ToplevelSpec,
     WaylandTestClient,
 };
+
 /// Deadline for every bounded harness wait.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
