@@ -755,12 +755,10 @@ impl ObserverService {
                     watermark: state.watermark,
                     // A quiet condition carries its own threshold; the other
                     // conditions report evidence against the configured default.
-                    quiet_threshold_ms: match plan.condition {
-                        WaitCondition::Quiet { .. } => plan.condition.quiet_threshold_ms(),
-                        WaitCondition::Change | WaitCondition::Timeout => {
-                            inner.config.default_quiet_ms
-                        }
-                    },
+                    // The single mapping lives on `WaitCondition`.
+                    quiet_threshold_ms: plan
+                        .condition
+                        .quiet_threshold_ms(inner.config.default_quiet_ms),
                     window_state: window_state.as_ref(),
                     global_last_commit_seq: state.global_last_commit_seq(),
                     timed_out,
@@ -797,6 +795,20 @@ impl ObserverService {
     /// Temporal state of one window (`None` once it is destroyed).
     pub fn window_state(&self, window_id: WindowId) -> Option<WindowTemporalState> {
         lock_state(&self.inner).windows.get(&window_id).cloned()
+    }
+
+    /// Window geometry when the observer knows it: `None` for an untracked window
+    /// or before the first [`ObserverService::resync`] (which is the only source
+    /// of geometry).
+    ///
+    /// Cheaper than [`ObserverService::window_state`] for callers that only need
+    /// geometry: it clones just the [`Rect`] instead of the whole
+    /// [`WindowTemporalState`] (including `last_damage`).
+    pub fn window_geometry(&self, window_id: WindowId) -> Option<Rect> {
+        lock_state(&self.inner)
+            .windows
+            .get(&window_id)
+            .and_then(|window| window.geometry)
     }
 
     /// Current global event watermark (highest `seq` processed).
@@ -979,6 +991,30 @@ mod tests {
         assert_eq!(snapshot.journal_len, 2);
         assert_eq!(snapshot.events_dropped, 1);
         assert_eq!(snapshot.seq, 3);
+    }
+
+    #[test]
+    fn window_geometry_reads_geometry_without_full_state() {
+        let observer = ObserverService::new();
+        observer.handle_event(&created(1, 0, 7));
+
+        assert_eq!(
+            observer.window_geometry(WindowId(7)),
+            None,
+            "no geometry before the first resync"
+        );
+        assert_eq!(
+            observer.window_geometry(WindowId(99)),
+            None,
+            "untracked window"
+        );
+
+        observer.resync(state_snapshot(2, 10, vec![window_snapshot(7, 3)]));
+        assert_eq!(
+            observer.window_geometry(WindowId(7)),
+            Some(rect(0, 0, 1280, 800))
+        );
+        assert_eq!(observer.window_geometry(WindowId(99)), None);
     }
 
     #[test]
@@ -1548,6 +1584,40 @@ mod tests {
         assert_eq!(observation.last_commit_seq, 1);
         assert_eq!(observation.changed_regions, vec![rect(0, 0, 4, 4)]);
         assert_eq!(observation.elapsed_ms, 40);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_quiet_wait_quiet_flag_honours_the_configured_default() {
+        // Feed a non-commit change 40 ms after the wait starts: the `quiet`
+        // evidence flag of a non-quiet wait must be measured against the
+        // configured `ObserverConfig::default_quiet_ms`, not the crate constant.
+        async fn quiet_flag_of_change_wait(default_quiet_ms: u64) -> bool {
+            let observer = ObserverService::with_config(ObserverConfig {
+                journal_capacity: DEFAULT_JOURNAL_CAPACITY,
+                default_quiet_ms,
+            });
+            observer.handle_event(&created(1, 0, 7));
+
+            let mut wait = Box::pin(
+                observer.wait_for_change(WaitSpec::new().window(WindowId(7)).timeout_ms(60_000)),
+            );
+            tokio::select! {
+                biased;
+                observation = &mut wait => panic!("resolved before any event: {observation:?}"),
+                () = tokio::task::yield_now() => {}
+            }
+            observer.handle_event(&title_changed(2, 40, 7));
+            wait.await.expect("known window").quiet
+        }
+
+        assert!(
+            quiet_flag_of_change_wait(5).await,
+            "40 ms >= the configured 5 ms default: quiet"
+        );
+        assert!(
+            !quiet_flag_of_change_wait(DEFAULT_QUIET_MS).await,
+            "40 ms < the 250 ms crate constant: not quiet"
+        );
     }
 
     #[tokio::test(start_paused = true)]

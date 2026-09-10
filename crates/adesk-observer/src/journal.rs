@@ -191,6 +191,15 @@ pub(crate) struct EventJournal {
     buf: VecDeque<CountedEvent>,
     capacity: usize,
     dropped: u64,
+    /// Maximum `seq` ever stored, never decreasing.
+    ///
+    /// This is the upper bound `since` short-circuits on. It is only ever raised
+    /// (eviction and resync pruning do not lower it), so `max_seq` is always `>=`
+    /// every stored `seq` — the property `since`'s O(1) early-out needs. The
+    /// buffer itself is **not** seq-monotonic after a `resync` (synthetic events
+    /// are pushed at the tail with the snapshot's sequence), which is exactly why
+    /// this is a running maximum rather than the last element's `seq`.
+    max_seq: u64,
 }
 
 impl EventJournal {
@@ -204,16 +213,18 @@ impl EventJournal {
             buf: VecDeque::with_capacity(capacity.saturating_add(1)),
             capacity,
             dropped: 0,
+            max_seq: 0,
         }
     }
 
     /// Appends an event, evicting the oldest when full.
     pub(crate) fn push(&mut self, event: CountedEvent) {
+        self.max_seq = self.max_seq.max(event.seq);
         self.buf.push_back(event);
-        while self.buf.len() > self.capacity {
-            if self.buf.pop_front().is_some() {
-                self.dropped += 1;
-            }
+        // One append needs at most one eviction (`capacity` is never zero), so
+        // this can only ever match once.
+        if self.buf.len() > self.capacity && self.buf.pop_front().is_some() {
+            self.dropped += 1;
         }
     }
 
@@ -235,8 +246,19 @@ impl EventJournal {
     }
 
     /// Events with `seq` strictly greater than `min_seq`, oldest first.
+    ///
+    /// O(1) when `min_seq >= max_seq`: no stored event can exceed `min_seq`, so
+    /// the scan is skipped. `max_seq` is the running maximum over every stored
+    /// event, which stays correct even though the buffer is not seq-monotonic
+    /// after a `resync` (synthetic events are pushed at the tail with the
+    /// snapshot's sequence).
     pub(crate) fn since(&self, min_seq: u64) -> impl Iterator<Item = &CountedEvent> {
-        self.buf.iter().filter(move |event| event.seq > min_seq)
+        let scan = if min_seq >= self.max_seq {
+            None
+        } else {
+            Some(self.buf.iter().filter(move |event| event.seq > min_seq))
+        };
+        scan.into_iter().flatten()
     }
 
     /// Number of retained events.
@@ -579,5 +601,51 @@ mod tests {
             "a waiter below the horizon keeps up"
         );
         assert_eq!(seqs(&journal, 4), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn since_short_circuits_at_or_above_max_seq() {
+        let mut journal = EventJournal::new(4);
+        for seq in [10, 11, 12] {
+            journal.push(ev(seq));
+        }
+
+        assert_eq!(seqs(&journal, 12), Vec::<u64>::new(), "at the max: empty");
+        assert_eq!(
+            seqs(&journal, 13),
+            Vec::<u64>::new(),
+            "above the max: empty"
+        );
+        assert_eq!(seqs(&journal, u64::MAX), Vec::<u64>::new());
+        assert_eq!(seqs(&journal, 11), vec![12], "below the max still scans");
+    }
+
+    #[test]
+    fn since_short_circuit_holds_after_resync_reordering() {
+        let mut journal = EventJournal::new(8);
+        for seq in [10, 11, 12] {
+            journal.push(ev(seq));
+        }
+
+        assert_eq!(journal.prune_through(11), 2, "drops seq 10 and 11");
+        // A resync pushes a synthetic event at the snapshot sequence, which is
+        // *lower* than the retained tail: the buffer is no longer seq-monotonic.
+        journal.push(ev(11));
+
+        assert_eq!(
+            seqs(&journal, 11),
+            vec![12],
+            "the tail (11) does not hide the retained newer event (12)"
+        );
+        assert_eq!(
+            seqs(&journal, 12),
+            Vec::<u64>::new(),
+            "at the max (12, the running maximum): empty"
+        );
+        assert_eq!(
+            seqs(&journal, 99),
+            Vec::<u64>::new(),
+            "above the max: empty"
+        );
     }
 }
