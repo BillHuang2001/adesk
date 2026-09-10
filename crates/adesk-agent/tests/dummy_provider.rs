@@ -7,34 +7,13 @@
 //! wired against the socket-free `ScriptedClient`, and the dummy provider itself
 //! performs no I/O. The loop's client calls are positional against the script, so
 //! one `ScriptedResponse` is pushed per expected call.
-#![cfg(feature = "test-support")]
+
+mod common;
 
 use adesk_agent::provider::{DummyConfig, DummyMode, DummyVlmProvider};
 use adesk_agent::testing::{ClientMethod, ScriptedClient, ScriptedResponse};
-use adesk_agent::{
-    AgentDecision, AgentLoop, LoopConfig, RuntimeInfo, StopReason, TaskDescription, WindowList,
-    PROTOCOL_VERSION,
-};
-use adesk_core::Size;
-
-/// Runtime identity as a conforming runtime reports it.
-fn runtime_info() -> RuntimeInfo {
-    RuntimeInfo {
-        protocol_version: PROTOCOL_VERSION,
-        runtime_version: "0.1.0".to_owned(),
-        uptime_ms: 42,
-        renderer: "pixman".to_owned(),
-        output: Size::new(1280, 800),
-    }
-}
-
-/// An empty window list (no windows known yet).
-fn empty_windows() -> WindowList {
-    WindowList {
-        windows: Vec::new(),
-        active_window_id: None,
-    }
-}
+use adesk_agent::{AgentDecision, AgentLoop, LoopConfig, StopReason, TaskDescription};
+use common::{empty_windows, runtime_info};
 
 /// The task every test runs (only the goal matters to the loop).
 fn task() -> TaskDescription {

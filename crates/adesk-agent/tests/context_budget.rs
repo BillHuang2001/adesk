@@ -2,8 +2,6 @@
 //!
 //! Run with: `cargo test -p adesk-agent`
 
-mod common;
-
 use adesk_agent::{
     ActionKind, ActionRecord, AgentContext, ContextBudget, ContextBuilder, ContextInput,
     EventSummary, RuntimeInfo, TaskDescription,

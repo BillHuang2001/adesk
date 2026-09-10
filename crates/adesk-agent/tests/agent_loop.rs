@@ -3,7 +3,6 @@
 //! Run with: `cargo test -p adesk-agent --features test-support`
 //!
 //! Every test here must run without a socket, compositor, GPU or network.
-#![cfg(feature = "test-support")]
 
 mod common;
 
@@ -11,14 +10,12 @@ use std::sync::Arc;
 
 use adesk_agent::testing::{ClientMethod, ScriptedClient, ScriptedResponse};
 use adesk_agent::{
-    AgentContext, AgentDecision, AgentLoop, Error, LlmProvider, LoopConfig, MockProvider,
-    ObserveOutcome, ProviderError, ScriptEntry, StepStatus, StopReason, TaskDescription,
-    WindowList, PROTOCOL_VERSION,
+    AgentDecision, AgentLoop, Error, LoopConfig, MockProvider, ObserveOutcome, ProviderError,
+    ScriptEntry, StepStatus, StopReason, TaskDescription, WindowList, PROTOCOL_VERSION,
 };
 use adesk_core::{
     ActionId, Button, ErrorCode, Observation, Position, Rect, WindowId, WindowInfo, WindowState,
 };
-use async_trait::async_trait;
 use common::{empty_windows, runtime_info};
 
 /// Build a loop over a scripted client and mock provider (used by the phase-2
@@ -29,29 +26,6 @@ fn loop_with(
     config: LoopConfig,
 ) -> AgentLoop<ScriptedClient, MockProvider> {
     AgentLoop::new(client, MockProvider::scripted(decisions), config)
-}
-
-/// Wrapper keeping a handle on the mock provider's recorded contexts: the loop
-/// takes its provider by value and `MockProvider` is not `Clone`.
-#[derive(Debug)]
-struct SharedProvider(Arc<MockProvider>);
-
-#[async_trait]
-impl LlmProvider for SharedProvider {
-    async fn complete(
-        &self,
-        ctx: &AgentContext,
-    ) -> std::result::Result<AgentDecision, ProviderError> {
-        self.0.complete(ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn supports_images(&self) -> bool {
-        self.0.supports_images()
-    }
 }
 
 /// The task every test runs (only the goal matters to the loop).
@@ -580,11 +554,7 @@ async fn scripted_client_and_mock_provider_record_calls() {
         ScriptedResponse::Windows(empty_windows()),
     ]);
     let handle = client.clone();
-    let mut agent = AgentLoop::new(
-        client,
-        SharedProvider(Arc::clone(&provider)),
-        LoopConfig::default(),
-    );
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), LoopConfig::default());
 
     let outcome = agent.run(&task()).await.expect("run succeeds");
     assert!(outcome.success);

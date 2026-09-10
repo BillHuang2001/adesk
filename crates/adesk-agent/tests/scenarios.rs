@@ -1,7 +1,6 @@
 //! Built-in scenario definitions and the runner.
 //!
 //! Run with: `cargo test -p adesk-agent --features test-support`
-#![cfg(feature = "test-support")]
 
 mod common;
 
