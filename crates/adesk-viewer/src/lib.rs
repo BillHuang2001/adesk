@@ -14,3 +14,12 @@
 //! surface are documented in `CONTEXT.md`.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod backend;
+pub mod capture;
+pub mod client;
+pub mod error;
+pub mod script;
+pub mod server;
+pub mod session;
+pub mod transport;
