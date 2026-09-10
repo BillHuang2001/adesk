@@ -114,6 +114,9 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 
 - `adesk_core::Position::resolve(rect)` documents window-relative→window-relative, but for a rect with a non-zero origin it clamps `Pixels` into the rect's coordinate space and offsets `Normalized` by the origin; `policy::resolve_position` therefore resolves against a rect at the origin and translates afterwards.
 - Do not add Smithay or tokio "temporarily": the crate must stay pure; compositor integration lives in `adesk-compositor`.
+- The resolve-at-origin-then-translate rule (`policy::resolve_position`) is duplicated verbatim in `crates/adesk-server/src/translate.rs::action_marker`; a shared helper in `adesk-core` would be the single home.
+- `WindowManager::set_output_size`, `window_by_surface`, `window_info` and `config` have no production caller: the compositor never resizes the output at runtime, tracks surface→window in its own `SurfaceRegistry` (`WmBridge::window_for_surface`), projects `list_windows`/`QueryState` via `windows()` + `WindowRecord::info()`, and reads the config only in tests.
+- `From<u64> for SurfaceKey` and `From<Error> for adesk_core::Error` have no consumer outside the crate's own tests; the compositor maps `require_window`'s error to `CompositorError::UnknownWindow` itself.
 
 ## Status
 
