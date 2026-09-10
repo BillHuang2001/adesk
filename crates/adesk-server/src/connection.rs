@@ -2,10 +2,11 @@
 //! request dispatch loop.
 //!
 //! Framing (`docs/protocol.md` §1) is NDJSON: one `Frame` per line. Every
-//! request gets exactly one response and the connection stays open, including
-//! for a request whose params fail validation (`invalid_request`); only a line
-//! that cannot be identified as a request at all (invalid UTF-8, or JSON with no
-//! `u64` id) is framing corruption and closes **only** that connection (§6).
+//! request gets exactly one response and the connection stays open, even when
+//! the request is rejected (`unknown_method`, `invalid_request`). A connection
+//! closes only on framing corruption — a line that is not a request at all
+//! (invalid UTF-8, or JSON without a `u64` id) or a decoded non-request frame —
+//! and then only that connection (§6).
 
 use std::sync::Arc;
 
