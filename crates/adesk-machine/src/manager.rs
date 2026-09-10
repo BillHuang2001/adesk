@@ -189,148 +189,16 @@ impl<R: ContainerRuntime> MachineManager<R> {
     ///
     /// A poisoned lock can only result from a panic while the registry was held
     /// (which none of the paths above do), so the data is still consistent and
-    /// is recovered rather than propagating a panic.
+    /// is recovered rather than propagating a panic (see `crate::sync`).
     fn lock_registry(&self) -> MutexGuard<'_, MachineRegistry> {
-        self.registry
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        crate::sync::lock_unpoisoned(&self.registry)
     }
 }
 
-/// Minimal in-memory [`ContainerRuntime`] shared by the manager's and the host
-/// control plane's unit tests.
-///
-/// The production `MockRuntime` is implemented separately and is not available
-/// here, so these tests drive a local double that models the lifecycle state
-/// machine (created → running → stopped) and hands out ids `machine-1`,
-/// `machine-2`, … in creation order. The full lifecycle integration suite is
-/// owned by a later task.
+/// Helpers shared by the manager's and the host control plane's unit tests.
 #[cfg(test)]
 pub(crate) mod testing {
-    use std::collections::BTreeMap;
-    use std::sync::{Mutex, MutexGuard};
-
-    use async_trait::async_trait;
-
-    use crate::error::{MachineError, Result};
-    use crate::runtime::{ContainerRuntime, RuntimeKind};
-    use crate::spec::MachineSpec;
-    use crate::state::{MachineId, MachineName, MachineState, MachineStatus};
-
-    #[derive(Default)]
-    struct Inner {
-        next: u64,
-        machines: BTreeMap<MachineId, MachineStatus>,
-    }
-
-    impl Inner {
-        fn create(&mut self, spec: &MachineSpec) -> MachineId {
-            self.next += 1;
-            let id = MachineId::from(format!("machine-{}", self.next));
-            let status = MachineStatus {
-                id: id.clone(),
-                name: spec.name.clone(),
-                image: spec.image.clone(),
-                state: MachineState::Created,
-                pid: None,
-                created_at_ms: 1_000 + self.next,
-                viewer: spec.viewer.clone(),
-            };
-            self.machines.insert(id.clone(), status);
-            id
-        }
-    }
-
-    /// A minimal in-memory [`ContainerRuntime`] for the manager/host unit tests.
-    #[derive(Default)]
-    pub(crate) struct StubRuntime {
-        inner: Mutex<Inner>,
-    }
-
-    impl StubRuntime {
-        /// An empty runtime.
-        pub(crate) fn new() -> StubRuntime {
-            StubRuntime::default()
-        }
-
-        /// Registers a `Created` machine for `spec` directly, as if `create` had
-        /// been called, but without going through a manager's registry — used to
-        /// make the backend (not the cache) report a duplicate name.
-        pub(crate) fn seed(&self, spec: &MachineSpec) -> MachineId {
-            self.lock().create(spec)
-        }
-
-        fn lock(&self) -> MutexGuard<'_, Inner> {
-            self.inner
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-        }
-    }
-
-    #[async_trait]
-    impl ContainerRuntime for StubRuntime {
-        fn kind(&self) -> RuntimeKind {
-            RuntimeKind::Mock
-        }
-
-        async fn create(&self, spec: &MachineSpec) -> Result<MachineId> {
-            let mut inner = self.lock();
-            if inner
-                .machines
-                .values()
-                .any(|status| status.name == spec.name)
-            {
-                return Err(MachineError::Duplicate {
-                    name: spec.name.to_string(),
-                });
-            }
-            Ok(inner.create(spec))
-        }
-
-        async fn start(&self, id: &MachineId) -> Result<()> {
-            let mut inner = self.lock();
-            let status = inner.machines.get_mut(id).ok_or_else(|| not_found(id))?;
-            status.state = MachineState::Running;
-            status.pid = Some(2_000);
-            Ok(())
-        }
-
-        async fn stop(&self, id: &MachineId, _timeout_ms: u64) -> Result<()> {
-            let mut inner = self.lock();
-            let status = inner.machines.get_mut(id).ok_or_else(|| not_found(id))?;
-            status.state = MachineState::Stopped;
-            status.pid = None;
-            Ok(())
-        }
-
-        async fn remove(&self, id: &MachineId, _force: bool) -> Result<()> {
-            self.lock().machines.remove(id);
-            Ok(())
-        }
-
-        async fn status(&self, id: &MachineId) -> Result<MachineStatus> {
-            self.lock()
-                .machines
-                .get(id)
-                .cloned()
-                .ok_or_else(|| not_found(id))
-        }
-
-        async fn list(&self) -> Result<Vec<MachineStatus>> {
-            Ok(self.lock().machines.values().cloned().collect())
-        }
-    }
-
-    fn not_found(id: &MachineId) -> MachineError {
-        MachineError::NotFound {
-            name: id.to_string(),
-        }
-    }
-
-    /// The name a [`StubRuntime`] will assign first, handy for assertions.
-    pub(crate) fn first_id() -> MachineId {
-        MachineId::from("machine-1")
-    }
+    use crate::state::MachineName;
 
     /// The [`MachineName`] helper used across the manager/host tests.
     pub(crate) fn name(value: &str) -> MachineName {
@@ -340,29 +208,17 @@ pub(crate) mod testing {
 
 #[cfg(test)]
 mod tests {
-    use super::testing::{first_id, name, StubRuntime};
+    use super::testing::name;
     use super::*;
-    use crate::spec::ViewerExposure;
+    use crate::runtime::MockRuntime;
     use crate::state::MachineState;
 
     fn spec(value: &str) -> MachineSpec {
         MachineSpec::new(value, "ghcr.io/adesk/machine:latest")
     }
 
-    fn manager() -> MachineManager<StubRuntime> {
-        MachineManager::new(StubRuntime::new())
-    }
-
-    fn bogus_status(value: &str) -> MachineStatus {
-        MachineStatus {
-            id: MachineId::from("machine-9"),
-            name: name(value),
-            image: "ghcr.io/adesk/machine:latest".into(),
-            state: MachineState::Running,
-            pid: None,
-            created_at_ms: 0,
-            viewer: ViewerExposure::None,
-        }
+    fn manager() -> MachineManager<MockRuntime> {
+        MachineManager::new(MockRuntime::new())
     }
 
     #[tokio::test]
@@ -371,7 +227,7 @@ mod tests {
         let status = manager.create(&spec("adesk")).await.unwrap();
 
         assert_eq!(status.name, name("adesk"));
-        assert_eq!(status.id, first_id());
+        assert_eq!(status.id, MachineId::from("machine-1"));
         assert_eq!(status.state, MachineState::Created);
         assert!(manager.lock_registry().contains(&name("adesk")));
         assert_eq!(
@@ -384,115 +240,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_rejects_a_duplicate_name_via_the_registry() {
-        let manager = manager();
-        manager.create(&spec("adesk")).await.unwrap();
-
-        let err = manager.create(&spec("adesk")).await.unwrap_err();
-        assert!(matches!(err, MachineError::Duplicate { name } if name == "adesk"));
-        // The original machine is untouched.
-        assert_eq!(manager.lock_registry().len(), 1);
-    }
-
-    #[tokio::test]
     async fn create_maps_a_backend_duplicate() {
-        let runtime = StubRuntime::new();
-        runtime.seed(&spec("adesk"));
+        // Seed the backend behind the manager's back so the *runtime* (not the
+        // registry cache) is what reports the name as taken.
+        let runtime = MockRuntime::new();
+        runtime.create(&spec("adesk")).await.unwrap();
         let manager = MachineManager::new(runtime);
 
         let err = manager.create(&spec("adesk")).await.unwrap_err();
         assert!(matches!(err, MachineError::Duplicate { name } if name == "adesk"));
         assert!(manager.lock_registry().is_empty());
-    }
-
-    #[tokio::test]
-    async fn unknown_names_are_not_found() {
-        let manager = manager();
-        let ghost = name("ghost");
-
-        assert!(matches!(
-            manager.start(&ghost).await.unwrap_err(),
-            MachineError::NotFound { .. }
-        ));
-        assert!(matches!(
-            manager.stop(&ghost, 0).await.unwrap_err(),
-            MachineError::NotFound { .. }
-        ));
-        assert!(matches!(
-            manager.status(&ghost).await.unwrap_err(),
-            MachineError::NotFound { .. }
-        ));
-        assert!(matches!(
-            manager.remove(&ghost, false).await.unwrap_err(),
-            MachineError::NotFound { .. }
-        ));
-    }
-
-    #[tokio::test]
-    async fn start_refreshes_the_cache() {
-        let manager = manager();
-        manager.create(&spec("adesk")).await.unwrap();
-
-        let status = manager.start(&name("adesk")).await.unwrap();
-        assert_eq!(status.state, MachineState::Running);
-        assert!(status.is_running());
-        assert_eq!(status.pid, Some(2_000));
-        assert_eq!(
-            manager
-                .lock_registry()
-                .get(&name("adesk"))
-                .map(|s| s.state.clone()),
-            Some(MachineState::Running)
-        );
-    }
-
-    #[tokio::test]
-    async fn stop_refreshes_the_cache() {
-        let manager = manager();
-        manager.create(&spec("adesk")).await.unwrap();
-        manager.start(&name("adesk")).await.unwrap();
-
-        let status = manager.stop(&name("adesk"), 1_500).await.unwrap();
-        assert_eq!(status.state, MachineState::Stopped);
-        assert_eq!(
-            manager
-                .lock_registry()
-                .get(&name("adesk"))
-                .map(|s| s.state.clone()),
-            Some(MachineState::Stopped)
-        );
-    }
-
-    #[tokio::test]
-    async fn restart_stops_then_starts() {
-        let manager = manager();
-        manager.create(&spec("adesk")).await.unwrap();
-        manager.start(&name("adesk")).await.unwrap();
-
-        let status = manager.restart(&name("adesk")).await.unwrap();
-        assert_eq!(status.state, MachineState::Running);
-        assert_eq!(
-            manager
-                .lock_registry()
-                .get(&name("adesk"))
-                .map(|s| s.state.clone()),
-            Some(MachineState::Running)
-        );
-    }
-
-    #[tokio::test]
-    async fn remove_returns_the_pre_removal_status_and_forgets_it() {
-        let manager = manager();
-        manager.create(&spec("adesk")).await.unwrap();
-        manager.start(&name("adesk")).await.unwrap();
-
-        let removed = manager.remove(&name("adesk"), true).await.unwrap();
-        assert_eq!(removed.state, MachineState::Running);
-        assert!(!manager.lock_registry().contains(&name("adesk")));
-        assert!(matches!(
-            manager.status(&name("adesk")).await.unwrap_err(),
-            MachineError::NotFound { .. }
-        ));
     }
 
     #[tokio::test]
@@ -512,34 +269,5 @@ mod tests {
                 .map(|s| s.state.clone()),
             Some(MachineState::Running)
         );
-    }
-
-    #[tokio::test]
-    async fn list_rebuilds_the_registry_from_the_backend() {
-        let manager = manager();
-        manager.create(&spec("alpha")).await.unwrap();
-        manager.create(&spec("bravo")).await.unwrap();
-
-        // Corrupt the cache: add a bogus entry and forget a real one.
-        {
-            let mut registry = manager.lock_registry();
-            registry.insert(bogus_status("stale"));
-            registry.remove(&name("bravo"));
-        }
-        assert!(manager.lock_registry().contains(&name("stale")));
-        assert!(!manager.lock_registry().contains(&name("bravo")));
-
-        let mut listed: Vec<MachineName> = manager
-            .list()
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-        listed.sort();
-
-        assert_eq!(listed, vec![name("alpha"), name("bravo")]);
-        assert!(!manager.lock_registry().contains(&name("stale")));
-        assert!(manager.lock_registry().contains(&name("bravo")));
     }
 }

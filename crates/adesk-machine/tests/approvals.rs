@@ -145,16 +145,22 @@ async fn control_plane_defaults_to_auto_approve() {
 async fn control_plane_delegates_lifecycle_and_routes_approvals() {
     let caps = HostCapabilities {
         gpu: true,
+        kvm: true,
         ..HostCapabilities::default()
     };
     let plane = plane(caps).with_router(ApprovalRouter::new(Arc::new(AutoDeny::new("no"))));
 
     // Capabilities are exposed as configured.
     assert!(plane.capabilities().gpu);
+    assert!(plane.capabilities().kvm);
 
     // Lifecycle calls delegate to the underlying manager.
     assert_eq!(
         plane.create(&spec("adesk")).await.unwrap().state,
+        MachineState::Created
+    );
+    assert_eq!(
+        plane.status(&name("adesk")).await.unwrap().state,
         MachineState::Created
     );
     assert_eq!(
@@ -170,6 +176,7 @@ async fn control_plane_delegates_lifecycle_and_routes_approvals() {
         plane.remove(&name("adesk"), false).await.unwrap().state,
         MachineState::Stopped
     );
+    assert!(plane.machines().await.unwrap().is_empty());
 
     // Approval requests are routed through the installed (denying) router.
     assert_eq!(

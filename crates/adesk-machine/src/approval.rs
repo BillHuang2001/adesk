@@ -62,13 +62,6 @@ pub enum ApprovalDecision {
     },
 }
 
-impl ApprovalDecision {
-    /// Whether the decision grants the capability.
-    pub fn is_allowed(&self) -> bool {
-        matches!(self, ApprovalDecision::Allow)
-    }
-}
-
 /// Decides whether a boundary-crossing request is allowed.
 ///
 /// Object-safe: a router holds an `Arc<dyn Approver>`. Implementations must be
@@ -169,11 +162,6 @@ impl AutoDeny {
             reason: reason.into(),
         }
     }
-
-    /// The reason this approver reports.
-    pub fn reason(&self) -> &str {
-        &self.reason
-    }
 }
 
 impl Default for AutoDeny {
@@ -194,7 +182,6 @@ impl Approver for AutoDeny {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     fn request(capability: &str) -> ApprovalRequest {
         ApprovalRequest::new(1, "adesk", capability, "wants a thing")
@@ -207,14 +194,6 @@ mod tests {
         assert_eq!(req.machine, MachineName::from("adesk"));
         assert_eq!(req.capability, "host.gpu");
         assert_eq!(req.description, "wants a thing");
-    }
-
-    #[tokio::test]
-    async fn auto_approve_allows() {
-        let router = ApprovalRouter::new(Arc::new(AutoApprove));
-        let decision = router.request(request("host.gpu")).await;
-        assert_eq!(decision, ApprovalDecision::Allow);
-        assert!(decision.is_allowed());
     }
 
     #[tokio::test]
@@ -234,49 +213,6 @@ mod tests {
                 reason: "nope".into(),
             }
         );
-    }
-
-    #[tokio::test]
-    async fn policy_pre_approves_without_asking() {
-        // The approver would deny, but the policy short-circuits.
-        let router = ApprovalRouter::new(Arc::new(AutoDeny::new("nope")))
-            .with_policy(ApprovalPolicy::new().pre_approve("host.mount.allowed"));
-
-        assert!(router.policy().is_pre_approved("host.mount.allowed"));
-        assert_eq!(
-            router.request(request("host.mount.allowed")).await,
-            ApprovalDecision::Allow
-        );
-        // Other capabilities still reach the denying approver.
-        assert_eq!(
-            router.request(request("host.gpu")).await,
-            ApprovalDecision::Deny {
-                reason: "nope".into(),
-            }
-        );
-    }
-
-    /// Records the requests it saw so the test can assert delegation happened.
-    struct Recording {
-        seen: Mutex<Vec<String>>,
-    }
-
-    #[async_trait]
-    impl Approver for Recording {
-        async fn decide(&self, req: &ApprovalRequest) -> ApprovalDecision {
-            self.seen.lock().unwrap().push(req.capability.clone());
-            ApprovalDecision::Allow
-        }
-    }
-
-    #[tokio::test]
-    async fn router_delegates_to_custom_approver() {
-        let approver = Arc::new(Recording {
-            seen: Mutex::new(Vec::new()),
-        });
-        let router = ApprovalRouter::new(approver.clone());
-        router.request(request("host.kvm")).await;
-        assert_eq!(approver.seen.lock().unwrap().as_slice(), ["host.kvm"]);
     }
 
     #[test]

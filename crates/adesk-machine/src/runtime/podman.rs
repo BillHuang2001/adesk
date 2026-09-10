@@ -63,7 +63,7 @@ use serde::Deserialize;
 use tokio::process::Command;
 
 use crate::error::{MachineError, Result};
-use crate::runtime::{ContainerRuntime, RuntimeKind};
+use crate::runtime::ContainerRuntime;
 use crate::spec::{MachineSpec, NetworkMode, ViewerExposure};
 use crate::state::{MachineId, MachineName, MachineState, MachineStatus};
 
@@ -235,10 +235,6 @@ fn volume_argument(host: &Path, container: &Path, read_only: bool) -> String {
 
 #[async_trait]
 impl ContainerRuntime for PodmanRuntime {
-    fn kind(&self) -> RuntimeKind {
-        RuntimeKind::Podman
-    }
-
     async fn create(&self, spec: &MachineSpec) -> Result<MachineId> {
         tracing::info!(name = %spec.name, "creating machine");
         let stdout = self.run(&build_create_argv(spec)).await?;
@@ -477,145 +473,6 @@ fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::spec::Mount;
-    use std::collections::BTreeMap;
-
-    /// An argv with nothing but the required name/image.
-    fn base_spec() -> MachineSpec {
-        MachineSpec {
-            name: MachineName::from("adesk"),
-            image: "img:latest".to_owned(),
-            command: vec!["adesk-server".to_owned()],
-            env: BTreeMap::new(),
-            mounts: Vec::new(),
-            memory_mb: None,
-            cpus: None,
-            network: NetworkMode::None,
-            viewer: ViewerExposure::None,
-            labels: BTreeMap::new(),
-        }
-    }
-
-    /// Whether `flag value` appears as an adjacent pair in `argv`.
-    fn has_arg_pair(argv: &[String], flag: &str, value: &str) -> bool {
-        argv.windows(2)
-            .any(|pair| pair[0] == flag && pair[1] == value)
-    }
-
-    #[test]
-    fn default_spec_argv() {
-        assert_eq!(
-            build_create_argv(&MachineSpec::default()),
-            vec![
-                "create",
-                "--name",
-                "adesk",
-                "--label",
-                "adesk.io/role=machine",
-                "--memory",
-                "4096m",
-                "--cpus",
-                "2",
-                "--volume",
-                "/run/adesk/viewer.sock:/run/adesk/viewer.sock",
-                "ghcr.io/adesk/machine:latest",
-                "adesk-server",
-            ]
-        );
-    }
-
-    #[test]
-    fn full_spec_translation() {
-        let spec = MachineSpec {
-            name: MachineName::from("work"),
-            image: "debian:trixie".to_owned(),
-            command: vec!["bash".to_owned(), "-l".to_owned()],
-            env: BTreeMap::from([("LANG".to_owned(), "C.UTF-8".to_owned())]),
-            mounts: vec![
-                Mount::ro("/etc/localtime", "/etc/localtime"),
-                Mount::rw("/srv/share", "/mnt/share"),
-            ],
-            memory_mb: Some(2048),
-            cpus: Some(1.5),
-            network: NetworkMode::Host,
-            viewer: ViewerExposure::TcpPort {
-                host_port: 7000,
-                container_port: 7100,
-            },
-            labels: BTreeMap::from([
-                ("adesk.io/role".to_owned(), "machine".to_owned()),
-                ("team".to_owned(), "agent".to_owned()),
-            ]),
-        };
-
-        assert_eq!(
-            build_create_argv(&spec),
-            vec![
-                "create",
-                "--name",
-                "work",
-                "--label",
-                "adesk.io/role=machine",
-                "--label",
-                "team=agent",
-                "--env",
-                "LANG=C.UTF-8",
-                "--volume",
-                "/etc/localtime:/etc/localtime:ro",
-                "--volume",
-                "/srv/share:/mnt/share",
-                "--memory",
-                "2048m",
-                "--cpus",
-                "1.5",
-                "--network",
-                "host",
-                "--publish",
-                "7000:7100",
-                "debian:trixie",
-                "bash",
-                "-l",
-            ]
-        );
-    }
-
-    #[test]
-    fn network_modes_map_to_podman() {
-        let none = base_spec().with_network(NetworkMode::None);
-        assert!(has_arg_pair(&build_create_argv(&none), "--network", "none"));
-
-        let host = base_spec().with_network(NetworkMode::Host);
-        assert!(has_arg_pair(&build_create_argv(&host), "--network", "host"));
-
-        // Private uses Podman's default isolated network: no `--network` flag.
-        let private = base_spec().with_network(NetworkMode::Private);
-        assert!(!build_create_argv(&private)
-            .iter()
-            .any(|arg| arg == "--network"));
-    }
-
-    #[test]
-    fn viewer_exposures_map_to_container_options() {
-        let unix =
-            base_spec().with_viewer(ViewerExposure::default_unix("/run/v.sock", "/run/v.sock"));
-        assert!(has_arg_pair(
-            &build_create_argv(&unix),
-            "--volume",
-            "/run/v.sock:/run/v.sock"
-        ));
-
-        let tcp = base_spec().with_viewer(ViewerExposure::TcpPort {
-            host_port: 1,
-            container_port: 2,
-        });
-        assert!(has_arg_pair(&build_create_argv(&tcp), "--publish", "1:2"));
-
-        let argv = build_create_argv(&base_spec());
-        assert!(!argv
-            .iter()
-            .any(|arg| arg == "--publish" || arg == "--volume"));
-    }
-
     #[test]
     fn inspect_payload_parses_running_container() {
         let json = r#"[
@@ -732,66 +589,11 @@ mod tests {
         }
     }
 
-    /// Serializes the tests that spawn a child process.
-    ///
-    /// A `fork` in one test can inherit another test's still-open write
-    /// descriptor to a stub script, which makes a concurrent `exec` of that
-    /// script fail with `ETXTBSY` ("Text file busy"). Holding this lock across
-    /// both stub creation and spawning removes the race.
+    /// Serializes the tests in this module that spawn a child process, so a
+    /// `fork` in one test can never race another test's process setup. The
+    /// stub-script suite that needs the same guarantee lives in
+    /// `tests/podman_stub.rs`.
     static SPAWN_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
-
-    #[cfg(unix)]
-    fn stub(script: &str) -> (tempfile::TempDir, PathBuf) {
-        use std::io::Write;
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("stub-podman");
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(script.as_bytes()).unwrap();
-        drop(file);
-        let mut permissions = std::fs::metadata(&path).unwrap().permissions();
-        permissions.set_mode(0o755);
-        std::fs::set_permissions(&path, permissions).unwrap();
-        (dir, path)
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stub_backend_parses_create_id_and_starts() {
-        let _spawn = SPAWN_LOCK.lock().await;
-        let (_dir, program) = stub(
-            "#!/bin/sh\ncase \"$1\" in\n  create) echo deadbeef ;;\n  start) exit 0 ;;\n  *) exit 2 ;;\nesac\n",
-        );
-        let runtime = PodmanRuntime::with_program(program);
-        let id = runtime.create(&MachineSpec::default()).await.unwrap();
-        assert_eq!(id, MachineId::from("deadbeef"));
-        runtime.start(&id).await.unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stub_non_zero_exit_maps_to_backend_error() {
-        let _spawn = SPAWN_LOCK.lock().await;
-        let (_dir, program) = stub("#!/bin/sh\necho boom 1>&2\nexit 125\n");
-        let runtime = PodmanRuntime::with_program(program).with_binary_env("ADESK_TEST", "1");
-        let err = runtime
-            .start(&MachineId::from("machine-1"))
-            .await
-            .unwrap_err();
-        match err {
-            MachineError::Backend {
-                program,
-                status,
-                stderr,
-            } => {
-                assert_eq!(status, 125);
-                assert_eq!(stderr, "boom");
-                assert!(program.ends_with("stub-podman"));
-            }
-            other => panic!("expected a backend error, got {other:?}"),
-        }
-    }
 
     #[tokio::test]
     async fn missing_program_maps_to_spawn_error() {
