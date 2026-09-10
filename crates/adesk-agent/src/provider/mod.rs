@@ -2,12 +2,16 @@
 //!
 //! The agent depends only on [`LlmProvider`]: given a bounded [`AgentContext`],
 //! return one [`AgentDecision`]. [`MockProvider`] replays a script (default in
-//! tests and for `--provider mock` dry runs); [`OpenAiCompatProvider`] speaks the
-//! OpenAI `/chat/completions` shape against any compatible `base_url`.
+//! tests and for `--provider mock` dry runs); [`DummyVlmProvider`] replays a canned
+//! sequence or emits reproducible random decisions with no I/O; and
+//! [`OpenAiCompatProvider`] speaks the OpenAI `/chat/completions` shape against any
+//! compatible `base_url`.
 
+pub mod dummy;
 pub mod mock;
 pub mod openai;
 
+pub use dummy::{DummyConfig, DummyMode, DummyVlmProvider};
 pub use mock::{MockProvider, ScriptEntry};
 pub use openai::{ImageDetail, OpenAiCompatProvider, OpenAiConfig};
 
@@ -46,6 +50,10 @@ pub enum ProviderKind {
     /// OpenAI-compatible `/chat/completions` endpoint ([`OpenAiCompatProvider`]).
     #[value(name = "openai")]
     OpenAi,
+    /// Synthetic "dummy VLM" ([`DummyVlmProvider`]): canned or reproducible random
+    /// decisions with no network or I/O.
+    #[value(name = "dummy")]
+    Dummy,
 }
 
 impl ProviderKind {
@@ -54,6 +62,7 @@ impl ProviderKind {
         match self {
             Self::Mock => "mock",
             Self::OpenAi => "openai",
+            Self::Dummy => "dummy",
         }
     }
 }
@@ -83,6 +92,19 @@ pub struct ProviderConfig {
     pub system_prompt: Option<String>,
     /// Script handed to [`MockProvider`] (empty = built-in dry-run script).
     pub mock_script: Vec<AgentDecision>,
+    /// Mode for [`DummyVlmProvider`].
+    pub dummy_mode: DummyMode,
+    /// Canned sequence for [`DummyVlmProvider`] in [`DummyMode::Fixed`].
+    pub dummy_script: Vec<AgentDecision>,
+    /// PRNG seed for [`DummyVlmProvider`] in [`DummyMode::Random`].
+    pub dummy_seed: u64,
+    /// Per-step finish probability for [`DummyVlmProvider`] in [`DummyMode::Random`].
+    pub dummy_finish_probability: f64,
+    /// Hard step budget for [`DummyVlmProvider`] in [`DummyMode::Random`].
+    pub dummy_step_budget: u32,
+    /// Action pool for [`DummyVlmProvider`] in [`DummyMode::Random`] (empty =
+    /// [`dummy::default_action_pool`]).
+    pub dummy_pool: Vec<AgentDecision>,
 }
 
 impl Default for ProviderConfig {
@@ -97,6 +119,12 @@ impl Default for ProviderConfig {
             timeout_ms: openai::DEFAULT_TIMEOUT_MS,
             system_prompt: None,
             mock_script: Vec::new(),
+            dummy_mode: DummyMode::default(),
+            dummy_script: Vec::new(),
+            dummy_seed: dummy::DEFAULT_SEED,
+            dummy_finish_probability: dummy::DEFAULT_FINISH_PROBABILITY,
+            dummy_step_budget: dummy::DEFAULT_STEP_BUDGET,
+            dummy_pool: Vec::new(),
         }
     }
 }
@@ -106,11 +134,22 @@ impl ProviderConfig {
     ///
     /// For [`ProviderKind::Mock`] the script is used as-is; an empty script means
     /// the built-in dry-run sequence (`ping`/`list_windows`/`finish`). For
-    /// [`ProviderKind::OpenAi`] the API key is resolved from `api_key` and then
-    /// from the environment, and a missing key is [`ProviderError::MissingApiKey`].
+    /// [`ProviderKind::Dummy`] the `dummy_*` fields configure a no-I/O synthetic
+    /// provider that always builds. For [`ProviderKind::OpenAi`] the API key is
+    /// resolved from `api_key` and then from the environment, and a missing key is
+    /// [`ProviderError::MissingApiKey`].
     pub fn build(&self) -> Result<Box<dyn LlmProvider>, ProviderError> {
         match self.kind {
             ProviderKind::Mock => Ok(Box::new(MockProvider::scripted(self.mock_script.clone()))),
+            ProviderKind::Dummy => Ok(Box::new(DummyVlmProvider::from_config(DummyConfig {
+                mode: self.dummy_mode,
+                script: self.dummy_script.clone(),
+                seed: self.dummy_seed,
+                finish_probability: self.dummy_finish_probability,
+                step_budget: self.dummy_step_budget,
+                pool: self.dummy_pool.clone(),
+                name: String::from("dummy"),
+            }))),
             ProviderKind::OpenAi => Ok(Box::new(OpenAiCompatProvider::new(self.openai_config()?)?)),
         }
     }
@@ -186,6 +225,7 @@ mod tests {
     fn provider_kind_names_match_the_cli() {
         assert_eq!(ProviderKind::Mock.as_str(), "mock");
         assert_eq!(ProviderKind::OpenAi.as_str(), "openai");
+        assert_eq!(ProviderKind::Dummy.as_str(), "dummy");
     }
 
     #[tokio::test]
@@ -247,6 +287,12 @@ mod tests {
             timeout_ms: 1234,
             system_prompt: Some(String::from("SYS")),
             mock_script: Vec::new(),
+            dummy_mode: DummyMode::Fixed,
+            dummy_script: Vec::new(),
+            dummy_seed: 7,
+            dummy_finish_probability: 0.5,
+            dummy_step_budget: 3,
+            dummy_pool: Vec::new(),
         }
         .openai_config()
         .expect("explicit key");
@@ -288,5 +334,61 @@ mod tests {
         let provider = config.build().expect("explicit key");
         assert_eq!(provider.name(), "openai");
         assert!(provider.supports_images());
+    }
+
+    #[test]
+    fn default_config_carries_the_documented_dummy_defaults() {
+        let config = ProviderConfig::default();
+        assert_eq!(config.dummy_mode, DummyMode::Random);
+        assert!(config.dummy_script.is_empty());
+        assert_eq!(config.dummy_seed, dummy::DEFAULT_SEED);
+        assert_eq!(
+            config.dummy_finish_probability,
+            dummy::DEFAULT_FINISH_PROBABILITY
+        );
+        assert_eq!(config.dummy_step_budget, dummy::DEFAULT_STEP_BUDGET);
+        assert!(config.dummy_pool.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dummy_config_builds_a_fixed_dummy_provider() {
+        let config = ProviderConfig {
+            kind: ProviderKind::Dummy,
+            dummy_mode: DummyMode::Fixed,
+            dummy_script: vec![AgentDecision::ListWindows],
+            dummy_pool: Vec::new(),
+            ..ProviderConfig::default()
+        };
+        let provider = config.build().expect("dummy never fails");
+        assert_eq!(provider.name(), "dummy");
+        assert!(provider.supports_images());
+        assert_eq!(
+            provider.complete(&context()).await.unwrap(),
+            AgentDecision::ListWindows
+        );
+        assert!(matches!(
+            provider.complete(&context()).await.unwrap(),
+            AgentDecision::Finish { success: true, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dummy_config_builds_a_reproducible_random_provider() {
+        let config = ProviderConfig {
+            kind: ProviderKind::Dummy,
+            dummy_mode: DummyMode::Random,
+            dummy_seed: 1234,
+            ..ProviderConfig::default()
+        };
+        let first = config.build().expect("dummy never fails");
+        let second = config.build().expect("dummy never fails");
+
+        let mut first_seq = Vec::new();
+        let mut second_seq = Vec::new();
+        for _ in 0..10 {
+            first_seq.push(first.complete(&context()).await.unwrap());
+            second_seq.push(second.complete(&context()).await.unwrap());
+        }
+        assert_eq!(first_seq, second_seq);
     }
 }
