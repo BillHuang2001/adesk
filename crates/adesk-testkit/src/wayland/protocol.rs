@@ -133,6 +133,15 @@ impl Globals {
     pub(crate) fn xdg_wm_base(&self) -> &xdg_wm_base::XdgWmBase {
         &self.xdg_wm_base
     }
+
+    /// The bound `wl_seat`.
+    ///
+    /// The client clones this into [`ClientState::seat`](super::state::ClientState) at
+    /// connect time, because `wl_seat.capabilities` — the event that decides which input
+    /// objects exist — is dispatched on the reader thread from that clone.
+    pub(crate) fn seat(&self) -> &wl_seat::WlSeat {
+        &self.seat
+    }
 }
 
 /// Binds the required globals on `qhandle` and negotiates versions.

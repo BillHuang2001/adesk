@@ -189,10 +189,13 @@ pub const KEY_LEFTCTRL: u32 = 29;
 pub const KEY_C: u32 = 46;
 
 /// Bit for `wl_seat.capability.pointer`.
-pub(crate) const POINTER_CAPABILITY: u32 = wl_seat::Capability::Pointer as u32;
+///
+/// `wl_seat::Capability` is a `bitflags` type, so the bit is taken through its `const fn
+/// bits()` (`u32::from` it is not a `const fn`, and a cast does not exist).
+pub(crate) const POINTER_CAPABILITY: u32 = wl_seat::Capability::Pointer.bits();
 
 /// Bit for `wl_seat.capability.keyboard`.
-pub(crate) const KEYBOARD_CAPABILITY: u32 = wl_seat::Capability::Keyboard as u32;
+pub(crate) const KEYBOARD_CAPABILITY: u32 = wl_seat::Capability::Keyboard.bits();
 
 /// The raw bitfield of a `wl_seat.capabilities` event.
 ///
@@ -260,6 +263,9 @@ mod tests {
     use std::time::Duration;
 
     use adesk_core::{AppId, Position, WindowId};
+    // `Proxy` is what provides `id()`, which the tests use to compare a recorded event's
+    // surface against the window's own `wl_surface`.
+    use wayland_client::Proxy;
 
     use super::*;
     use crate::runtime::{TestRuntime, TestRuntimeConfig};
@@ -320,7 +326,7 @@ mod tests {
             .expect("one roundtrip after mapping");
         let listed = tokio_rt
             .block_on(async {
-                let client = runtime.client().await?;
+                let client = runtime.client().await.expect("the AGP client connects");
                 client.list_windows().await
             })
             .expect("the AGP client lists the windows");
@@ -470,6 +476,13 @@ mod tests {
             "last_modifiers reports the recorded modifier state"
         );
 
+        // The recorded serial is the one a later request may answer with: an injecting
+        // sequence produced real input events, so at least one serial-carrying event
+        // (`wl_pointer.enter`, `wl_pointer.button` or `wl_keyboard.enter`) arrived.
+        let entered_serial = crate::wayland::state::lock_client(&wayland.state)
+            .latest_input_serial()
+            .expect("an entering input event carried a serial");
+
         // The history is append-only until it is cleared explicitly.
         assert!(!wayland.keyboard_events().is_empty());
         wayland.clear_input_events();
@@ -479,6 +492,12 @@ mod tests {
             wayland.last_modifiers(),
             None,
             "clearing the history clears the recorded modifier state with it"
+        );
+        assert_eq!(
+            crate::wayland::state::lock_client(&wayland.state).latest_input_serial(),
+            Some(entered_serial),
+            "clearing the history keeps the latest input serial: it belongs to the seat's \
+             input stream, not to the recorded history"
         );
 
         tokio_rt

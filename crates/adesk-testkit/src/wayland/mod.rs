@@ -82,14 +82,20 @@ use wayland_client::protocol::wl_shm;
 use wayland_client::{Connection, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::xdg_positioner;
 
+use crate::block_until;
 use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
 
+mod input;
 mod protocol;
 mod shm;
 mod state;
 mod window;
 
+pub use input::{
+    AxisKind, ButtonState, KeyboardEvent, KeyState, ModifiersState, PointerEvent, BTN_LEFT, KEY_C,
+    KEY_LEFTCTRL,
+};
 pub use protocol::Globals;
 pub use window::{ConfiguredSize, PopupSpec, TestPopup, TestWindow, ToplevelSpec};
 

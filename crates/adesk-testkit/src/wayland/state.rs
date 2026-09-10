@@ -134,6 +134,12 @@ impl ClientState {
     /// [`clear_input_events`](super::WaylandTestClient::clear_input_events) keeps it,
     /// because a serial belongs to the seat's input stream rather than to the recorded
     /// event history.
+    ///
+    /// Its consumer is the later clipboard pass (`wl_data_source.set_selection` must quote
+    /// a serial a real input event carried); until that lands, only this module's own
+    /// self-validation test reads it, so a plain (non-test) lib build would report it as
+    /// dead code. The `allow` is deliberately scoped to this one item — never the crate.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn latest_input_serial(&self) -> Option<u32> {
         self.latest_input_serial
     }
