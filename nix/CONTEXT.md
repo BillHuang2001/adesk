@@ -40,6 +40,10 @@ wiring layer. The flake imports everything here (no standalone entry points).
 
 - `nix flake show`, `nix flake check`, and
   `nix eval .#packages.x86_64-linux.adesk.drvPath` must be green.
+- `nix build .#adesk` installs exactly
+  `bin/{adesk-server,adesk-viewer,adesk-machine,adesk-agent}`; `postInstall`
+  removes the dev-only `adesk-test-app`.
 - Evaluate a `lib.nixosSystem` that imports the module and read
   `config.systemd.services.adesk.serviceConfig.ExecStart` /
-  `config.services.adesk.socket` to catch type/config errors.
+  `config.services.adesk.socket` (and `config.system.build.toplevel.drvPath`
+  with a complete host config) to catch type/config errors.
