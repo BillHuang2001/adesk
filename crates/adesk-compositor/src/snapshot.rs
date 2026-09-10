@@ -63,11 +63,6 @@ impl StateSnapshot {
         self.windows.iter().find(|window| window.id == id)
     }
 
-    /// Number of windows in the snapshot.
-    pub fn len(&self) -> usize {
-        self.windows.len()
-    }
-
     /// Whether the compositor knows no windows at all.
     pub fn is_empty(&self) -> bool {
         self.windows.is_empty()
@@ -108,7 +103,7 @@ mod tests {
             seq: 42,
             ts_ms: 1000,
         };
-        assert_eq!(snapshot.len(), 2);
+        assert_eq!(snapshot.windows.len(), 2);
         assert!(!snapshot.is_empty());
         assert_eq!(
             snapshot.window(WindowId(2)).map(|w| w.id),

@@ -13,7 +13,6 @@ Window-management policy and coordinate conversion live in `adesk-wm`; pixel pro
 Entry point:
 - `spawn(CompositorConfig) -> Result<CompositorHandle>` — starts the thread named `adesk-compositor` and returns immediately.
 - `CompositorHandle` — `Clone + Send + Sync` (`Arc` inside):
-  - `command() -> calloop::channel::Sender<RuntimeCommand>`
   - `send(RuntimeCommand) -> Result<()>`
   - `events() -> broadcast::Sender<RuntimeEvent>`
   - `subscribe() -> broadcast::Receiver<RuntimeEvent>`
@@ -35,7 +34,7 @@ Commands and replies:
 - `RuntimeCommand` — `docs/architecture.md` §3 plus `NoteLaunch` (compositor-side launch-ledger bookkeeping for `launch_app`) and `ReserveSeq` (silent `seq` allocation for server-synthesized events): `RenderWindow`, `RenderOutput`, `QueryState`, `NoteLaunch`, `ReserveSeq`, `ActivateWindow`, `CloseWindow`, `PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`, `Shutdown`.
 - Every result-bearing variant carries its own `tokio::sync::oneshot::Sender<adesk_core::Result<T>>`; `QueryState` replies `StateSnapshot` infallibly; `NoteLaunch` acknowledges `()` infallibly; `ReserveSeq` replies the next `seq` (`u64`) infallibly; `Shutdown` acknowledges `()`.
 - `RuntimeCommand::method() -> &'static str` is the stable tracing span name.
-- `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `len()`, `is_empty()`.
+- `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `is_empty()`.
 - `RenderedFrame { image: ImageBuffer, commit_seq: u64, damage: Vec<Rect> }` + `new()`, `size()`.
 
 Input vocabulary:
@@ -263,7 +262,6 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 - Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`create_target`/`render_scene`/readback/image conversion`); dev-dependency `adesk-testkit` (in-process runtime, Wayland test client, image assertions — used only by the crate-local integration suites).
 - External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `calloop 0.14`; `tokio 1` (sync/rt/time/net — used in `src`, not only tests); `thiserror 2`; `tracing 0.1`.
-- Declared but unused by this crate's `src`/`tests` (`Cargo.toml:21` `libc`, `Cargo.toml:32` `wayland-server`): every `wayland_server` path is reached through `smithay::reexports::wayland_server` (never the direct crate name), and no `libc::` symbol is referenced anywhere in the crate — both lines are removal candidates, but removal touches the workspace dep graph, so treat as a deliberate cleanup, not a drive-by.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.
 

@@ -11,9 +11,9 @@
 //! renderer) lives on that thread and is never `Send`. The rest of the runtime talks
 //! to it through exactly three channels:
 //!
-//! 1. **Commands** (server → compositor): [`CompositorHandle::command`] returns a
-//!    `calloop::channel::Sender<RuntimeCommand>`; each result-bearing command carries
-//!    its own `tokio::sync::oneshot::Sender`. Commands are served in FIFO order.
+//! 1. **Commands** (server → compositor): [`CompositorHandle::send`] delivers a
+//!    [`RuntimeCommand`] over a `calloop::channel::Sender`; each result-bearing command
+//!    carries its own `tokio::sync::oneshot::Sender`. Commands are served in FIFO order.
 //! 2. **Events** (compositor → server): [`CompositorHandle::events`] returns a
 //!    `tokio::sync::broadcast::Sender<RuntimeEvent>` (capacity ≥ 4096). Sending never
 //!    blocks the loop; a full channel never stalls the compositor.
