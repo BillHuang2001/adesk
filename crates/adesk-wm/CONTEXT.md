@@ -96,6 +96,7 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - `last_commit_seq` is updated with `max(current, new)` so duplicate or reordered commits cannot regress the watermark; `on_commit` is the hot path and allocates nothing.
 - `popup_count` saturates at zero and duplicate popup events are ignored; popups never change which toplevel is visible.
 - v1 does not distinguish unmap from destroy: the compositor calls `on_destroy` for both and a remapped surface key gets a new id; a future `on_unmap` is additive.
+- `on_app_id` stores exactly the passed `Option<AppId>`, so `None` clears the app id: it mirrors `on_title`'s contract and matches the compositor, which maps an empty `xdg_toplevel.app_id` to `None` (a client may legitimately unset or never set it).
 - `on_commit` accepts `damage` but ignores it in v1 (`adesk-observer` owns damage history); the parameter keeps a damage-aware policy addable without touching call sites.
 - `close_window` is compositor-only (`xdg_toplevel.close`); the window leaves the model through `on_destroy`, so there is no `Closing` lifecycle state in v1.
 - `on_map` for an already-tracked `SurfaceKey` is an evaluated no-op (`[None]`) that reuses the existing id, so a duplicate map can never mint a second id for one surface tree.
