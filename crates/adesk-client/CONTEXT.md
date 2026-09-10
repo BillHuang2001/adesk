@@ -38,7 +38,7 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - `CaptureRequest::window(id)` + `.region/.max_dimension/.format`; `CaptureRegionRequest::new(id, rect)` (region mandatory).
 - `ObserveRequest::quiet(ms)/change()/timeout()` + `.window/.after_action/.timeout_ms/.include_image/.max_dimension/.region`; `Condition{Quiet{quiet_ms}, Change, Timeout}`; `DEFAULT_TIMEOUT_MS = 5000`.
 - `WaitForChangeRequest::default()` + `.window/.since_commit/.timeout_ms`; `WaitForQuietRequest::default()` (quiet_ms 250) + `.window/.quiet_ms/.timeout_ms/.after_action`. These two helpers never request pixels (see Design Decisions).
-- `ClickRequest::window(id)` + `.position/.button/.count`; `PointerButtonRequest::window(id)` + `.position/.button` (used by `double_click`/`mouse_down`/`mouse_up`); `ScrollRequest::new(id, dx, dy)` + `.position`; `DragRequest::new(id, from, to)` + `.button/.duration_ms`.
+- `ClickRequest::window(id)` + `.position/.button/.count`; `PointerButtonRequest::window(id)` + `.position/.button` (used by `double_click`/`mouse_down`/`mouse_up`); `ScrollRequest::new(id, dx, dy)` + `.position`; `DragRequest::new(id, from, to)`.
 - `KeyChord{Single(String), Chord(Vec<String>)}` + `single`/`chord`, `From<&str>`, `From<String>`, `From<Vec<String>>`, `From<&[&str]>`; serialises as string or array per protocol §3.
 - `InspectCaptureRequest::default()` (= `DEFAULT_OVERLAYS`: window_ids+focus+damage) + `.region/.max_dimension`; `InspectSubscribeRequest::new(overlays)` + `.min_interval_ms`.
 
