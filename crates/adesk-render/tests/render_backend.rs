@@ -752,8 +752,8 @@ fn gl_reused_target_does_not_leak_pixels_into_a_node_free_frame() {
     let mut target = pool
         .acquire(&mut renderer, fixture.config.target_size())
         .expect("pooled GL target");
-    let second = render_scene(&mut renderer, &mut target, &empty, &fixture.config)
-        .expect("GL clear render");
+    let second =
+        render_scene(&mut renderer, &mut target, &empty, &fixture.config).expect("GL clear render");
     pool.release(target);
 
     for y in 0..8 {
