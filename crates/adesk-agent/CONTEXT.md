@@ -83,6 +83,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Dummy-provider loop-termination test | `./tests/dummy_provider.rs` |
 | E2E suite against a real runtime (feature `e2e`; 14 tests) | `./tests/e2e_runtime.rs` |
 | E2E shared helpers (module of the e2e target, no tests) | `./tests/e2e_support/mod.rs` |
+| Shared integration-test fixtures (module of each target) | `./tests/common/mod.rs` |
 
 ## Design Decisions
 - Two seams, one direction: `AgentLoop` depends only on `AgentClient` (runtime) and `LlmProvider` (LLM); both are object-safe-ish traits so tests replace either side, and `AgpClient`/`OpenAiCompatProvider` are the only concrete adapters.
