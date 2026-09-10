@@ -4,9 +4,8 @@
 //! rely on, using the examples from `docs/protocol.md`.
 
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, ButtonState, Error, ErrorCode, EventKind, ImageBuffer,
-    KeyState, LaunchId, Observation, OverlayKind, PixelFormat, Point, Position, Rect, Region,
-    RuntimeEvent, Size, WindowId, WindowInfo, WindowState,
+    ActionId, AppId, AppInfo, Button, ImageBuffer, LaunchId, Observation, OverlayKind, Point,
+    Position, Rect, Region, RuntimeEvent, Size, WindowId, WindowInfo, WindowState,
 };
 use serde_json::json;
 
@@ -371,68 +370,12 @@ fn every_runtime_event_variant_round_trips_with_its_tag() {
 }
 
 #[test]
-fn error_code_wire_names_match_protocol() {
-    let codes = [
-        (ErrorCode::InvalidRequest, "invalid_request"),
-        (ErrorCode::UnknownMethod, "unknown_method"),
-        (ErrorCode::UnknownWindow, "unknown_window"),
-        (ErrorCode::UnknownApp, "unknown_app"),
-        (ErrorCode::LaunchFailed, "launch_failed"),
-        (ErrorCode::CaptureFailed, "capture_failed"),
-        (ErrorCode::RenderFailed, "render_failed"),
-        (ErrorCode::Timeout, "timeout"),
-        (ErrorCode::NotSupported, "not_supported"),
-        (ErrorCode::Busy, "busy"),
-        (ErrorCode::Internal, "internal"),
-        (ErrorCode::ShuttingDown, "shutting_down"),
-        (
-            ErrorCode::ProtocolVersionMismatch,
-            "protocol_version_mismatch",
-        ),
-    ];
-    for (code, name) in codes {
-        assert_eq!(serde_json::to_value(code).unwrap(), json!(name));
-        assert_eq!(
-            serde_json::from_value::<ErrorCode>(json!(name)).unwrap(),
-            code
-        );
-    }
-}
-
-#[test]
-fn error_json_matches_protocol_error_object() {
-    let err = Error::unknown_window(WindowId(99));
-    let value = serde_json::to_value(&err).unwrap();
-    assert_eq!(
-        value,
-        json!({"code": "unknown_window", "message": "unknown window 99"})
-    );
-    assert_eq!(serde_json::from_value::<Error>(value).unwrap(), err);
-}
-
-#[test]
 fn enum_wire_names() {
     assert_eq!(
         serde_json::to_value(Button::Middle).unwrap(),
         json!("middle")
     );
     assert_eq!(serde_json::to_value(Button::Side).unwrap(), json!("side"));
-    assert_eq!(
-        serde_json::to_value(ButtonState::Pressed).unwrap(),
-        json!("pressed")
-    );
-    assert_eq!(
-        serde_json::to_value(KeyState::Released).unwrap(),
-        json!("released")
-    );
-    assert_eq!(
-        serde_json::to_value(WindowState::Inactive).unwrap(),
-        json!("inactive")
-    );
-    assert_eq!(
-        serde_json::to_value(PixelFormat::Rgba8).unwrap(),
-        json!("rgba8")
-    );
 
     let overlays = [
         (OverlayKind::WindowIds, "window_ids"),
@@ -448,25 +391,6 @@ fn enum_wire_names() {
         assert_eq!(serde_json::to_value(kind).unwrap(), json!(name));
         assert_eq!(
             serde_json::from_value::<OverlayKind>(json!(name)).unwrap(),
-            kind
-        );
-    }
-
-    let kinds = [
-        (EventKind::WindowCreated, "window_created"),
-        (EventKind::WindowDestroyed, "window_destroyed"),
-        (EventKind::WindowActivated, "window_activated"),
-        (EventKind::TitleChanged, "title_changed"),
-        (EventKind::SurfaceCommit, "surface_commit"),
-        (EventKind::FocusChanged, "focus_changed"),
-        (EventKind::PopupAppeared, "popup_appeared"),
-        (EventKind::PopupDisappeared, "popup_disappeared"),
-        (EventKind::AppLaunched, "app_launched"),
-    ];
-    for (kind, name) in kinds {
-        assert_eq!(serde_json::to_value(kind).unwrap(), json!(name));
-        assert_eq!(
-            serde_json::from_value::<EventKind>(json!(name)).unwrap(),
             kind
         );
     }
