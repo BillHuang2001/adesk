@@ -243,6 +243,16 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
 
+## Performance Notes (hot paths)
+
+Frequency order: (1) `State::on_surface_commit` runs on every client commit/damage; (2) the command path (`render_window`/`render_output`/`query_state`/`pointer_*`/`key_event`) runs per agent action/observation; (3) `CompositorHandler::commit` (`src/protocols/compositor.rs`) is the protocol entry for (1).
+- The commit path clones no pixel data: `on_surface_commit` moves the `Region` into the event and only clones `WlSurface` handles (Arc bumps) inside `window_offset`.
+- Per-commit avoidable work: `on_surface_commit` resolves the owner with `WmBridge::window_for_surface` (upward walk for subsurfaces) and then re-walks the same tree in `State::window_offset`; `window_offset` clones the root surface via `surface_of` and clones the committing surface even when it is the root (the common case breaks on the first loop iteration).
+- Per-observation avoidable work: `State::render_window` scans `WmBridge::windows()` (O(n) `Vec<WindowInfo>` with `AppId`/`title` clones) to find one id, though `WmBridge::last_commit_seq` shows an O(1) `manager.window(id)` lookup is available; `State::render_output` builds a `Vec<OutputWindow>` cloning every tracked window's root surface although `elements::output_scene` draws only the first active candidate.
+- Dominant per-observation cost: every `RenderWindow`/`RenderOutput` allocates a fresh offscreen target (`HeadlessRenderer::render_window`/`render_output` → `adesk_render::create_target`) of the window/output size (≈4 MiB for 1280×800), clears and redraws every scene node, reads back the **entire** target, and only then crops/downscales (`adesk_render::render_scene`). No target or frame is reused between demands, and a small `region` crop does not shrink the readback.
+- `State::inject_key` re-parses `Shift_L`/`ISO_Level3_Shift` from strings and re-resolves them through the keymap on every key event, and allocates the per-call `plan`/`modifiers` vectors; the three level-modifier keycodes are constant for the process lifetime.
+- `run.rs` calls `display.flush_clients()` after every command (including `QueryState`/`ReserveSeq`/`NoteLaunch`, which queue no seat bytes) and after every display-fd dispatch.
+
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
