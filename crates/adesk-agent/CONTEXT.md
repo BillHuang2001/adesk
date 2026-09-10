@@ -72,6 +72,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Context cap tests | `./tests/context_budget.rs` |
 | Metrics semantics tests | `./tests/metrics.rs` |
 | Scenario tests | `./tests/scenarios.rs` |
+| Dummy-provider loop-termination test | `./tests/dummy_provider.rs` |
 | E2E suite against a real runtime (feature `e2e`; 14 tests) | `./tests/e2e_runtime.rs` |
 | E2E shared helpers (module of the e2e target, no tests) | `./tests/e2e_support/mod.rs` |
 
