@@ -60,6 +60,9 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
 libc = "0.2"
 bitflags = "2"
+# Safe pipe creation (OwnedFd pairs) for the testkit data-device helpers; keeps
+# `adesk-testkit`'s `#![forbid(unsafe_code)]` intact without raising the MSRV.
+rustix = { version = "1", features = ["pipe"] }
 
 # --- agent LLM providers ---
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
