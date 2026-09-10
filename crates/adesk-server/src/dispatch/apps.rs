@@ -48,7 +48,7 @@ pub async fn launch_app(
     // them *before* spawning means a compositor that cannot answer fails the
     // request without leaving an unannounced process behind; a reserved number
     // that ends up unused is fine, because gaps are allowed and reuse is not.
-    let snapshot = windows::state(ctx).await?;
+    let snapshot = windows::state(ctx.server).await?;
     let seq = windows::reserve_seq(ctx.server).await?;
 
     // The child must see the compositor's Wayland socket; everything else is
