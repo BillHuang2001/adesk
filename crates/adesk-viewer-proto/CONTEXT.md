@@ -74,7 +74,6 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 
 ## Known Issues
 - Two `ViewerProtoError` variants are unreachable in the whole workspace: `Json` (every decode path maps a JSON failure to `Malformed`, and no crate `?`s a `serde_json::Error` into this type) and `Unknown` (constructed only by `./tests/codec.rs`); `dead_code` never fires on a public enum variant, so nothing flags them.
-- `serde_json` is declared in both `[dependencies]` and `[dev-dependencies]`; the dev-dependency entry is redundant (integration tests already see normal dependencies — `adesk-proto` has no `[dev-dependencies]` and its tests use `serde_json`).
 ## Status
 Implemented and green: `src/lib.rs`, `src/error.rs`, `src/types.rs`, `src/message.rs`, `src/codec.rs`.
 `./scripts/dev.sh cargo test -p adesk-viewer-proto` = 36 passed / 0 failed (21 `tests/wire.rs`, 14 `tests/codec.rs`, 1 doctest), with the duplicated fixtures consolidated into the shared `tests/common/mod.rs` module.
