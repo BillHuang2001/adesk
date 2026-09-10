@@ -228,6 +228,7 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
+- Stale comment wording only (no code defect): the `src/render/elements.rs` and `src/render/headless.rs` test modules call the popup and tracked-but-inactive pixel proofs "queued" `tests/integration_plan.md` scenarios, but both are implemented (`tests/popups.rs`, `tests/output_composition.rs`). The plan doc is the normative statement.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 
