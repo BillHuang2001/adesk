@@ -131,10 +131,7 @@ fn public_signatures_are_stable() {
 
     // GL gating is opt-in and self-consistent.
     let gl_env = std::env::var(GL_ENV_VAR);
-    assert_eq!(
-        gl_enabled(),
-        matches!(gl_env.as_deref(), Ok("1") | Ok("true") | Ok("TRUE"))
-    );
+    assert_eq!(gl_enabled(), matches!(gl_env.as_deref(), Ok("1")));
     assert_eq!(require_gl().is_ok(), gl_enabled());
     assert_eq!(
         test_renderer(),

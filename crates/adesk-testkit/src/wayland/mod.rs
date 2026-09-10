@@ -56,7 +56,7 @@
 //!
 //! ## Deadlines
 //!
-//! Every public wait/pump takes an explicit [`Duration`]: `pump_until`/`roundtrip` return
+//! Every public wait/pump takes an explicit [`Duration`]: `roundtrip` returns
 //! [`TestkitError::Timeout`] when it expires and [`TestkitError::ConnectionClosed`] when
 //! the reader reported EOF; `pump_for` is a "run for this long" pump and returns the
 //! counters it accumulated (with `closed` set if EOF happened meanwhile). There is no
@@ -169,7 +169,7 @@ pub struct PumpStats {
 /// Construct one with [`WaylandTestClient::connect_in`] (or
 /// [`TestRuntime::wayland_client`](crate::TestRuntime::wayland_client)), create windows
 /// with [`create_toplevel`](WaylandTestClient::create_toplevel) and pump events with
-/// [`pump_for`](WaylandTestClient::pump_for) / [`pump_until`](WaylandTestClient::pump_until).
+/// [`pump_for`](WaylandTestClient::pump_for).
 /// All window methods take `&self`; the client itself is `&mut` only for pumps/teardown.
 pub struct WaylandTestClient {
     /// The request-side connection; the reader thread owns the event queue.
@@ -372,7 +372,7 @@ impl WaylandTestClient {
     /// arrived before this call still satisfies the wait; afterwards the call blocks in
     /// bounded slices ([`block_until`]) while the reader thread keeps appending — it never
     /// touches this client's pump channel, so it cannot steal a notification from a
-    /// concurrent [`Self::pump_until`]/[`Self::roundtrip`].
+    /// concurrent [`Self::roundtrip`].
     ///
     /// Fails with [`TestkitError::Timeout`] after `timeout`, naming `what`.
     pub fn wait_for_pointer_event(
@@ -612,48 +612,6 @@ impl WaylandTestClient {
                     self.closed = true;
                     stats.closed = true;
                     return Ok(stats);
-                }
-                Ok(Some(PumpEvent::Error(message))) => {
-                    return Err(TestkitError::Wayland(message));
-                }
-            }
-        }
-    }
-
-    /// Pumps until `pred` accepts the accumulated stats or `timeout` expires.
-    ///
-    /// Like [`pump_for`](WaylandTestClient::pump_for) but the loop ends as soon as
-    /// `pred(&stats)` is `true`; the predicate is checked after every notification and once
-    /// before the first receive (so an already-satisfied condition returns immediately).
-    /// Expiry returns [`TestkitError::Timeout`] with `what` and `timeout`; EOF returns
-    /// [`TestkitError::ConnectionClosed`] *before* the deadline (a closed connection can
-    /// never satisfy a predicate, so waiting for the timeout would be a lie).
-    pub async fn pump_until(
-        &mut self,
-        timeout: Duration,
-        what: &'static str,
-        mut pred: impl FnMut(&PumpStats) -> bool,
-    ) -> Result<PumpStats> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let mut stats = PumpStats::default();
-        if pred(&stats) {
-            return Ok(stats);
-        }
-        loop {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            match tokio::time::timeout(remaining, self.pump_rx.recv()).await {
-                Err(_expired) => return Err(TestkitError::Timeout { what, timeout }),
-                Ok(None) => return Err(TestkitError::ConnectionClosed),
-                Ok(Some(PumpEvent::Dispatched { events })) => {
-                    stats.dispatches += 1;
-                    stats.events += events;
-                    if pred(&stats) {
-                        return Ok(stats);
-                    }
-                }
-                Ok(Some(PumpEvent::Closed)) => {
-                    self.closed = true;
-                    return Err(TestkitError::ConnectionClosed);
                 }
                 Ok(Some(PumpEvent::Error(message))) => {
                     return Err(TestkitError::Wayland(message));

@@ -25,9 +25,6 @@ pub enum TestkitError {
         /// The deadline that expired.
         timeout: Duration,
     },
-    /// The runtime was already shut down.
-    #[error("runtime has been shut down")]
-    AlreadyShutdown,
     /// Connecting to the compositor's Wayland socket failed.
     #[error("wayland connection failed: {0}")]
     WaylandConnect(String),
@@ -60,12 +57,6 @@ pub enum TestkitError {
     /// Fixture setup (writing `.desktop` files, temp dirs) failed.
     #[error("fixture error: {0}")]
     Fixture(String),
-    /// An image comparison failed.
-    #[error("image assertion failed: {message}")]
-    ImageMismatch {
-        /// Details of the mismatch (coordinates, expected and actual values).
-        message: String,
-    },
     /// An event or condition that the test asserted must not happen, happened.
     #[error("unexpected: {message}")]
     Unexpected {
