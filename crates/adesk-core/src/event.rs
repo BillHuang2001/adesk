@@ -156,37 +156,53 @@ pub enum RuntimeEvent {
     },
 }
 
+/// Generates the uniform [`RuntimeEvent`] accessors from a single variant list.
+///
+/// Every enum variant is listed exactly once at the invocation site, so adding a
+/// variant means one edit here (plus the enum definition itself). `seq` and
+/// `ts_ms` expand their named field across all arms; `kind` maps each variant to
+/// the identically named [`EventKind`]. The non-uniform `window_id` accessor is
+/// written by hand below.
+macro_rules! runtime_event_accessors {
+    ( $( $variant:ident ),+ $(,)? ) => {
+        impl RuntimeEvent {
+            /// Global monotonic sequence number.
+            pub fn seq(&self) -> u64 {
+                match self {
+                    $( RuntimeEvent::$variant { seq, .. } )|+ => *seq,
+                }
+            }
+
+            /// Monotonic milliseconds since compositor start.
+            pub fn ts_ms(&self) -> u64 {
+                match self {
+                    $( RuntimeEvent::$variant { ts_ms, .. } )|+ => *ts_ms,
+                }
+            }
+
+            /// The event kind, without its payload.
+            pub fn kind(&self) -> EventKind {
+                match self {
+                    $( RuntimeEvent::$variant { .. } => EventKind::$variant, )+
+                }
+            }
+        }
+    };
+}
+
+runtime_event_accessors! {
+    WindowCreated,
+    WindowDestroyed,
+    WindowActivated,
+    TitleChanged,
+    SurfaceCommit,
+    FocusChanged,
+    PopupAppeared,
+    PopupDisappeared,
+    AppLaunched,
+}
+
 impl RuntimeEvent {
-    /// Global monotonic sequence number.
-    pub fn seq(&self) -> u64 {
-        match self {
-            RuntimeEvent::WindowCreated { seq, .. }
-            | RuntimeEvent::WindowDestroyed { seq, .. }
-            | RuntimeEvent::WindowActivated { seq, .. }
-            | RuntimeEvent::TitleChanged { seq, .. }
-            | RuntimeEvent::SurfaceCommit { seq, .. }
-            | RuntimeEvent::FocusChanged { seq, .. }
-            | RuntimeEvent::PopupAppeared { seq, .. }
-            | RuntimeEvent::PopupDisappeared { seq, .. }
-            | RuntimeEvent::AppLaunched { seq, .. } => *seq,
-        }
-    }
-
-    /// Monotonic milliseconds since compositor start.
-    pub fn ts_ms(&self) -> u64 {
-        match self {
-            RuntimeEvent::WindowCreated { ts_ms, .. }
-            | RuntimeEvent::WindowDestroyed { ts_ms, .. }
-            | RuntimeEvent::WindowActivated { ts_ms, .. }
-            | RuntimeEvent::TitleChanged { ts_ms, .. }
-            | RuntimeEvent::SurfaceCommit { ts_ms, .. }
-            | RuntimeEvent::FocusChanged { ts_ms, .. }
-            | RuntimeEvent::PopupAppeared { ts_ms, .. }
-            | RuntimeEvent::PopupDisappeared { ts_ms, .. }
-            | RuntimeEvent::AppLaunched { ts_ms, .. } => *ts_ms,
-        }
-    }
-
     /// The window this event belongs to, when applicable.
     ///
     /// [`RuntimeEvent::FocusChanged`] carries `Option<WindowId>` and returns it
@@ -202,21 +218,6 @@ impl RuntimeEvent {
             | RuntimeEvent::PopupDisappeared { window_id, .. } => Some(*window_id),
             RuntimeEvent::FocusChanged { window_id, .. } => *window_id,
             RuntimeEvent::AppLaunched { .. } => None,
-        }
-    }
-
-    /// The event kind, without its payload.
-    pub fn kind(&self) -> EventKind {
-        match self {
-            RuntimeEvent::WindowCreated { .. } => EventKind::WindowCreated,
-            RuntimeEvent::WindowDestroyed { .. } => EventKind::WindowDestroyed,
-            RuntimeEvent::WindowActivated { .. } => EventKind::WindowActivated,
-            RuntimeEvent::TitleChanged { .. } => EventKind::TitleChanged,
-            RuntimeEvent::SurfaceCommit { .. } => EventKind::SurfaceCommit,
-            RuntimeEvent::FocusChanged { .. } => EventKind::FocusChanged,
-            RuntimeEvent::PopupAppeared { .. } => EventKind::PopupAppeared,
-            RuntimeEvent::PopupDisappeared { .. } => EventKind::PopupDisappeared,
-            RuntimeEvent::AppLaunched { .. } => EventKind::AppLaunched,
         }
     }
 }

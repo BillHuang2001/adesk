@@ -63,11 +63,6 @@ impl Size {
     pub const fn is_empty(&self) -> bool {
         self.w == 0 || self.h == 0
     }
-
-    /// Returns the area in pixels.
-    pub const fn area(&self) -> u64 {
-        self.w as u64 * self.h as u64
-    }
 }
 
 /// A window-relative pixel rectangle: covers `x..x+w` and `y..y+h` (half-open).
@@ -309,11 +304,6 @@ impl Region {
     /// The stored rectangles in insertion order (all non-empty, may overlap).
     pub fn rects(&self) -> &[Rect] {
         &self.rects
-    }
-
-    /// Iterates over the stored rectangles in insertion order.
-    pub fn iter(&self) -> std::slice::Iter<'_, Rect> {
-        self.rects.iter()
     }
 }
 
@@ -602,14 +592,5 @@ mod tests {
     #[test]
     fn region_simplified_of_empty_is_empty() {
         assert_eq!(Region::empty().simplified(), Vec::new());
-    }
-
-    #[test]
-    fn region_iter_matches_rects() {
-        let mut region = Region::empty();
-        region.push(rect(0, 0, 1, 1));
-        region.push(rect(2, 2, 1, 1));
-        let collected: Vec<Rect> = region.iter().copied().collect();
-        assert_eq!(collected, region.rects().to_vec());
     }
 }
