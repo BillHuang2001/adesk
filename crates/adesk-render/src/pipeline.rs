@@ -6,15 +6,12 @@
 
 use adesk_core::Rect;
 use smithay::backend::renderer::element::RenderElement;
-use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, ImportAll, Renderer};
-use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
-use smithay::reexports::wayland_server::Resource;
+use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, Renderer, Texture};
 use smithay::utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform};
-use smithay::wayland::compositor::SurfaceData;
 
 use crate::config::{RenderConfig, READBACK_FORMAT};
 use crate::error::{RenderError, Result};
-use crate::image::{crop, downscale, image_from_readback};
+use crate::image::{downscale, image_from_readback};
 use crate::output::{OffscreenTarget, RenderedFrame};
 use crate::scene::Scene;
 
@@ -38,15 +35,23 @@ use crate::scene::Scene;
 ///    clear-color holes into a complete frame. `SceneNode::damage` is *evidence*
 ///    and is reported in [`RenderedFrame::damage`], not used to clip drawing;
 /// 6. `frame.finish()` and wait for the returned sync point;
-/// 7. `renderer.copy_framebuffer(&framebuffer, target_rect, READBACK_FORMAT)` →
-///    mapping, `renderer.map_texture(&mapping)` → bytes,
-///    [`crate::image_from_readback`] (the raw rows are consumed as top-down scene
-///    order on every backend; see the call site for why
+/// 7. `renderer.copy_framebuffer(&framebuffer, region, READBACK_FORMAT)` →
+///    mapping, `renderer.map_texture(&mapping)` → bytes. When `config.crop` is
+///    set, `region` is the crop translated into target coordinates
+///    (`crop.loc - source.loc`), so only the requested sub-rectangle is read
+///    back instead of the whole frame (`crop == None` reads the whole target,
+///    exactly as before). The row width/height/stride are taken from the actual
+///    mapping result and never assumed packed: pixman hands back a freshly
+///    copied region-sized image, GL a fresh region-sized pixel buffer, but a
+///    future backend could return a strided view;
+///    [`crate::image_from_readback`] consumes the raw rows as top-down scene
+///    order on every backend (see the call site for why
 ///    `TextureMapping::flipped` is deliberately ignored);
-/// 8. `crop` then `downscale` per [`RenderConfig`] (crop is given in scene
-///    coordinates and is translated to target coordinates here);
+/// 8. `downscale` per [`RenderConfig::max_dimension`] (a `None` dimension is a
+///    no-op and does not copy the image);
 /// 9. `RenderedFrame { image, commit_seq: scene.commit_seq(), damage }` where
-///    `damage` is `scene.damage()` clipped to `config.source`.
+///    `damage` is `scene.damage()` clipped to `config.source`, in scene
+///    coordinates and never adjusted by crop/downscale.
 ///
 /// Any renderer error is boxed into a structured [`crate::RenderError`]; this
 /// function never panics on a renderer failure.
@@ -101,6 +106,10 @@ where
             source: Box::new(err),
         })?;
 
+    // Scratch buffers hoisted out of the draw loop: reused (cleared) per node
+    // instead of being reallocated for every element.
+    let mut damage = [Rectangle::<i32, Physical>::from_size(Size::from((0, 0)))];
+    let mut opaque: Vec<Rectangle<i32, Physical>> = Vec::new();
     for node in scene.nodes() {
         let geometry = node.element().geometry(scale);
         let dst = Rectangle::new(to_target(node.location(), config.source), geometry.size);
@@ -108,17 +117,13 @@ where
         let Some(visible) = dst.intersection(target_rect) else {
             continue;
         };
-        let damage = [Rectangle::new(visible.loc - dst.loc, visible.size)];
-        let opaque: Vec<Rectangle<i32, Physical>> = node
-            .element()
-            .opaque_regions(scale)
-            .iter()
-            .map(|region| {
-                let mut region = *region;
-                region.loc -= dst.loc;
-                region
-            })
-            .collect();
+        damage[0] = Rectangle::new(visible.loc - dst.loc, visible.size);
+        opaque.clear();
+        opaque.extend(node.element().opaque_regions(scale).iter().map(|region| {
+            let mut region = *region;
+            region.loc -= dst.loc;
+            region
+        }));
         node.element()
             .draw(&mut frame, node.element().src(), dst, &damage, &opaque)
             .map_err(|err| RenderError::RenderFailed {
@@ -135,24 +140,52 @@ where
             source: Box::new(err),
         })?;
 
-    let readback_region = Rect::from_size(target_size);
+    // Read back only the requested sub-rectangle when a crop is configured:
+    // `copy_framebuffer` accepts a sub-region, so a small crop no longer pays a
+    // full-frame readback plus a full-image copy. The crop is given in scene
+    // coordinates and translated into target/buffer coordinates here (exactly
+    // the translation the old full-frame `crop` pass applied to the read-back
+    // image). `crop == None` reads the whole target, unchanged.
+    let readback = match config.crop {
+        Some(crop_rect) => {
+            let origin = to_target(
+                Point::<i32, Physical>::from((crop_rect.x, crop_rect.y)),
+                config.source,
+            );
+            Rectangle::<i32, BufferCoords>::new(
+                Point::from((origin.x, origin.y)),
+                Size::from((crop_rect.w as i32, crop_rect.h as i32)),
+            )
+        }
+        None => Rectangle::from_size(buffer_size),
+    };
+    let readback_region = Rect::new(
+        readback.loc.x,
+        readback.loc.y,
+        readback.size.w.max(0) as u32,
+        readback.size.h.max(0) as u32,
+    );
+
     let mapping = renderer
-        .copy_framebuffer(
-            &framebuffer,
-            Rectangle::from_size(buffer_size),
-            READBACK_FORMAT,
-        )
+        .copy_framebuffer(&framebuffer, readback, READBACK_FORMAT)
         .map_err(|err| RenderError::Readback {
             region: readback_region,
             source: Box::new(err),
         })?;
+    // Derive the geometry from the mapping itself rather than assuming the
+    // sub-rect is tightly packed: neither backend guarantees that in the type
+    // system, even though both currently return a fresh region-sized mapping.
+    let mapped = Texture::size(&mapping);
+    let width = u32::try_from(mapped.w).unwrap_or(0);
+    let height = u32::try_from(mapped.h).unwrap_or(0);
     let bytes = renderer
         .map_texture(&mapping)
         .map_err(|err| RenderError::Readback {
             region: readback_region,
             source: Box::new(err),
         })?;
-    // `Abgr8888` is four bytes per pixel, so a full-width row is `width * 4`.
+    // `map_texture` yields exactly `stride * height` bytes on both backends, so
+    // the real row length is the mapped length divided by the row count.
     //
     // `TextureMapping::flipped()` is deliberately NOT consulted: it describes the
     // mapping relative to the renderer's *native* origin (lower-left for GL), not
@@ -161,27 +194,9 @@ where
     // scene `y = 0` lands in framebuffer row 0 and therefore in the first readback
     // row. Un-flipping here would mirror every GL capture vertically. Smithay's
     // own readback consumers likewise write the mapped bytes out verbatim.
-    let image = image_from_readback(
-        bytes,
-        target_size.w,
-        target_size.h,
-        target_size.w.saturating_mul(4),
-        /* flipped = */ false,
-    )?;
+    let stride = u32::try_from(bytes.len() / (height.max(1) as usize)).unwrap_or(u32::MAX);
+    let image = image_from_readback(bytes, width, height, stride, /* flipped = */ false)?;
 
-    let image = match config.crop {
-        Some(crop_rect) => {
-            let origin = to_target(
-                Point::<i32, Physical>::from((crop_rect.x, crop_rect.y)),
-                config.source,
-            );
-            crop(
-                &image,
-                Rect::new(origin.x, origin.y, crop_rect.w, crop_rect.h),
-            )
-        }
-        None => image,
-    };
     let image = match config.max_dimension {
         Some(max_dimension) => downscale(&image, max_dimension),
         None => image,
@@ -204,35 +219,4 @@ fn to_target(point: Point<i32, Physical>, source: Rect) -> Point<i32, Physical> 
         point.x.saturating_sub(source.x),
         point.y.saturating_sub(source.y),
     ))
-}
-
-/// Imports a wayland buffer (SHM, DMA-BUF or EGL) as a renderer texture.
-///
-/// `adesk-compositor` uses this while building a scene; the structured error is
-/// how an unsupported DMA-BUF format on the software path surfaces as AGP
-/// `render_failed` instead of a panic. `Smithay`'s `ImportAll::import_buffer`
-/// returns `None` for buffers without a texture representation (unknown buffer
-/// type, single-pixel buffers), which maps to
-/// [`crate::RenderError::UnsupportedBuffer`].
-pub fn import_buffer<R: ImportAll>(
-    renderer: &mut R,
-    buffer: &WlBuffer,
-    surface: Option<&SurfaceData>,
-    damage: &[Rectangle<i32, BufferCoords>],
-) -> Result<R::TextureId>
-where
-    R::Error: Send + Sync + 'static,
-{
-    match renderer.import_buffer(buffer, surface, damage) {
-        Some(Ok(texture)) => Ok(texture),
-        Some(Err(err)) => Err(RenderError::ImportFailed {
-            reason: err.to_string(),
-        }),
-        None => Err(RenderError::UnsupportedBuffer {
-            reason: format!(
-                "wl_buffer {} has no texture representation (unknown buffer type or single-pixel buffer)",
-                buffer.id().protocol_id()
-            ),
-        }),
-    }
 }

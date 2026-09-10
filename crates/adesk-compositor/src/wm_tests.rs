@@ -232,6 +232,35 @@ fn unknown_windows_never_panic_and_report_unknown_window() {
 }
 
 #[test]
+fn hot_path_lookups_read_a_single_record() {
+    let mut bridge = bridge();
+    // Both lookups answer `None` for an unknown id (the command paths turn that into
+    // `unknown_window`); neither projects a `WindowInfo`.
+    assert_eq!(bridge.window_geometry(WindowId(1)), None);
+    assert_eq!(bridge.root_id(WindowId(1)), None);
+
+    let (id, _) = bridge.manager.on_map(MapRequest {
+        surface_key: SurfaceKey::new(1),
+        app_id: Some(AppId::from("org.example.geometry")),
+        pid: None,
+        title: Some("Geometry".to_string()),
+        created_seq: 1,
+    });
+    // The geometry is exactly the tiled rect the record carries.
+    assert_eq!(bridge.window_geometry(id), Some(Rect::new(0, 0, 1280, 800)));
+    assert_eq!(bridge.window_geometry(WindowId(999)), None);
+
+    // `root_id` is the window's entry in the root-surface map, compared as an
+    // `ObjectId` so the commit path clones no `WlSurface`. A real root id is the
+    // toplevel surface only the xdg-shell path can register (it needs a live
+    // `Display`), so this exercises the map directly.
+    let root = ObjectId::null();
+    bridge.roots.insert(id, root.clone());
+    assert_eq!(bridge.root_id(id), Some(root));
+    assert_eq!(bridge.root_id(WindowId(999)), None);
+}
+
+#[test]
 fn grab_bookkeeping_is_cleared_with_the_popup() {
     let mut bridge = bridge();
     // No grab at all.

@@ -6,6 +6,7 @@
 //! the encoder, because the PNG encoder panics on a length/dimension mismatch and
 //! no capture path may panic (`docs/viewer.md` §3).
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 
 use adesk_core::ImageBuffer;
@@ -36,7 +37,7 @@ pub fn save_frame_png(frame: &ImagePayload, path: &Path) -> Result<()> {
             Ok(())
         }
         ImageFormat::Rgba8 => {
-            let rgba = tight_rgba8(frame.width, frame.height, frame.stride, &data)?;
+            let rgba = tight_rgba8(frame.width, frame.height, frame.stride, Cow::Owned(data))?;
             encode_rgba8_png(&rgba, frame.width, frame.height, path)
         }
     }
@@ -57,7 +58,7 @@ pub fn write_rgba8(buffer: &ImageBuffer, path: &Path) -> Result<()> {
         buffer.width,
         buffer.height,
         Some(buffer.stride),
-        &buffer.data,
+        Cow::Borrowed(&buffer.data),
     )?;
     encode_rgba8_png(&rgba, buffer.width, buffer.height, path)
 }
@@ -106,7 +107,15 @@ impl FrameWriter {
 /// row wide; the absent stride defaults to the tight row length. Padding bytes are
 /// dropped. Every check is done in `u64` and a buffer that does not match is
 /// reported as a message, never a panic.
-fn tight_rgba8(width: u32, height: u32, stride: Option<u32>, data: &[u8]) -> Result<Vec<u8>> {
+///
+/// When the stride already equals the tight row length the input is returned
+/// unchanged, so an owned buffer is never copied (the `--follow` hot path).
+fn tight_rgba8<'a>(
+    width: u32,
+    height: u32,
+    stride: Option<u32>,
+    data: Cow<'a, [u8]>,
+) -> Result<Cow<'a, [u8]>> {
     let row_bytes = u64::from(width) * 4;
     if row_bytes > u64::from(u32::MAX) {
         return Err(invalid_payload(format!(
@@ -133,7 +142,7 @@ fn tight_rgba8(width: u32, height: u32, stride: Option<u32>, data: &[u8]) -> Res
         )));
     }
     if stride == row_bytes {
-        return Ok(data.to_vec());
+        return Ok(data);
     }
     // `stride > row_bytes >= 0` and `stride` divides `data.len()`, so `chunks_exact`
     // never sees a zero chunk size and covers every row.
@@ -143,7 +152,7 @@ fn tight_rgba8(width: u32, height: u32, stride: Option<u32>, data: &[u8]) -> Res
     for row in data.chunks_exact(stride) {
         tight.extend_from_slice(&row[..row_bytes]);
     }
-    Ok(tight)
+    Ok(Cow::Owned(tight))
 }
 
 /// Encodes tightly packed RGBA8 pixels to a PNG file at `path`.

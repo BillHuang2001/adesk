@@ -1,7 +1,8 @@
 //! Built-in scenario definitions and the runner.
 //!
 //! Run with: `cargo test -p adesk-agent --features test-support`
-#![cfg(feature = "test-support")]
+
+mod common;
 
 use std::collections::HashSet;
 
@@ -9,25 +10,15 @@ use adesk_agent::scenario::effective_max_steps;
 use adesk_agent::testing::{ClientMethod, ScriptedClient, ScriptedResponse};
 use adesk_agent::{
     ActionKind, AgentDecision, Expectation, ExpectationResult, LaunchOutcome, LoopConfig,
-    ObserveOutcome, RuntimeInfo, Scenario, ScenarioId, ScenarioReport, ScenarioRunner, ScriptEntry,
-    StepStatus, StopReason, TaskDescription, WindowList, PROTOCOL_VERSION,
+    ObserveOutcome, Scenario, ScenarioId, ScenarioReport, ScenarioRunner, ScriptEntry, StepStatus,
+    StopReason, TaskDescription, WindowList,
 };
 use adesk_core::{
-    ActionId, AppId, AppInfo, ErrorCode, LaunchId, Observation, Rect, Size, WindowId, WindowInfo,
+    ActionId, AppId, AppInfo, ErrorCode, LaunchId, Observation, Rect, WindowId, WindowInfo,
     WindowState,
 };
-use adesk_proto::{ImageFormat, ImagePayload};
-
-/// Runtime identity as a conforming runtime reports it.
-fn runtime_info() -> RuntimeInfo {
-    RuntimeInfo {
-        protocol_version: PROTOCOL_VERSION,
-        runtime_version: "0.1.0".to_owned(),
-        uptime_ms: 42,
-        renderer: "pixman".to_owned(),
-        output: Size::new(1280, 800),
-    }
-}
+use adesk_proto::ImagePayload;
+use common::{empty_windows, image, observation, runtime_info};
 
 /// One mapped window of the virtual output.
 fn window(id: u64, title: &str) -> WindowInfo {
@@ -53,11 +44,6 @@ fn windows(windows: Vec<WindowInfo>, active: Option<WindowId>) -> WindowList {
     }
 }
 
-/// No known windows.
-fn empty_windows() -> WindowList {
-    windows(Vec::new(), None)
-}
-
 /// One discovered application.
 fn app(id: &str, name: &str) -> AppInfo {
     AppInfo {
@@ -75,42 +61,9 @@ fn app(id: &str, name: &str) -> AppInfo {
     }
 }
 
-/// A quiet observation causally after `after_action`.
-fn observation(window_id: Option<WindowId>, after_action: Option<ActionId>) -> Observation {
-    Observation {
-        window_id,
-        after_action,
-        commits: 1,
-        changed_regions: vec![Rect::new(0, 0, 10, 10)],
-        focus_changed: None,
-        title_changed: false,
-        new_windows: Vec::new(),
-        destroyed_windows: Vec::new(),
-        popups_appeared: Vec::new(),
-        popups_disappeared: Vec::new(),
-        elapsed_ms: 12,
-        quiet: true,
-        timed_out: false,
-        last_commit_seq: 3,
-        seq: 9,
-    }
-}
-
 /// An `observe` result, optionally carrying pixels.
 fn observe_response(observation: Observation, image: Option<ImagePayload>) -> ScriptedResponse {
     ScriptedResponse::Observe(ObserveOutcome { observation, image })
-}
-
-/// A payload carrying only dimensions: the agent never inspects pixels.
-fn image(width: u32, height: u32) -> ImagePayload {
-    ImagePayload {
-        width,
-        height,
-        format: ImageFormat::Png,
-        stride: None,
-        data: String::new(),
-        scale: 1.0,
-    }
 }
 
 /// The checked result of one expectation.

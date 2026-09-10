@@ -4,6 +4,8 @@
 //! knows the wire encodings (`png` default, `rgba8` opt-in). Agent-facing
 //! capture paths never include overlays.
 
+use std::borrow::Cow;
+
 use adesk_core::ImageBuffer;
 use adesk_proto::{ImageFormat, ImagePayload, ProtoError};
 use adesk_render::RenderError;
@@ -67,15 +69,17 @@ pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
 /// Returns `image`'s pixels with tightly packed rows (`width * bytes_per_pixel`).
 ///
 /// [`ImageBuffer`] rows may be padded, but every wire encoding (`rgba8` and the
-/// PNG encoder) needs a tight buffer, so the padding is stripped here. Trailing
-/// bytes beyond the last row are ignored; a buffer that is too short to describe
-/// `width x height` pixels is a caller bug and never panics.
+/// PNG encoder) needs a tight buffer, so the padding is stripped here. A buffer
+/// that is already tight is borrowed (no copy); otherwise the rows are copied
+/// into a fresh `Vec`. Trailing bytes beyond the last row are ignored; a buffer
+/// that is too short to describe `width x height` pixels is a caller bug and
+/// never panics.
 ///
 /// # Errors
 ///
 /// Returns [`ServerError::Proto`] when the buffer cannot describe `width x height`
 /// pixels: a stride smaller than one row, or data shorter than `stride * height`.
-fn tightly_packed(image: &ImageBuffer) -> Result<Vec<u8>> {
+fn tightly_packed(image: &ImageBuffer) -> Result<Cow<'_, [u8]>> {
     let row_bytes = u64::from(image.width) * image.format.bytes_per_pixel() as u64;
     let stride = u64::from(image.stride);
     if stride < row_bytes {
@@ -95,7 +99,7 @@ fn tightly_packed(image: &ImageBuffer) -> Result<Vec<u8>> {
     if stride == row_bytes as u64 {
         // Already tight: only the (possibly present) trailing bytes are dropped.
         let len = row_bytes * image.height as usize;
-        return Ok(image.data[..len].to_vec());
+        return Ok(Cow::Borrowed(&image.data[..len]));
     }
     let stride = stride as usize;
     let mut tight = Vec::with_capacity(row_bytes * image.height as usize);
@@ -103,7 +107,7 @@ fn tightly_packed(image: &ImageBuffer) -> Result<Vec<u8>> {
         let start = row * stride;
         tight.extend_from_slice(&image.data[start..start + row_bytes]);
     }
-    Ok(tight)
+    Ok(Cow::Owned(tight))
 }
 
 /// Builds the malformed-buffer error (dimensions only, never pixel bytes).
@@ -317,6 +321,31 @@ mod tests {
         image.data.extend_from_slice(&[0xEE; 8]);
         let payload = encode(&image, ImageFormat::Rgba8, 1.0).unwrap();
         assert_eq!(payload.decode_data().unwrap(), tight_bytes(&image));
+    }
+
+    #[test]
+    fn tightly_packed_borrows_a_tight_buffer_and_copies_a_padded_one() {
+        let tight = make(3, 2);
+        assert!(matches!(tightly_packed(&tight).unwrap(), Cow::Borrowed(_)));
+
+        let padded = make_padded(3, 2, 16);
+        assert!(matches!(tightly_packed(&padded).unwrap(), Cow::Owned(_)));
+        assert_eq!(
+            tightly_packed(&padded).unwrap().into_owned(),
+            tight_bytes(&padded)
+        );
+    }
+
+    #[test]
+    fn tight_buffer_with_trailing_bytes_is_borrowed_without_the_tail() {
+        let mut image = make(2, 1);
+        let row = image.width as usize * 4;
+        image.data.extend_from_slice(&[0xEE; 4]);
+        let tight = tightly_packed(&image).unwrap();
+        let Cow::Borrowed(bytes) = tight else {
+            panic!("tight buffer must be borrowed");
+        };
+        assert_eq!(bytes, &image.data[..row]);
     }
 
     #[test]

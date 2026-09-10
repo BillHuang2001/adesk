@@ -82,12 +82,6 @@ impl ServerConfig {
         self
     }
 
-    /// Replaces the compositor configuration wholesale.
-    pub fn with_compositor(mut self, compositor: CompositorConfig) -> ServerConfig {
-        self.compositor = compositor;
-        self
-    }
-
     /// Sets the virtual output size (windows tile to fill it).
     pub fn with_output_size(mut self, size: Size) -> ServerConfig {
         self.compositor = self.compositor.with_output_size(size);
@@ -172,15 +166,6 @@ pub fn default_socket_path() -> PathBuf {
         return PathBuf::from(dir).join("adesk.sock");
     }
     std::env::temp_dir().join("adesk.sock")
-}
-
-/// The default viewer Unix socket path: the sibling of [`default_socket_path`].
-///
-/// Note that this deliberately does **not** read `$ADESK_VIEWER_SOCKET`; the
-/// binary maps that variable onto `--viewer-socket`, which overrides the
-/// derived path through [`ServerConfig::with_viewer_socket`].
-pub fn default_viewer_socket_path() -> PathBuf {
-    viewer_socket_sibling(&default_socket_path())
 }
 
 /// Derives the viewer socket path beside the AGP socket `agp_socket_path`.

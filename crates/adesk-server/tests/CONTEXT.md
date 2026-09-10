@@ -6,7 +6,7 @@ End-to-end coverage of the runtime's two endpoints: the AGP v1 server and the vi
 starts a real runtime (`Server::start`) on a private temp socket, driven through `adesk-client` / `adesk-viewer` (typed)
 and raw NDJSON, with no display, GPU, network or installed application.
 These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + viewer + transport).
-Ten integration targets totalling 65 tests (alongside the lib's 139 in-module unit tests and the binary's 9) are green.
+Ten integration targets totalling 65 tests (alongside the lib's 144 in-module unit tests and the binary's 9) are green.
 They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-clock timing beyond generous bounds.
 
 ## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
@@ -22,7 +22,12 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
   protocol defaults, raw VAP frames). `futures` is a dev-dependency, but only `viewer.rs` uses it
   (`ViewerClient`'s ack/frame streams); the AGP suites never poll a typed `EventStream`, so they stay on `RawClient`.
 - Helpers: `assert_error_code`, `expect_ok`, `eventually`, `write_desktop_entry`, `output_size()`,
-  `OUTPUT_WIDTH`/`OUTPUT_HEIGHT`, `REQUEST_TIMEOUT`.
+  `OUTPUT_WIDTH`/`OUTPUT_HEIGHT`, `REQUEST_TIMEOUT`, `SHORT_TIMEOUT_MS`.
+- `SHORT_TIMEOUT_MS = 100` is the shared short `timeout_ms` for waits and samples whose exact value is
+  immaterial: a wait that only needs to expire against an idle runtime, and an `observe(until = timeout)`
+  whose horizon is irrelevant. It is strictly below the 250 ms protocol default `quiet_ms`, so a
+  `wait_for_quiet` carrying it still expires. `observation.rs`, `protocol.rs` and `sequence.rs` use this
+  constant for their short horizons rather than a local 150 ms literal.
 - Viewer (VAP v1) helpers on `TestRuntime`: `viewer_socket_path() -> Option<&Path>` (from `RunningServer::viewer_socket_path`),
   `connect_viewer() -> adesk_viewer::ViewerClient` (bounded by `REQUEST_TIMEOUT`, panics with a clear message when the
   endpoint is disabled) and `connect_viewer_raw() -> RawClient` (to read a raw VAP frame the typed client hides, e.g. an
@@ -106,7 +111,7 @@ Per-file test counts (65 total, all plain sync `#[test]`; no `#[tokio::test]`, n
   `src/config.rs` / `src/main.rs` unit tests, never bound; every suite here is Unix-socket only.
   `viewer.rs` has no sleeps — every wait is deadline-bounded (`DEADLINE`, `common::eventually`,
   `block_on_timeout`); the only polling sleeps it reaches are `common/mod.rs`'s 10 ms loop and the
-  50/200 ms sleeps in `shutdown.rs`.
+  200 ms sleep in `shutdown.rs`.
 - §1 `seq` domain (`sequence.rs`): one global monotonic `seq` domain spans compositor- and
   server-emitted events (gaps allowed, reuse not). `app_launched` and `inspect_frame` reserve their
   number from the compositor's central counter (`RuntimeCommand::ReserveSeq`; server side

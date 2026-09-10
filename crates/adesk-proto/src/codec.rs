@@ -2,8 +2,8 @@
 //!
 //! [`Codec`] is deliberately payload-oriented (bytes, no terminator) so a future
 //! binary framing can be added without touching any method definition; the
-//! NDJSON-specific string conveniences are [`NdjsonCodec::encode_str`],
-//! [`NdjsonCodec::decode_str`], [`encode_frame`] and [`decode_frame`].
+//! NDJSON-specific string conveniences are [`NdjsonCodec::encode_str`] and
+//! [`NdjsonCodec::decode_str`].
 
 use crate::{Frame, ProtoError, Result};
 
@@ -76,22 +76,4 @@ impl Codec for NdjsonCodec {
         })?;
         self.decode_str(line)
     }
-}
-
-/// Encodes a frame with the NDJSON codec (no trailing newline).
-///
-/// # Errors
-///
-/// See [`NdjsonCodec::encode_str`].
-pub fn encode_frame(frame: &Frame) -> Result<String> {
-    NdjsonCodec.encode_str(frame)
-}
-
-/// Decodes one NDJSON line with the NDJSON codec.
-///
-/// # Errors
-///
-/// See [`NdjsonCodec::decode_str`].
-pub fn decode_frame(line: &str) -> Result<Frame> {
-    NdjsonCodec.decode_str(line)
 }

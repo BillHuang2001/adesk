@@ -3,19 +3,8 @@
 
 mod common;
 
-use std::time::Duration;
-
-use adesk_client::{Client, ClientError, ConnectOptions};
-use common::MockServer;
-
-/// Connect without the handshake ping and accept the connection on the server.
-async fn connect(server: &mut MockServer, options: ConnectOptions) -> Client {
-    let client = Client::connect_with(options)
-        .await
-        .expect("connect to the mock server");
-    server.accept().await;
-    client
-}
+use adesk_client::{ClientError, ConnectOptions};
+use common::{connect_with, MockServer, TIMEOUT};
 
 /// Malformed JSON becomes `ClientError::Protocol`.
 ///
@@ -27,10 +16,10 @@ async fn connect(server: &mut MockServer, options: ConnectOptions) -> Client {
 async fn malformed_json_is_protocol_error() {
     let mut server = MockServer::start().await;
     let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = connect(&mut server, options).await;
+    let client = connect_with(&mut server, options).await;
 
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
@@ -70,10 +59,10 @@ async fn oversized_line_is_protocol_error() {
     let options = ConnectOptions::new(server.path())
         .verify_version(false)
         .max_frame_len(MAX_FRAME_LEN);
-    let client = connect(&mut server, options).await;
+    let client = connect_with(&mut server, options).await;
 
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (_, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
@@ -113,10 +102,10 @@ async fn oversized_line_is_protocol_error() {
 async fn eof_with_inflight_request_is_closed() {
     let mut server = MockServer::start().await;
     let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = connect(&mut server, options).await;
+    let client = connect_with(&mut server, options).await;
 
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (_, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");

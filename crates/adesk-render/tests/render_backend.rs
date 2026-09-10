@@ -209,7 +209,10 @@ fn canonical_fixture() -> Fixture {
 
     Fixture {
         scene,
-        config: RenderConfig::new(Rect::new(10, 20, 8, 8)).with_clear_color(CLEAR),
+        config: RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(Rect::new(10, 20, 8, 8))
+        },
         calls: vec![red_calls, green_calls, blue_calls],
     }
 }
@@ -329,7 +332,10 @@ fn pixman_empty_scene_renders_clear_color() {
     let mut target = create_target::<_, PixmanTarget>(&mut renderer, CoreSize::new(8, 6))
         .expect("offscreen target");
     let scene = Scene::<TestElement>::new(7);
-    let config = RenderConfig::new(Rect::new(0, 0, 8, 6)).with_clear_color(CLEAR);
+    let config = RenderConfig {
+        clear_color: CLEAR,
+        ..RenderConfig::new(Rect::new(0, 0, 8, 6))
+    };
 
     let frame = render_scene(&mut renderer, &mut target, &scene, &config).expect("render");
 
@@ -368,7 +374,10 @@ fn pixman_clips_partially_visible_node_and_damage_is_element_local() {
         // clear-color holes.
         Region::from_rect(Rect::new(0, 0, 1, 1)),
     ));
-    let config = RenderConfig::new(Rect::new(0, 0, 8, 8)).with_clear_color(CLEAR);
+    let config = RenderConfig {
+        clear_color: CLEAR,
+        ..RenderConfig::new(Rect::new(0, 0, 8, 8))
+    };
 
     let mut renderer = PixmanRenderer::new().expect("pixman renderer");
     let mut target = create_target::<_, PixmanTarget>(&mut renderer, CoreSize::new(8, 8))
@@ -399,7 +408,10 @@ fn pixman_skips_nodes_outside_the_source() {
     let (node, calls) = element(Point::from((100, 100)), Size::from((4, 4)), RED, Vec::new());
     let mut scene = Scene::new(1);
     scene.push(SceneNode::new(node, Point::from((100, 100))));
-    let config = RenderConfig::new(Rect::new(0, 0, 4, 4)).with_clear_color(CLEAR);
+    let config = RenderConfig {
+        clear_color: CLEAR,
+        ..RenderConfig::new(Rect::new(0, 0, 4, 4))
+    };
 
     let mut renderer = PixmanRenderer::new().expect("pixman renderer");
     let mut target = create_target::<_, PixmanTarget>(&mut renderer, CoreSize::new(4, 4))
@@ -449,10 +461,12 @@ fn pixman_downscales_after_cropping() {
     let mut scene = Scene::new(5);
     scene.push(SceneNode::new(red, Point::from((0, 0))));
     scene.push(SceneNode::new(green, Point::from((4, 0))));
-    let config = RenderConfig::new(Rect::new(0, 0, 8, 8))
-        .with_crop(Rect::new(0, 0, 4, 4))
-        .with_max_dimension(2)
-        .with_clear_color(CLEAR);
+    let config = RenderConfig {
+        clear_color: CLEAR,
+        ..RenderConfig::new(Rect::new(0, 0, 8, 8))
+            .with_crop(Rect::new(0, 0, 4, 4))
+            .with_max_dimension(2)
+    };
 
     let mut renderer = PixmanRenderer::new().expect("pixman renderer");
     let mut target = create_target::<_, PixmanTarget>(&mut renderer, config.target_size())

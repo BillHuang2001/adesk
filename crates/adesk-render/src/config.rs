@@ -76,12 +76,6 @@ impl RenderConfig {
         self
     }
 
-    /// Sets the target clear color (`R, G, B, A`).
-    pub fn with_clear_color(mut self, color: [u8; 4]) -> Self {
-        self.clear_color = color;
-        self
-    }
-
     /// Size of the offscreen target that this configuration renders into.
     pub fn target_size(&self) -> Size {
         self.source.size()
@@ -141,10 +135,12 @@ mod tests {
 
     #[test]
     fn builders_set_fields() {
-        let config = RenderConfig::new(source())
-            .with_crop(Rect::new(12, 22, 8, 8))
-            .with_max_dimension(4)
-            .with_clear_color([1, 2, 3, 4]);
+        let config = RenderConfig {
+            clear_color: [1, 2, 3, 4],
+            ..RenderConfig::new(source())
+                .with_crop(Rect::new(12, 22, 8, 8))
+                .with_max_dimension(4)
+        };
         assert_eq!(config.crop, Some(Rect::new(12, 22, 8, 8)));
         assert_eq!(config.max_dimension, Some(4));
         assert_eq!(config.clear_color, [1, 2, 3, 4]);

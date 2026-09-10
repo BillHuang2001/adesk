@@ -20,6 +20,9 @@
 //! - `window_for_surface(&WlSurface) -> Option<WindowId>` (toplevel, subsurface or popup)
 //! - `windows() -> Vec<WindowInfo>`, `tiled_rect() -> Rect`
 //! - `toplevel_of(WindowId) -> Option<ToplevelSurface>`, `surface_of(WindowId) -> Option<WlSurface>`
+//! - `root_id(WindowId) -> Option<ObjectId>`, `window_geometry(WindowId) -> Option<Rect>`
+//!   (O(1) lookups for the commit and render hot paths, which need one id/rect, not a
+//!   projected `Vec<WindowInfo>`)
 //! - `last_commit_seq(WindowId) -> u64`
 //! - `resolve_position(WindowId, &Position) -> Result<Point>`
 //! - `note_launch(LaunchId, AppId, Option<i32>)`
@@ -74,7 +77,6 @@
 
 use std::{
     collections::HashMap,
-    hash::Hash,
     time::{Duration, Instant},
 };
 
@@ -90,14 +92,19 @@ use smithay::{
 
 use crate::{error::CompositorError, Result};
 
+mod registry;
+
+use registry::SurfaceRegistry;
+
 /// How long a pending launch stays eligible for correlation with a window.
 const LAUNCH_CORRELATION_TIMEOUT: Duration = Duration::from_secs(10);
 /// Upper bound on remembered pending launches (bounded memory, oldest dropped).
 const MAX_PENDING_LAUNCHES: usize = 32;
-/// Safety bound for popup-chain walks.
-const MAX_POPUP_CHAIN: usize = 32;
 /// Safety bound for surface-tree (parent) walks.
-const MAX_SURFACE_TREE_DEPTH: usize = 32;
+///
+/// Shared with `crate::state::State`, which walks the same tree to compute a
+/// committing surface's offset inside its window.
+pub(crate) const MAX_SURFACE_TREE_DEPTH: usize = 32;
 /// Shortest title substring considered evidence (avoids `"a"` matching everything).
 const MIN_TITLE_MATCH_LEN: usize = 3;
 
@@ -201,189 +208,6 @@ pub(crate) struct PopupGrab {
     pub(crate) window_id: WindowId,
     /// Id announced by [`PopupAdded`].
     pub(crate) popup_id: u64,
-}
-
-/// A registered toplevel that may or may not be mapped yet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ToplevelSlot {
-    key: SurfaceKey,
-    window: Option<WindowId>,
-}
-
-/// A tracked popup.
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct PopupRecord<K> {
-    window_id: WindowId,
-    popup_id: u64,
-    parent: Option<K>,
-    offset: (i32, i32),
-}
-
-/// Pure surface-tree bookkeeping: stable keys, owner lookup and popup ids.
-///
-/// Kept free of Smithay types (the key is generic) so the logic is unit-tested with
-/// plain integers; [`WmBridge`] instantiates it with `ObjectId`.
-#[derive(Debug)]
-struct SurfaceRegistry<K> {
-    /// Registered toplevels by root surface key (mapped or not).
-    toplevels: HashMap<K, ToplevelSlot>,
-    /// Any surface of a window tree (root, subsurface, popup) → owning window.
-    owners: HashMap<K, WindowId>,
-    /// Tracked popups by surface key.
-    popups: HashMap<K, PopupRecord<K>>,
-    /// Next [`SurfaceKey`] to hand out; never reused.
-    next_surface_key: u64,
-    /// Next popup id to hand out; never reused.
-    next_popup_id: u64,
-}
-
-impl<K: Clone + Eq + Hash> SurfaceRegistry<K> {
-    fn new() -> SurfaceRegistry<K> {
-        SurfaceRegistry {
-            toplevels: HashMap::new(),
-            owners: HashMap::new(),
-            popups: HashMap::new(),
-            next_surface_key: 1,
-            next_popup_id: 1,
-        }
-    }
-
-    /// Register a toplevel root surface, returning its stable key.
-    ///
-    /// Registering the same surface twice keeps the first key: a `SurfaceKey` is never
-    /// reused and never reassigned.
-    fn register_toplevel(&mut self, surface: K) -> SurfaceKey {
-        if let Some(slot) = self.toplevels.get(&surface) {
-            return slot.key;
-        }
-        let key = SurfaceKey::new(self.next_surface_key);
-        self.next_surface_key += 1;
-        self.toplevels
-            .insert(surface, ToplevelSlot { key, window: None });
-        key
-    }
-
-    fn slot(&self, surface: &K) -> Option<&ToplevelSlot> {
-        self.toplevels.get(surface)
-    }
-
-    /// Whether `surface` is a registered toplevel that has not been mapped yet.
-    fn is_unmapped_toplevel(&self, surface: &K) -> bool {
-        self.toplevels
-            .get(surface)
-            .is_some_and(|slot| slot.window.is_none())
-    }
-
-    /// The window owning any surface of a tree.
-    fn window_for_surface(&self, surface: &K) -> Option<WindowId> {
-        self.owners.get(surface).copied()
-    }
-
-    /// Bind a mapped window to its root surface.
-    fn bind(&mut self, surface: K, window: WindowId) {
-        if let Some(slot) = self.toplevels.get_mut(&surface) {
-            slot.window = Some(window);
-        }
-        self.owners.insert(surface, window);
-    }
-
-    /// Drop a toplevel and every popup it owns.
-    ///
-    /// Returns the window id (when it was mapped) and the ids of the popups that were
-    /// still open.
-    fn unbind_toplevel(&mut self, surface: &K) -> (Option<WindowId>, Vec<u64>) {
-        let window = self.toplevels.remove(surface).and_then(|slot| slot.window);
-        self.owners.remove(surface);
-        let popup_ids = match window {
-            Some(window_id) => self.remove_popups_of(window_id),
-            None => Vec::new(),
-        };
-        (window, popup_ids)
-    }
-
-    /// Remove every popup owned by `window_id`, returning their ids in creation order.
-    fn remove_popups_of(&mut self, window_id: WindowId) -> Vec<u64> {
-        let mut ids: Vec<(u64, u64)> = self
-            .popups
-            .iter()
-            .filter(|(_, popup)| popup.window_id == window_id)
-            .map(|(key, popup)| (popup.popup_id, key_hash(key)))
-            .collect();
-        ids.sort_unstable();
-        let ordered: Vec<u64> = ids.into_iter().map(|(popup_id, _)| popup_id).collect();
-        self.popups.retain(|_, popup| popup.window_id != window_id);
-        self.owners.retain(|_, owner| *owner != window_id);
-        ordered
-    }
-
-    /// Track a popup under its owner window, returning its stable id.
-    ///
-    /// A popup whose surface is already tracked keeps its id (idempotent).
-    fn add_popup(
-        &mut self,
-        surface: K,
-        parent: Option<K>,
-        window_id: WindowId,
-        offset: (i32, i32),
-    ) -> u64 {
-        if let Some(existing) = self.popups.get(&surface) {
-            return existing.popup_id;
-        }
-        let popup_id = self.next_popup_id;
-        self.next_popup_id += 1;
-        self.popups.insert(
-            surface.clone(),
-            PopupRecord {
-                window_id,
-                popup_id,
-                parent,
-                offset,
-            },
-        );
-        self.owners.insert(surface, window_id);
-        popup_id
-    }
-
-    fn popup(&self, surface: &K) -> Option<&PopupRecord<K>> {
-        self.popups.get(surface)
-    }
-
-    /// Remove a tracked popup.
-    fn remove_popup(&mut self, surface: &K) -> Option<PopupRecord<K>> {
-        let record = self.popups.remove(surface)?;
-        self.owners.remove(surface);
-        Some(record)
-    }
-
-    /// Window-relative origin of a popup, accumulated over its popup chain.
-    ///
-    /// `None` when `surface` is not a tracked popup. The walk stops at the first
-    /// ancestor that is not a popup (the toplevel root or a subsurface) or when the
-    /// [`MAX_POPUP_CHAIN`] safety bound is hit.
-    fn popup_window_offset(&self, surface: &K) -> Option<(i32, i32)> {
-        self.popups.get(surface)?;
-        let mut offset = (0i32, 0i32);
-        let mut current = surface;
-        let mut depth = 0;
-        while let Some(record) = self.popups.get(current) {
-            offset.0 = offset.0.saturating_add(record.offset.0);
-            offset.1 = offset.1.saturating_add(record.offset.1);
-            depth += 1;
-            match (&record.parent, depth < MAX_POPUP_CHAIN) {
-                (Some(parent), true) => current = parent,
-                _ => break,
-            }
-        }
-        Some(offset)
-    }
-}
-
-/// Stable ordering helper: popup ids are unique, so hashing the key only breaks ties.
-fn key_hash<K: Hash>(key: &K) -> u64 {
-    use std::hash::Hasher;
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut hasher);
-    hasher.finish()
 }
 
 /// A launch that was recorded but is not yet correlated with a window.
@@ -611,6 +435,21 @@ impl WmBridge {
     pub(crate) fn surface_of(&self, id: WindowId) -> Option<WlSurface> {
         self.toplevel_of(id)
             .map(|toplevel| toplevel.wl_surface().clone())
+    }
+
+    /// The `ObjectId` of a window's toplevel root, for O(1) identity comparisons.
+    ///
+    /// Used by the commit path to detect the common case — the committing surface is
+    /// the window root — by `ObjectId` rather than by cloning and comparing surfaces.
+    pub(crate) fn root_id(&self, id: WindowId) -> Option<ObjectId> {
+        self.roots.get(&id).cloned()
+    }
+
+    /// The rect a window is tiled to, or `None` when the window is not tracked.
+    ///
+    /// Unlike `windows()`, this reads the one record and clones no `WindowInfo`.
+    pub(crate) fn window_geometry(&self, id: WindowId) -> Option<Rect> {
+        self.manager.window(id).map(|record| record.geometry)
     }
 
     /// Per-window commit counter of the last observed commit.

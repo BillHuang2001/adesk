@@ -4,33 +4,14 @@
 //!
 //! Frame/codec/event behavior is pinned in `wire.rs` and `codec.rs`.
 
+mod common;
+
 use adesk_core::{
-    ActionId, AppId, Button, ErrorCode, LaunchId, Observation, OverlayKind, Position, Rect, Size,
-    WindowId, WindowInfo, WindowState,
+    ActionId, AppId, Button, ErrorCode, LaunchId, OverlayKind, Position, Rect, WindowId,
 };
 use adesk_proto::*;
-use serde::Serialize;
+use common::*;
 use serde_json::{json, Value};
-
-fn wire<T: Serialize>(value: &T) -> Value {
-    serde_json::to_value(value).expect("serialize")
-}
-
-fn window_info() -> WindowInfo {
-    WindowInfo {
-        id: WindowId(17),
-        app_id: Some(AppId::from("org.mozilla.firefox")),
-        title: Some("GitHub".to_owned()),
-        geometry: Rect::new(0, 0, 1280, 800),
-        state: WindowState::Active,
-        mapped: true,
-        pid: Some(4242),
-        created_seq: 800,
-        last_commit_seq: 8291,
-        popup_count: 0,
-    }
-}
-
 /// One instance of every one of the 29 methods (§5.1–§5.7).
 fn methods() -> Vec<Method> {
     vec![
@@ -160,37 +141,6 @@ fn methods() -> Vec<Method> {
             min_interval_ms: 100,
         }),
     ]
-}
-
-fn observation() -> Observation {
-    Observation {
-        window_id: Some(WindowId(17)),
-        after_action: Some(ActionId(582)),
-        commits: 3,
-        changed_regions: vec![Rect::new(630, 220, 410, 180)],
-        focus_changed: Some(false),
-        title_changed: false,
-        new_windows: vec![],
-        destroyed_windows: vec![],
-        popups_appeared: vec![],
-        popups_disappeared: vec![],
-        elapsed_ms: 417,
-        quiet: true,
-        timed_out: false,
-        last_commit_seq: 8291,
-        seq: 8300,
-    }
-}
-
-fn image_payload() -> ImagePayload {
-    ImagePayload {
-        width: 1280,
-        height: 800,
-        format: ImageFormat::Rgba8,
-        stride: Some(5120),
-        data: "AAAA".to_owned(),
-        scale: 1.0,
-    }
 }
 
 #[test]
@@ -800,13 +750,7 @@ fn observe_result_image_is_null_when_absent() {
 #[test]
 fn result_structs_match_spec_shapes() {
     // §5.1 ping.
-    let ping = PingResult {
-        protocol_version: PROTOCOL_VERSION,
-        runtime_version: "0.1.0".to_owned(),
-        uptime_ms: 5,
-        renderer: RendererKind::Gl,
-        output: Size::new(1280, 800),
-    };
+    let ping = ping_result();
     assert_eq!(
         wire(&ping),
         json!({
@@ -823,22 +767,8 @@ fn result_structs_match_spec_shapes() {
     // §5.2/§5.3 registry and window results.
     assert_eq!(wire(&ListAppsResult { apps: vec![] }), json!({"apps": []}));
     assert_eq!(
-        wire(&GetAppResult {
-            app: adesk_core::AppInfo {
-                id: AppId::from("x"),
-                name: "X".to_owned(),
-                icon: None,
-                exec: None,
-                terminal: false,
-                categories: vec![],
-                startup_wm_class: None,
-                dbus_activatable: false,
-                hidden: false,
-                no_display: false,
-                try_exec: None,
-            }
-        })["app"]["id"],
-        json!("x")
+        wire(&GetAppResult { app: app_info() })["app"]["id"],
+        json!("org.mozilla.firefox")
     );
     assert_eq!(
         wire(&ListWindowsResult {

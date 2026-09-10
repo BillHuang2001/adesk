@@ -3,11 +3,9 @@
 
 mod common;
 
-use std::time::Duration;
-
-use adesk_client::{Client, ClientError, ConnectOptions};
+use adesk_client::ClientError;
 use adesk_core::{ErrorCode, WindowId};
-use common::MockServer;
+use common::{connect, MockServer, TIMEOUT};
 use serde_json::json;
 
 /// The 13 error codes of `docs/protocol.md` §6, in spec order.
@@ -27,16 +25,6 @@ const ERROR_CODES: [ErrorCode; 13] = [
     ErrorCode::ProtocolVersionMismatch,
 ];
 
-/// Connect without the handshake ping and accept the connection on the server.
-async fn connect(server: &mut MockServer) -> Client {
-    let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options)
-        .await
-        .expect("connect to the mock server");
-    server.accept().await;
-    client
-}
-
 /// Every protocol §6 error code maps to `ClientError::Server`.
 ///
 /// For each of the 13 codes — invalid_request, unknown_method, unknown_window,
@@ -54,7 +42,7 @@ async fn every_error_code_maps_to_server_error() {
     for (index, code) in ERROR_CODES.into_iter().enumerate() {
         let message = format!("mock failure #{index} for {}", code.as_str());
         let request = client.list_windows();
-        let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+        let (result, ()) = tokio::time::timeout(TIMEOUT, async {
             tokio::join!(request, async {
                 let (id, method, _) = server.next_request().await;
                 assert_eq!(method, "list_windows");
@@ -91,7 +79,7 @@ async fn error_does_not_close_connection() {
     let client = connect(&mut server).await;
 
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, _, _) = server.next_request().await;
             server
@@ -116,7 +104,7 @@ async fn error_does_not_close_connection() {
 
     // The same connection still round-trips.
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, method, _) = server.next_request().await;
             assert_eq!(method, "list_windows");
@@ -142,7 +130,7 @@ async fn unknown_response_id_is_ignored() {
     let client = connect(&mut server).await;
 
     let request = client.list_windows();
-    let (result, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (result, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(request, async {
             let (id, _, _) = server.next_request().await;
             // Nobody awaits this id: the reader must ignore it, not panic.

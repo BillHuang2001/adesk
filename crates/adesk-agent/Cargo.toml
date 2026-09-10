@@ -21,6 +21,31 @@ path = "src/lib.rs"
 name = "adesk-agent"
 path = "src/main.rs"
 
+# Explicit targets for the feature-gated suites, mirroring the `[[example]]` below:
+# without `required-features` Cargo compiles, links and runs a 0-test binary for each
+# of them in every other configuration. `tests/context_budget.rs` and `tests/metrics.rs`
+# are ungated and stay auto-discovered.
+
+[[test]]
+name = "agent_loop"
+path = "tests/agent_loop.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "scenarios"
+path = "tests/scenarios.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "dummy_provider"
+path = "tests/dummy_provider.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "e2e_runtime"
+path = "tests/e2e_runtime.rs"
+required-features = ["e2e"]
+
 # Fixture application for the `e2e` suite: the launch tests write a `.desktop` entry whose
 # `Exec` points at this example (an example, not a bin, because examples are built together
 # with this package's dev-dependencies and are resolved next to the test binary by

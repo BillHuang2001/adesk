@@ -8,19 +8,9 @@ mod common;
 
 use std::time::Duration;
 
-use adesk_client::{Client, ConnectOptions};
 use adesk_core::WindowId;
-use common::MockServer;
+use common::{connect, MockServer, TIMEOUT};
 use serde_json::json;
-
-/// Connect without the handshake ping and accept the connection on the server.
-async fn connect(server: &mut MockServer) -> Client {
-    let client = Client::connect_with(ConnectOptions::new(server.path()).verify_version(false))
-        .await
-        .expect("connect to the mock server");
-    server.accept().await;
-    client
-}
 
 /// Many concurrent in-flight requests get distinct, monotonic ids.
 ///
@@ -38,7 +28,7 @@ async fn many_requests_in_flight_get_distinct_ids() {
     let client = connect(&mut server).await;
 
     let requests = futures::future::join_all((0..N).map(|_| client.list_windows()));
-    let (results, ()) = tokio::time::timeout(Duration::from_secs(10), async {
+    let (results, ()) = tokio::time::timeout(TIMEOUT, async {
         tokio::join!(requests, async {
             let mut ids = Vec::with_capacity(N);
             for _ in 0..N {
@@ -119,9 +109,7 @@ async fn out_of_order_responses_match_by_id() {
         .respond(id2, json!({"windows": [], "active_window_id": 2}))
         .await;
     assert!(
-        tokio::time::timeout(Duration::from_millis(50), &mut first)
-            .await
-            .is_err(),
+        futures::poll!(&mut first).is_pending(),
         "the first caller must not resolve before its own response arrives"
     );
     let second_list = tokio::time::timeout(Duration::from_secs(5), &mut second)

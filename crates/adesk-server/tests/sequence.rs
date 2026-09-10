@@ -56,13 +56,9 @@ use tokio::sync::oneshot;
 
 mod common;
 
-use common::{expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT};
-
-/// The horizon of a watermark sample, in milliseconds.
-///
-/// `until = timeout` resolves *at* the horizon by definition (§5.4), so a short
-/// one keeps the suite fast without changing what is reported.
-const WATERMARK_TIMEOUT_MS: u64 = 150;
+use common::{
+    expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT, SHORT_TIMEOUT_MS,
+};
 
 /// The launch fixture: `Exec` spawns `true` from `PATH` (the Nix dev shell has
 /// no `/bin`), so the launch succeeds without an installed application — the
@@ -116,7 +112,8 @@ fn observe_watermark(t: &TestRuntime, raw: &mut RawClient, id: u64) -> u64 {
         "observe",
         json!({
             "until": { "type": "timeout" },
-            "timeout_ms": WATERMARK_TIMEOUT_MS,
+            // The sample horizon: immaterial, just short enough to keep the suite fast.
+            "timeout_ms": SHORT_TIMEOUT_MS,
             "include_image": false,
         }),
     );

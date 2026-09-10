@@ -47,6 +47,7 @@ fn record_action_captures_watermark_and_clock() {
         Some(WindowId(7)),
         Some(Position::Normalized { x: 0.25, y: 0.75 }),
     );
+    let after = observer.now_ms();
     let record = observer.action(id).expect("recorded");
     assert_eq!(record.id, id);
     assert_eq!(record.kind, ActionKind::Click);
@@ -64,12 +65,16 @@ fn record_action_captures_watermark_and_clock() {
         observer.watermark(),
         "seq is the watermark at record time"
     );
-    assert_eq!(
-        record.ts_ms,
-        observer.now_ms(),
-        "ts_ms is the clock at record time"
+    // `record_action` reads the clock once and uses that value for the record:
+    // it is bounded by the reads taken immediately around it. The exact value
+    // is not asserted because the real monotonic clock can tick between the
+    // surrounding reads (a ≥1 ms scheduling gap would otherwise flake); the
+    // pinned-clock inline twin in `src/service.rs` proves the exact capture.
+    assert!(
+        before <= record.ts_ms && record.ts_ms <= after,
+        "ts_ms is the clock at record time (before = {before}, ts_ms = {}, after = {after})",
+        record.ts_ms
     );
-    assert!(record.ts_ms >= before, "the clock never runs backwards");
     assert_eq!(observer.action_seq(id), Some(record.seq));
 }
 

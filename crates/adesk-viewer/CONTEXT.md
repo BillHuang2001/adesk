@@ -36,8 +36,10 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ### Transport framing (`src/transport.rs`)
 - `DEFAULT_MAX_FRAME_LEN` (32 MiB) — the one shared line cap for server and client.
-- `async read_line<R: AsyncBufRead + Unpin>(&mut R, max_len) -> Result<Option<String>>` — strips the terminator, `Ok(None)` on EOF, `Err(Transport)` on an over-cap or non-UTF-8 line.
-- `async write_line<W: AsyncWrite + Unpin>(&mut W, &str) -> Result<()>` — bytes + `\n` + flush.
+- `async read_line<R: AsyncBufRead + Unpin>(&mut R, max_len) -> Result<Option<String>>` — the owned-`String` convenience reader; strips the terminator, `Ok(None)` on EOF, `Err(Transport)` on an over-cap or non-UTF-8 line.
+- `async read_line_into<R: AsyncBufRead + Unpin>(&mut R, &mut Vec<u8>, max_len) -> Result<bool>` — the allocation-reusing reader used by the server session loop and the client dispatcher: clears and refills a caller-owned buffer with the line's raw bytes (terminator stripped), `Ok(false)` on clean EOF, `Ok(true)` otherwise, UTF-8 validated in place. Callers decode the buffer as `&str`.
+- `async write_line<W: AsyncWrite + Unpin>(&mut W, &str) -> Result<()>` — offers the line and its `\n` in a single vectored write (a short write is completed in place), then flushes once.
+- `src/lib.rs` additionally re-exports `read_line`/`read_line_into`/`write_line` under `#[doc(hidden)] pub use` so the integration tests reuse the crate's framing instead of hand-rolling it; this is additive and outside the documented surface.
 - This is the single place byte framing lives.
 
 ### Client SDK (`src/client.rs`)
@@ -64,7 +66,7 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ## Constraints
 - `docs/viewer.md` is normative; the crate invents no message or field — it speaks only `adesk-viewer-proto`.
-- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/session.rs` 888, `src/client.rs` 812).
+- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/session.rs` 829, `src/client.rs` 823).
 - Transport-agnostic: the crate never imports a listener (`tokio::net::UnixListener`, `std::os::unix::net::*`) — `adesk-server` owns binding; `ViewerTarget` is the only place socket/TCP addresses appear.
 - No panics on connection/input paths: every failure returns `ViewerError`. Empty `pub mod` stubs are not viable here — `missing_docs` requires at least a `//!` module doc.
 - No pixel payloads in logs; `tracing` at `debug`/`trace` for transport internals only.
@@ -83,9 +85,11 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 | Frame → PNG capture helpers | `./src/capture.rs` |
 | Input-script grammar + parser | `./src/script.rs` |
 | CLI wiring, mode ArgGroup, exit codes | `./src/main.rs` |
+| `#[cfg(test)]` shared `ViewerBackend` fake for the inline unit tests | `./src/test_support.rs` |
 | Server-session tests over an in-memory duplex stream | `./tests/session.rs` |
 | Client round-trip tests over a real Unix socket | `./tests/client.rs` |
 | Input-script parser tests | `./tests/script.rs` |
+| Shared integration-test `FakeBackend` + scaffolding | `./tests/common/mod.rs` |
 
 ## Design Decisions
 - **The backend trait is the only runtime coupling.** `ViewerServer` depends on `ViewerBackend`, never on the compositor; `adesk-server` implements it over its render command + seat input. This keeps the viewer reusable and testable with a fake backend.
@@ -99,41 +103,41 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 - **The client uses a background dispatcher.** One task owns the read half and fans messages into `broadcast` channels (frames, input acks, errors) and a `oneshot` FIFO (state replies), so `frames()`, `input_ack()`, `request_*` and the input methods are usable concurrently without deadlock; `Drop` aborts the dispatcher.
 - **Overlays are negotiated, not plumbed into v1 rendering.** `render_frame()` takes no overlay argument, so `overlays` travels through the handshake and is reported, but the backend decides what an overlay set means for a given frame.
 - **Exit-code mapping is fixed** (`0`/`1`/`2`) so the binary is safe to script; unrecognized overlay names and unreadable `--input` files are usage errors, a missing socket is a runtime error.
-- **Test fakes are duplicated on purpose.** `tests/session.rs` and `tests/client.rs` each define their own fake backend so neither file depends on the other's internals.
+- **One shared test fake per layer.** Each layer has a single configurable `FakeBackend` with builder knobs instead of one copy per test module: `src/test_support.rs` (`#[cfg(test)]`) for the inline tests, `tests/common/mod.rs` for the integration tests. A single fake cannot span both layers without exposing a public test-support API, so two is the floor.
 
 ## Performance Notes (frame-streaming hot path)
-Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`), so memcpy/allocation of that string — not CPU — dominates per-frame cost; the sites below are where copies happen today.
-- **Server encode:** `session::send` (session.rs:394) calls `adesk_viewer_proto::encode_server`, which builds a `serde_json::Value` tree and then stringifies it (codec.rs:26-28).
-  That copies the whole base64 payload into a `Value::String` and again into the output `String`, plus a double `Map` allocation per frame (message.rs:372, 445-463).
-  It applies to both pushed frames (session.rs:387) and `request_frame` replies (session.rs:262).
-- **Client delivery:** `dispatch` moves each decoded frame into the bounded `broadcast` channel (client.rs:688); every `frames()`/`request_frame` `recv()` clones the full `ViewerFrame` including the base64 `String` (client.rs:335, 364).
-  `FRAME_CHANNEL_CAPACITY = 32` (client.rs:70) bounds how many frames are retained, but each retained slot holds a full payload.
-- **Capture:** `save_frame_png` base64-decodes the payload (capture.rs:30) and `tight_rgba8` clones it again when rows are already tight (capture.rs:136); `--follow` therefore does one broadcast clone + one decode + one repack copy + a PNG encode per frame.
-- **Framing:** `write_line` issues three writes plus a flush per line (transport.rs:60-64); `read_line` allocates a fresh `Vec` then `String` per inbound message (transport.rs:35) — the server's inbound is input only, not frames.
+Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`), so memcpy/allocation of that string — not CPU — dominates per-frame cost; the sites below are where copies still happen.
+- **Server encode:** `session::send` calls `adesk_viewer_proto::encode_server`, which builds a `serde_json::Value` tree and then stringifies it (in `adesk-viewer-proto`: `codec.rs`, `message.rs`).
+  That copies the whole base64 payload into a `Value::String` and again into the output `String`, plus a double `Map` allocation per frame.
+  It applies to both pushed frames and `request_frame` replies.
+- **Client delivery:** `dispatch` moves each decoded frame into the bounded `broadcast` channel; every `frames()`/`request_frame` `recv()` clones the full `ViewerFrame` including the base64 `String`.
+  `FRAME_CHANNEL_CAPACITY = 32` bounds how many frames are retained, but each retained slot holds a full payload.
+- **Capture:** `save_frame_png` base64-decodes the payload into a `Vec<u8>` and hands ownership to `tight_rgba8` as a `Cow<[u8]>`, so an already-tight buffer is returned unchanged (no repack copy); only a row-padded buffer allocates. `--follow` therefore does one broadcast clone + one decode + a PNG encode per frame.
+- **Framing:** `write_line` offers the line and its terminator to a single vectored write, then one flush; `read_line_into` refills a caller-owned `Vec<u8>` in place, so the session loop and client dispatcher allocate nothing per inbound line (they decode the buffer as `&str`).
+- **Deliberately not done (would change public API / wire handling):** a manual streaming serializer to avoid the `Value`-tree encode, holding frames as `Arc<ViewerFrame>` in the broadcast channel to avoid the per-`recv` payload clone, and a `min_interval` policy change. These remain as-is.
 - **No producer/consumer lock contention on the server:** one session task renders, encodes and writes each frame with no shared lock, and the `Notify`-based change signal (backend.rs) collapses a busy desktop to at most one queued frame, so there is no unbounded producer queue.
 
 ## Test Strategy
 No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex stream or a `tempfile` Unix socket.
 - `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
-- `tests/client.rs` — 10 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream, input methods, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
-- `tests/script.rs` — 15 tests for the input-script grammar and error line numbers.
-- Inline unit tests: 53 in the lib target (backend, transport, capture, session, server, client) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
-- `tests/CONTEXT.md` records the audit-level redundancy in this suite (the `tests/script.rs` ⊃ `src/script.rs` inline-test overlap, the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`, and the four `FakeBackend` copies); read it before adding parser/session tests.
-- `tests/CONTEXT.md` records the audit-level redundancy in this suite (the `tests/script.rs` ⊃ `src/script.rs` inline-test overlap, the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`, and the four `FakeBackend` copies); read it before adding parser/session tests.
-- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **105 passed / 0 failed / 0 ignored** (53 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
+- `tests/client.rs` — 10 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream (`frames()` push on a desktop change), every input method incl. `scroll`/`text`/`set_control`, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
+- `tests/script.rs` — 15 tests for the input-script grammar and error line numbers (this suite fully covers the parser; `src/script.rs` has no inline tests).
+- Inline unit tests: 46 in the lib target (backend, transport, capture, session, server, client, test_support) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
+- `tests/CONTEXT.md` records the remaining audit notes and coverage gaps in this suite (the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`; no TCP-transport or multi-connection-fan-out test); read it before adding parser/session tests.
+- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **98 passed / 0 failed / 0 ignored** (46 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
 ## Known Issues
 - `capture::write_rgba8` is public and re-exported but has no caller anywhere in the workspace (only its own unit tests); `save_frame_png` and `FrameWriter` are the capture helpers the binary actually uses.
 - The `adesk-viewer` binary reads only `ADESK_LOG`; it has no `ADESK_VIEWER_SOCKET`/`ADESK_VIEWER_TCP` fallback and derives `$XDG_RUNTIME_DIR/adesk-viewer.sock` itself, so it cannot follow a runtime started with `--viewer-socket` unless `--unix` is passed. Those env vars exist only on `adesk-server`'s CLI.
 - `Cargo.toml` declares `serde` but no source file references it; the only JSON use is `serde_json` in `main.rs` overlay-name parsing.
-- `capture::tight_rgba8` (row de-padding) duplicates `adesk-server::images::tightly_packed`, and `capture::encode_rgba8_png` overlaps `adesk-server::images::encode_png`.
+- `capture::tight_rgba8` (row de-padding) duplicates `adesk-server::images::tightly_packed`, and `capture::encode_rgba8_png` overlaps `adesk-server::images::encode_png` — a cross-crate overlap left as-is (resolving it means changing `adesk-server`).
 
 ## Notes for Agents
 - The server session owns no transport: `serve` takes an already-connected stream; binding/accepting lives in `adesk-server`.
 - `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
-- Test scaffolding re-implements NDJSON framing locally rather than reusing the crate's own `pub` `transport::write_line`/`read_line`: `tests/session.rs` defines a local `write_line`, and the inline `src/session.rs` and `src/server.rs` test modules write `line + b"\n"` + flush by hand. `tests/session.rs` `send`/`recv` are thin wrappers over `adesk_viewer_proto::{encode_client, decode_server}` plus that framing. No `test-support` feature exists; `tempfile` is the only dev-dependency.
+- Test scaffolding reuses the crate's own framing: `tests/session.rs` `send`/`send_raw` call the re-exported `adesk_viewer::write_line` (no local helper), both integration files share one `FakeBackend` from `tests/common/mod.rs`, and the inline `src/session.rs`/`src/server.rs` tests share `src/test_support.rs`. No `test-support` feature exists; `tempfile` is the only dev-dependency.
 - `close()` can block up to the 250 ms grace only when the peer never answers; the happy path returns as soon as the server's `bye`/EOF arrives.
 - `adesk-server` is the real consumer: `crates/adesk-server/src/viewer/backend.rs` implements `ViewerBackend` (render via `inspection::refresh` + `images::encode_png`, state via `dispatch::windows::state`, input via the widened `pub(crate)` `dispatch::input` helpers) and `crates/adesk-server/src/viewer/listener.rs` binds the Unix/TCP transports and serves one `ViewerServer` per runtime.
 

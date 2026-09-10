@@ -35,7 +35,7 @@ use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::error::{Result, ViewerError};
-use crate::transport::{read_line, write_line};
+use crate::transport::{read_line, read_line_into, write_line};
 
 pub use crate::transport::DEFAULT_MAX_FRAME_LEN;
 
@@ -661,10 +661,12 @@ async fn write_message(inner: &Inner, message: &ClientMessage) -> Result<()> {
 /// The background reader: decodes server messages until the connection ends and
 /// fans them out, then [`Inner::shutdown`]s.
 async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Transport>>>) {
+    // One inbound line buffer reused across the connection's lifetime.
+    let mut line_buf: Vec<u8> = Vec::new();
     loop {
-        let line = match read_line(&mut reader, inner.max_frame_len).await {
-            Ok(Some(line)) => line,
-            Ok(None) => {
+        match read_line_into(&mut reader, &mut line_buf, inner.max_frame_len).await {
+            Ok(true) => {}
+            Ok(false) => {
                 tracing::debug!("viewer connection reached end of stream");
                 break;
             }
@@ -672,8 +674,17 @@ async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Tran
                 tracing::debug!(%error, "viewer connection read failed");
                 break;
             }
+        }
+        let line = match std::str::from_utf8(&line_buf) {
+            Ok(line) => line,
+            // Unreachable: `read_line_into` already rejected invalid UTF-8; a
+            // malformed line is dropped and the connection stays open.
+            Err(error) => {
+                tracing::debug!(%error, "ignoring a malformed viewer message");
+                continue;
+            }
         };
-        let message = match decode_server(&line) {
+        let message = match decode_server(line) {
             Ok(message) => message,
             Err(error) => {
                 // A malformed line is dropped; the connection stays open, like

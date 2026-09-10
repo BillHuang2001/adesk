@@ -58,20 +58,8 @@ impl KeySpec {
     }
 }
 
-impl From<String> for KeySpec {
-    fn from(key: String) -> KeySpec {
-        KeySpec::Single(key)
-    }
-}
-
 impl From<&str> for KeySpec {
     fn from(key: &str) -> KeySpec {
         KeySpec::Single(key.to_owned())
-    }
-}
-
-impl From<Vec<String>> for KeySpec {
-    fn from(keys: Vec<String>) -> KeySpec {
-        KeySpec::Chord(keys)
     }
 }

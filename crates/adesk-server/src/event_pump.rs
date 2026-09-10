@@ -133,7 +133,6 @@ fn correlate_window<'a>(
 /// re-rendered or cloned here — [`crate::inspection::refresh`] does that before
 /// every `inspect_*` frame.
 fn update_inspection(context: &ServerContext, event: &RuntimeEvent) {
-    let now_ms = context.now_ms();
     context.inspection.update(|snapshot| match event {
         RuntimeEvent::SurfaceCommit {
             window_id,
@@ -142,6 +141,7 @@ fn update_inspection(context: &ServerContext, event: &RuntimeEvent) {
             damage,
             ..
         } if !damage.is_empty() => {
+            let now_ms = context.now_ms();
             let geometry = context
                 .observer
                 .window_state(*window_id)
@@ -155,11 +155,13 @@ fn update_inspection(context: &ServerContext, event: &RuntimeEvent) {
             snapshot.ts_ms = now_ms;
         }
         RuntimeEvent::WindowActivated { window_id, .. } => {
+            let now_ms = context.now_ms();
             snapshot.active = Some(*window_id);
             snapshot.seq = event.seq();
             snapshot.ts_ms = now_ms;
         }
         RuntimeEvent::WindowDestroyed { window_id, .. } => {
+            let now_ms = context.now_ms();
             snapshot.windows.retain(|window| window.id != *window_id);
             if snapshot.active == Some(*window_id) {
                 snapshot.active = None;
@@ -175,16 +177,10 @@ fn update_inspection(context: &ServerContext, event: &RuntimeEvent) {
 ///
 /// The push loop removes its own stream on exit; this keeps the registry from
 /// accumulating dead entries when a connection dies without unwinding its
-/// tasks.
+/// tasks. `InspectRegistry::prune_closed` scans under the registry lock
+/// without cloning any payload, so the per-event path stays cheap.
 fn prune_inspect_streams(context: &ServerContext) {
-    if context.inspect_subscriptions.is_empty() {
-        return;
-    }
-    for subscription in context.inspect_subscriptions.list() {
-        if subscription.sink.is_closed() {
-            context.inspect_subscriptions.unsubscribe(subscription.id);
-        }
-    }
+    context.inspect_subscriptions.prune_closed();
 }
 
 /// Re-synchronizes the observer and the inspection cache after a broadcast lag.

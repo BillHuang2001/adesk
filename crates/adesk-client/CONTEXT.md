@@ -15,8 +15,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 ### Connection (`src/client.rs`)
 - `Client` — cheap-to-clone async handle; all methods take `&self`, so one handle can be shared across tasks. Clones share socket, request-id space, pending map and event fan-out.
 - `Client::connect(path)`, `Client::connect_default()`, `Client::connect_with(ConnectOptions) -> Result<Client>`.
-- `Client::socket_path()`, `is_closed()`, `protocol_version()`, `close(self) -> Result<()>` (closes the shared connection; in-flight requests fail with `Closed`).
-- `ConnectOptions` (`#[non_exhaustive]`): `path`, `max_frame_len`, `connect_timeout`, `verify_version` (default `true` → post-connect `ping` refuses version skew); builders `new/path/max_frame_len/connect_timeout/verify_version`.
+- `Client::socket_path()`, `is_closed()`, `close(self) -> Result<()>` (closes the shared connection; in-flight requests fail with `Closed`).
+- `ConnectOptions` (`#[non_exhaustive]`): `path`, `max_frame_len`, `connect_timeout`, `verify_version` (default `true` → post-connect `ping` refuses version skew); builders `new/max_frame_len/verify_version` (`path` and `connect_timeout` are set only by `new`).
 - `default_socket_path()`: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<system temp dir>/adesk.sock` (the exact fallback expression `adesk_server::default_socket_path()` uses, so the two meet under any `TMPDIR`).
 - `DEFAULT_MAX_FRAME_LEN` (16 MiB), `DEFAULT_CONNECT_TIMEOUT` (5 s).
 
@@ -35,12 +35,12 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - §5.7 `inspect_capture(InspectCaptureRequest) -> ImagePayload`; `inspect_subscribe(InspectSubscribeRequest) -> InspectStream`.
 
 ### Request types
-- `CaptureRequest::window(id)` + `.region/.max_dimension/.format`; `CaptureRegionRequest::new(id, rect)` (region mandatory) + `.max_dimension/.format`.
+- `CaptureRequest::window(id)` + `.region/.max_dimension/.format`; `CaptureRegionRequest::new(id, rect)` (region mandatory).
 - `ObserveRequest::quiet(ms)/change()/timeout()` + `.window/.after_action/.timeout_ms/.include_image/.max_dimension/.region`; `Condition{Quiet{quiet_ms}, Change, Timeout}`; `DEFAULT_TIMEOUT_MS = 5000`.
 - `WaitForChangeRequest::default()` + `.window/.since_commit/.timeout_ms`; `WaitForQuietRequest::default()` (quiet_ms 250) + `.window/.quiet_ms/.timeout_ms/.after_action`. These two helpers never request pixels (see Design Decisions).
-- `ClickRequest::window(id)` + `.position/.button/.count`; `PointerButtonRequest::window(id)` + `.position/.button` (used by `double_click`/`mouse_down`/`mouse_up`); `ScrollRequest::new(id, dx, dy)` + `.position`; `DragRequest::new(id, from, to)` + `.button/.duration_ms`.
+- `ClickRequest::window(id)` + `.position/.button/.count`; `PointerButtonRequest::window(id)` + `.position/.button` (used by `double_click`/`mouse_down`/`mouse_up`); `ScrollRequest::new(id, dx, dy)` + `.position`; `DragRequest::new(id, from, to)`.
 - `KeyChord{Single(String), Chord(Vec<String>)}` + `single`/`chord`, `From<&str>`, `From<String>`, `From<Vec<String>>`, `From<&[&str]>`; serialises as string or array per protocol §3.
-- `InspectCaptureRequest::default()` (= `DEFAULT_OVERLAYS`: window_ids+focus+damage) + `.region/.max_dimension`; `InspectSubscribeRequest::new(overlays)` + `.min_interval_ms`.
+- `InspectCaptureRequest::default()` (= `DEFAULT_OVERLAYS`: window_ids+focus+damage) + `.max_dimension`; `InspectSubscribeRequest::new(overlays)`.
 
 ### Events (`src/events.rs`)
 - `EventFilter{kinds: Option<Vec<EventKind>>, window_id: Option<WindowId>}` + `all()`, `kinds(..)`, `.window(id)`; `None` fields are omitted from the params object (= "all").
@@ -118,9 +118,9 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format rejected at the wire boundary, truncated PNG) and client-owned extras for length/stride/dimension mismatches.
 - `tests/socket_path.rs` — `default_socket_path()` resolution order. The fallback branch is reachable only with `$ADESK_SOCKET` and `$XDG_RUNTIME_DIR` unset, which the ambient environment does not guarantee, so each case asserts in a **child** process of the test binary with a controlled environment (`Command::env`/`env_remove` affect the child only); the suite never mutates its own process environment. The fallback case pins `$TMPDIR` to a private dir, so a hard-coded path fails.
 - Determinism: no sleeps longer than needed, deadlines explicit, `tokio::time::pause()` only if `test-util` is enabled in dev-deps, otherwise real time with generous margins (`docs/architecture.md` §10).
-- The only wall-clock *negative* assertions (real time spent for correctness, not just a hang guard) are `concurrency.rs` `timeout(50ms, &mut first)` (replaceable with the `futures::poll!().is_pending()` idiom the same test already uses) and `version.rs` `timeout(100ms, server.next_request())`. Every other `timeout` is a hang bound that never fires on a correct client.
-- `tests/images.rs` declares `mod common;` but uses none of `MockServer`/`Client`: the whole 256-line harness is compiled into that test target for nothing.
-- Each test file re-declares its own `connect(&mut MockServer)` helper (api/concurrency/errors/events verbatim, framing a variant) and its own 10 s deadline (named `TIMEOUT` in api.rs, `STEP_TIMEOUT` in events.rs, 14 inline literals elsewhere); `common/mod.rs` carries no shared connect/deadline helper.
+- Negative assertions use the deterministic `futures::poll!(&mut fut).is_pending()` idiom (`concurrency.rs`, `version.rs`); every remaining `timeout` is a hang bound that never fires on a correct client — no assertion depends on real wall-clock delay.
+- `tests/common/mod.rs` provides the shared harness helpers — `connect`/`connect_with`, the single 10 s `TIMEOUT`, and the `window_info()` fixture — and every test file uses them; there are no per-file `connect`/deadline/fixture copies.
+- `tests/images.rs` declares no `mod common;` (it uses no harness helpers), so the mock-server harness is not compiled into that target.
 
 ## Dependencies
 
@@ -130,7 +130,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
   - `Codec` trait (`encode(&Frame) -> Result<Vec<u8>, _>`, `decode(&[u8]) -> Result<Frame, _>`, both terminator-free) implemented by the unit struct `NdjsonCodec`
   - `Frame::{Request(RequestFrame), Response(ResponseFrame), Event(EventFrame)}`
   - `RequestFrame { id: u64, method: Method }` + `RequestFrame::new`, and `Method::from_parts(name: &str, params: Value) -> Result<Method>` (the typed method vocabulary)
-  - `ResponseFrame { id: u64, outcome: ResponseOutcome }`, `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, `ResultPayload::as_value() -> &Value`
+  - `ResponseFrame { id: u64, outcome: ResponseOutcome }`, `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, `ResultPayload(pub Value)`
   - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }`; `EventKind` serialises as a snake_case string; `EventPayload::to_data() -> Result<Value>`
   - `ErrorPayload { code: adesk_core::ErrorCode, message: String, data: Option<Value> }` (`data` deliberately dropped by the client)
   - `ImagePayload { width, height, format, stride, data, scale }` with a `Png`/`Rgba8` format enum and base64 `data`
@@ -139,13 +139,9 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 ## Performance Notes
 
 Cost centers on the per-request and per-event paths (identified by inspection; the crate has no benchmarks):
-- Every inbound event is deep-cloned once per live subscriber by `EventFanout::send` (`src/transport.rs:177-186`); an `inspect_frame`'s multi-MiB base64 image is therefore copied once per stream, even when there is a single subscriber.
-- Every response's `result` `Value` is deep-cloned in `wire::from_frame` (`src/wire.rs:154`, `payload.as_value().clone()`); `adesk_proto::ResultPayload`'s tuple field is public, so the `Value` could be moved out with no copy.
-- Event decode re-serialises: `wire::event_name` calls `serde_json::to_value` (`src/wire.rs:93`) and `EventPayload::to_data` re-serialises the typed payload to a fresh `Value` (`src/wire.rs:171`).
-- `events::runtime_event` clones the whole event `data` object into a new map plus three inserts per core runtime event (`src/events.rs:252-259`).
-- `agp_event_from_raw` clones the `image` value for `inspect_frame` (`src/events.rs:201`) and clones `data` for `quiet` (`src/events.rs:217`).
-- `EventFilter::matches` re-parses an `Other` event's name through serde per event (`src/events.rs:167`) and linearly scans `kinds` (`src/events.rs:155`).
-- `read_line` allocates and grows a fresh `Vec` per inbound line (`src/transport.rs:583-603`).
+- The inbound event path re-serialises: `EventPayload::to_data` re-serialises the typed payload to a fresh `Value`, and `events::runtime_event` clones the whole event `data` object into a new map plus three inserts per core runtime event.
+- `agp_event_from_raw` clones `data` for the `quiet` arm (the `inspect_frame` image is now moved out of `data` with `Value::take`, so it is not copied).
+- `EventFilter::matches` linearly scans `kinds` (a `Vec::contains` over at most 11 entries). A precomputed bitset is deliberately NOT used: `EventFilter.kinds` is a public mutable field, so a mask cached in the struct could go stale on external reassignment; making `kinds` private or adding a mutation-tracking setter would be a public-API change.
 
 ## Known Issues
 
@@ -157,11 +153,11 @@ Cost centers on the per-request and per-event paths (identified by inspection; t
 - `docs/protocol.md` §5.6 lists 11 `EventKind` values while `adesk_core::EventKind` has 9; the filter enum carries all 11.
   Wire `quiet` frames are typed as `AgpEvent::Quiet`; `surface_damage` is a subscription-only filter alias that no frame carries, so any `surface_damage` frame stays `AgpEvent::Other`.
   `EventStream` (from `subscribe_events`) skips non-core frames — including `quiet` — even when the filter selects them, so those frames are observable only through `subscribe_frames`/`AgpEventStream`.
+  `EventKind::as_str` is a third hand-maintained copy of the wire names and the client enum omits `InspectFrame`, so an `inspect_frame` subscription filter cannot be expressed through the SDK (adding the variant is a public-API change, deliberately not made unilaterally).
 - **The payload's `format` type is not re-exported.** `adesk_client::ImageFormat` is the *request* enum; `ImagePayload::format` is `adesk_proto::ImageFormat`, which the crate does not re-export, so matching on it requires a direct `adesk-proto` dependency — otherwise use `decode_image`/`ImagePayload::decode_data`.
 - The client's `wait_for_*` requests omit `include_image` (proto canonicalises it to `false` on the wire); if a consumer needs a post-wait image it must call `observe` or `capture_window`.
-- **Unreferenced public surface (nothing in the workspace calls these).** `EventKind::as_str` (`src/events.rs`), `Client::protocol_version` (`src/client.rs`), `Client::ping_raw` (`src/api/runtime.rs`, own tests only), `AgpEvent`/`AgpEventStream`/`InspectFrame`/`InspectStream` + `subscribe_frames` (own tests plus `crates/adesk-server/tests/protocol.rs` for `inspect_subscribe`), `EventStream/AgpEventStream/InspectStream::subscription_id` is used only by tests, `ConnectOptions::path`/`ConnectOptions::connect_timeout`, `DragRequest::button`/`DragRequest::duration_ms`, `CaptureRegionRequest::max_dimension`/`format`, `InspectCaptureRequest::region`, `InspectSubscribeRequest::min_interval_ms` (own test only), and `impl From<adesk_core::Error> for ClientError`. They are intentional SDK surface, so treat them as keep-by-default: none is a load-bearing caller, and none can be deleted without a public-API decision.
-- **Cross-crate duplicated logic (change one, check the others).** The NDJSON line reader `transport::read_line` has a sibling `adesk-viewer/src/transport.rs::read_line` with *divergent* edge-case semantics (viewer uses `read_until` + UTF-8 validation and tolerates an unterminated final line; this crate caps incrementally via `fill_buf`/`consume` and errors on mid-line EOF). The RGBA8 stride validate/repack in `src/image.rs::decode_rgba8` is near-verbatim in `adesk-viewer/src/capture.rs::tight_rgba8`, `adesk-render/src/image.rs::image_from_readback`/`tight_rgba`, and `adesk-proto/src/image.rs` (validation). `src/client.rs::default_socket_path` is byte-identical to `adesk-server/src/config.rs::default_socket_path` (no crate currently owns the shared home). The client's 11-variant `EventKind` duplicates `adesk_proto::EventKind` (12 variants, one `kind_name` table). The private wire structs in `src/api/*` restate `adesk_proto::methods::*Params`/`*Result` field-for-field, except that this crate's `changed_regions`/`skipped` are `#[serde(default)]` while proto's are required.
-- `api::capture::CaptureEnvelope` (`src/api/capture.rs`) restates the public `CaptureResult` field-for-field, and both `capture_window`/`capture_region` then copy the same four fields; `CaptureResult` already derives `Deserialize`, so the envelope adds no decoding behaviour.
+- **Unreferenced public surface (nothing in the workspace calls these).** `EventKind::as_str` (`src/events.rs`), `Client::ping_raw` (`src/api/runtime.rs`, own tests only), `AgpEvent`/`AgpEventStream`/`InspectFrame`/`InspectStream` + `subscribe_frames` (own tests plus `crates/adesk-server/tests/protocol.rs` for `inspect_subscribe`), `EventStream/AgpEventStream/InspectStream::subscription_id` (tests only), and `impl From<adesk_core::Error> for ClientError`. They are intentional SDK surface, so treat them as keep-by-default: none is a load-bearing caller.
+- **Cross-crate duplicated logic (change one, check the others).** The NDJSON line reader `transport::read_line` has a sibling `adesk-viewer/src/transport.rs::read_line` with *divergent* edge-case semantics (viewer uses `read_until` + UTF-8 validation and tolerates an unterminated final line; this crate fills a reader-task-owned scratch buffer via `fill_buf`/`consume` incrementally and errors on mid-line EOF). The RGBA8 stride validate/repack in `src/image.rs::decode_rgba8` is near-verbatim in `adesk-viewer/src/capture.rs::tight_rgba8`, `adesk-render/src/image.rs::image_from_readback`/`tight_rgba`, and `adesk-proto/src/image.rs` (validation). `src/client.rs::default_socket_path` is byte-identical to `adesk-server/src/config.rs::default_socket_path` (no crate currently owns the shared home). The client's 11-variant `EventKind` duplicates `adesk_proto::EventKind` (12 variants, one `kind_name` table). The private wire structs in `src/api/*` restate `adesk_proto::methods::*Params`/`*Result` field-for-field, except that this crate's `changed_regions`/`skipped` are `#[serde(default)]` while proto's are required.
 
 ## Notes for Agents
 
@@ -169,6 +165,8 @@ Cost centers on the per-request and per-event paths (identified by inspection; t
 - `cargo check --all-targets` does not compile doctests; `cargo test -p adesk-client` runs the `lib.rs` example (1 doctest).
 - `tests/common/mod.rs` is a shared module (`mod common;` in each test file), not a test target; it keeps `#![allow(dead_code)]` because each test target uses only a subset of the harness helpers.
 - Transport invariants: the reader task never `await`s while holding the `pending` lock and never `unwrap()`s a peer-controlled frame; `EVENT_CHANNEL_CAPACITY` (4096) is mirrored by the events lag test, so raising it means raising that test's emission count.
+- `EventFanout::send` clones the event for every live subscriber except the last, which takes it by move (0 clones with 0–1 subscribers); keep that property when touching the fan-out — `EventReceiver`/`Subscription` in `src/events.rs` carry the receive side.
+- `read_line` (`src/transport.rs`) reuses a reader-task-owned scratch buffer across lines (no per-line allocation) and returns a borrowed slice; keep the buffer cleared per line.
 
 ## Status
 

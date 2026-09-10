@@ -1,21 +1,16 @@
 //! AGP §5.6 — event subscriptions.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::api::Empty;
 use crate::events::{AgpEventStream, EventFilter, EventStream};
+use crate::transport::UnsubscribeParams;
 use crate::{Client, Result};
 
 /// `subscribe_events` / `inspect_subscribe` result.
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SubscribeResult {
     pub(crate) subscription_id: u64,
-}
-
-/// `unsubscribe_events` params.
-#[derive(Debug, Clone, Serialize)]
-struct UnsubscribeParams {
-    subscription_id: u64,
 }
 
 impl Client {

@@ -37,6 +37,7 @@ use crate::context::ServerContext;
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 
+use super::command::send_result;
 use super::windows::{command_error, state, unknown_window};
 
 /// Server policy for `double_click`.
@@ -492,21 +493,16 @@ pub(crate) fn is_unmappable_key(error: &ServerError) -> bool {
 
 /// Sends one result-bearing compositor command and awaits its reply.
 ///
-/// The reply carries [`adesk_core::Error`]; `dispatch::windows::command_error`
-/// preserves its AGP code. A dropped reply means the compositor thread is gone,
-/// which is reported as `shutting_down`.
+/// The reply carries [`adesk_core::Error`]; `dispatch::command::send_result`
+/// preserves its AGP code through `dispatch::windows::command_error`. A dropped
+/// reply means the compositor thread is gone, which is reported as
+/// `shutting_down`.
 pub(crate) async fn send_unit(
     server: &ServerContext,
     window_id: Option<WindowId>,
     make: impl FnOnce(oneshot::Sender<adesk_core::Result<()>>) -> RuntimeCommand,
 ) -> Result<()> {
-    let (reply, response) = oneshot::channel();
-    server.compositor.send(make(reply))?;
-    match response.await {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(error)) => Err(command_error(window_id, error)),
-        Err(_) => Err(ServerError::ShuttingDown),
-    }
+    send_result(server, window_id, || ServerError::ShuttingDown, make).await
 }
 
 #[cfg(test)]

@@ -61,9 +61,11 @@
 //!
 //! Scenarios are plans, not frozen specs: `scenario_navigation_title_change` observes
 //! `Change` instead of the built-in `Quiet` so the title change is provably caught, and
-//! the popup/title fixtures are driven by spawned tasks while the loop observes. The
-//! built-in expectations stay asserted in every case.
-#![cfg(feature = "e2e")]
+//! `scenario_dialog_popup_lifecycle` clicks first and anchors both of its observations to
+//! that click (`after_action: None` → the loop's `last_action_id`) instead of opening with
+//! the built-in plan's anchor-less `observe(change)`. The popup/title fixtures are driven by
+//! spawned tasks while the loop observes, and the built-in expectations stay asserted in
+//! every case.
 
 mod e2e_support;
 
@@ -334,7 +336,42 @@ async fn scenario_dialog_popup_lifecycle() -> TestResult {
         popup.destroy()
     });
 
-    let report = run_scenario(&runtime, ScenarioId::Dialog).await?;
+    // The built-in dialog plan opens with an *anchor-less* `observe(change)`, whose
+    // filter only starts when the waiter registers: under load the disappearance can
+    // be journaled first and is then never reported. This plan keeps the scenario's
+    // intent (dismiss the popup, verify it vanished) but anchors its first
+    // observation to the click — `after_action: None` resolves to the loop's
+    // `last_action_id` (the click), so the filter window starts at the click and the
+    // disappearance is counted whenever it lands. The click is the first decision, so
+    // it always precedes the destruction.
+    let mut scenario = Scenario::builtin(ScenarioId::Dialog);
+    scenario.script = vec![
+        ScriptEntry::decision(click_at(WindowId(1), 0.5, 0.75)),
+        ScriptEntry::decision(AgentDecision::Observe {
+            window_id: Some(WindowId(1)),
+            after_action: None,
+            until: ObserveCondition::Change,
+            timeout_ms: Some(5_000),
+            include_image: Some(false),
+            max_dimension: None,
+            region: None,
+        }),
+        ScriptEntry::decision(AgentDecision::Observe {
+            window_id: Some(WindowId(1)),
+            after_action: None,
+            until: ObserveCondition::Quiet { quiet_ms: 250 },
+            timeout_ms: Some(5_000),
+            include_image: Some(false),
+            max_dimension: None,
+            region: None,
+        }),
+        ScriptEntry::decision(AgentDecision::Finish {
+            success: true,
+            summary: String::from("dismissed the confirmation dialog and verified it is gone"),
+        }),
+    ];
+
+    let report = run_scenario_with(&runtime, &scenario).await?;
     destroy.await??;
 
     let observed = report

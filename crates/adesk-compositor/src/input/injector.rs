@@ -39,7 +39,13 @@ use smithay::{
 
 use crate::{config::XkbSettings, error::CompositorError, state::State, Result};
 
+use super::keycode::Keysym;
 use super::keymap::KeymapTable;
+
+/// xkb keysym name of the level-one modifier (`Shift`).
+pub(crate) const SHIFT_KEYSYM: &str = "Shift_L";
+/// xkb keysym name of the level-three modifier (`ISO_Level3_Shift`, AltGr).
+pub(crate) const LEVEL3_KEYSYM: &str = "ISO_Level3_Shift";
 
 /// Key repeat delay in milliseconds before the first repeat.
 const KEY_REPEAT_DELAY_MS: i32 = 200;
@@ -68,6 +74,13 @@ pub(crate) struct InputInjector {
     pointer: PointerHandle<State>,
     /// Keysym → keycode/level table compiled from the same xkb settings.
     keymap: KeymapTable,
+    /// Keycode producing [`SHIFT_KEYSYM`], resolved once from the keymap.
+    ///
+    /// `None` when the keymap cannot produce it; `State::inject_key` then reports the
+    /// same `invalid_request` it would have reported by resolving the name per event.
+    shift: Option<u32>,
+    /// Keycode producing [`LEVEL3_KEYSYM`], resolved once from the keymap.
+    level3: Option<u32>,
 }
 
 impl InputInjector {
@@ -78,6 +91,13 @@ impl InputInjector {
     /// the same way).
     pub(crate) fn new(seat: &Seat<State>, settings: &XkbSettings) -> Result<InputInjector> {
         let keymap = KeymapTable::new(settings)?;
+
+        // The level modifiers are resolved once here: their keycodes are constant for
+        // the process lifetime, so the key path never re-parses the names. A modifier
+        // the keymap cannot produce is remembered as `None` (the failure surfaces
+        // lazily in `State::inject_key`, exactly as before).
+        let shift = resolve_modifier(&keymap, SHIFT_KEYSYM);
+        let level3 = resolve_modifier(&keymap, LEVEL3_KEYSYM);
 
         // `add_keyboard`/`add_pointer` take `&mut self`; `Seat` is a handle, so
         // the clone refers to the very same seat.
@@ -95,12 +115,24 @@ impl InputInjector {
             keyboard,
             pointer,
             keymap,
+            shift,
+            level3,
         })
     }
 
     /// The keysym table used to resolve injected keys.
     pub(crate) fn keymap(&self) -> &KeymapTable {
         &self.keymap
+    }
+
+    /// The cached keycode producing `Shift_L`, when the keymap has one.
+    pub(crate) fn shift_keycode(&self) -> Option<u32> {
+        self.shift
+    }
+
+    /// The cached keycode producing `ISO_Level3_Shift`, when the keymap has one.
+    pub(crate) fn level3_keycode(&self) -> Option<u32> {
+        self.level3
     }
 
     /// A clone of the seat's keyboard handle, for the injection helpers below.
@@ -199,6 +231,17 @@ impl InputInjector {
     }
 }
 
+/// The keycode producing the keysym `name`, resolved once at startup.
+///
+/// `None` when `name` is not a keysym or the keymap has no key for it; the caller
+/// keeps that as a lazy `invalid_request` rather than failing construction.
+fn resolve_modifier(keymap: &KeymapTable, name: &str) -> Option<u32> {
+    let keysym = Keysym::parse(name).ok()?;
+    keymap
+        .resolve(keysym.value())
+        .map(|resolved| resolved.keycode)
+}
+
 /// The Smithay key state matching an ADesk [`KeyState`].
 fn smithay_key_state(state: KeyState) -> SmithayKeyState {
     match state {
@@ -244,6 +287,19 @@ fn axis_frame(time: u32, dx: f64, dy: f64) -> AxisFrame {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn level_modifier_keycodes_resolve_from_the_keymap() {
+        let keymap = KeymapTable::new(&XkbSettings::us()).expect("the us keymap must compile");
+        // `Shift_L` is always in a `us` keymap; its keycode is a real evdev code.
+        let shift = resolve_modifier(&keymap, SHIFT_KEYSYM).expect("`us` maps `Shift_L`");
+        assert_ne!(shift, 0);
+        // A keysym the keymap cannot produce is `None`, never an error: the failure
+        // is reported lazily by `State::inject_key`, so construction never fails
+        // where it did not before.
+        assert_eq!(resolve_modifier(&keymap, "Hyper_R"), None);
+        assert_eq!(resolve_modifier(&keymap, "not a keysym"), None);
+    }
 
     #[test]
     fn buttons_map_to_evdev_codes() {

@@ -21,8 +21,10 @@
 //! bytes and the typed results (`CONTEXT.md` → "Test Strategy").
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use adesk_core::ErrorCode;
+use adesk_client::{Client, ConnectOptions};
+use adesk_core::{AppId, ErrorCode, Rect, WindowId, WindowInfo, WindowState};
 use adesk_proto::{
     Codec, ErrorPayload, EventFrame, EventKind, EventPayload, Frame, NdjsonCodec, RequestFrame,
     ResponseFrame, ResponseOutcome, ResultPayload,
@@ -204,6 +206,48 @@ impl MockServer {
             .flush()
             .await
             .expect("mock server: flush to the client");
+    }
+}
+
+/// Bound for one awaited step; generous so a slow CI never flakes.
+pub const TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Connect a [`Client`] to `server` and accept the connection server-side.
+///
+/// Connects with `ConnectOptions::new(server.path()).verify_version(false)` so
+/// the automatic post-connect handshake `ping` does not consume the first
+/// scripted request; tests that exercise the handshake call [`connect_with`]
+/// (or `Client::connect*`) directly.
+pub async fn connect(server: &mut MockServer) -> Client {
+    connect_with(
+        server,
+        ConnectOptions::new(server.path()).verify_version(false),
+    )
+    .await
+}
+
+/// Connect a [`Client`] with explicit `options` and accept it server-side.
+pub async fn connect_with(server: &mut MockServer, options: ConnectOptions) -> Client {
+    let client = Client::connect_with(options)
+        .await
+        .expect("connect to the mock server");
+    server.accept().await;
+    client
+}
+
+/// The §4 `WindowInfo` fixture: window 17, active, 1280x800.
+pub fn window_info() -> WindowInfo {
+    WindowInfo {
+        id: WindowId(17),
+        app_id: Some(AppId::from("org.mozilla.firefox")),
+        title: Some("GitHub".to_owned()),
+        geometry: Rect::new(0, 0, 1280, 800),
+        state: WindowState::Active,
+        mapped: true,
+        pid: Some(4242),
+        created_seq: 800,
+        last_commit_seq: 8291,
+        popup_count: 0,
     }
 }
 

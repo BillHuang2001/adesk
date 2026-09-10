@@ -56,7 +56,7 @@
 //! | `actions` | `ActionKind`, `ActionRecord`, `ActionRegistry` |
 //! | `state` | per-window temporal state, `ObserverSnapshot`, resync snapshot types |
 //! | `spec` | `WaitSpec`, `QuietSpec`, `ObserveSpec`, `Condition` |
-//! | `service` | `ObserverService`, `ObserverConfig` |
+//! | `service` | `ObserverService` |
 //! | `error` | crate-local `Error`/`Result` mapped onto `adesk_core::Error` |
 //!
 //! Internal machinery: `journal` (bounded counted-event journal) and `waiter`
@@ -77,7 +77,7 @@ mod waiter;
 
 pub use actions::{ActionKind, ActionRecord, ActionRegistry};
 pub use error::{Error, Result};
-pub use service::{ObserverConfig, ObserverService};
+pub use service::ObserverService;
 pub use spec::{Condition, ObserveSpec, QuietSpec, WaitSpec};
 pub use state::{
     ObserverSnapshot, PendingObservation, ResyncReport, StateSnapshot, WindowSnapshot,

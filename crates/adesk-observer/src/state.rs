@@ -77,14 +77,7 @@ impl WindowTemporalState {
             state_uncertain: false,
         }
     }
-
-    /// `true` when the window has been quiet for at least `quiet_ms` at `now_ms`.
-    pub fn is_quiet(&self, now_ms: u64, quiet_ms: u64) -> bool {
-        self.quiet_since
-            .is_some_and(|since| now_ms.saturating_sub(since) >= quiet_ms)
-    }
 }
-
 /// Point-in-time view of the whole observer, for query methods that must not wait.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObserverSnapshot {

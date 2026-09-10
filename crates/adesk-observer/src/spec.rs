@@ -193,18 +193,3 @@ pub enum Condition {
     /// condition.
     Timeout,
 }
-
-impl Condition {
-    /// Quiet threshold carried by the condition.
-    ///
-    /// `Condition::Quiet` returns its own threshold; `Change`/`Timeout` return
-    /// [`crate::DEFAULT_QUIET_MS`]. The service resolves the `quiet` evidence
-    /// flag of a non-quiet condition against `ObserverConfig::default_quiet_ms`
-    /// (which defaults to this constant).
-    pub fn quiet_threshold_ms(&self) -> u64 {
-        match self {
-            Condition::Quiet { quiet_ms } => *quiet_ms,
-            Condition::Change | Condition::Timeout => DEFAULT_QUIET_MS,
-        }
-    }
-}

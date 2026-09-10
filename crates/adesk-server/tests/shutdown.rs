@@ -159,10 +159,10 @@ fn wait_resolves_when_shutdown_happens_concurrently() {
     let runtime = TestRuntime::start();
 
     let (wait, shutdown) = runtime.block_on(async {
-        tokio::join!(runtime.running().wait(), async {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            runtime.running().shutdown().await
-        })
+        // `join!` polls `wait()` (the first branch) before `shutdown()` (the second),
+        // so the wait is registered before the shutdown is initiated; and `watch`
+        // retains its latest value, so the completion order cannot race the outcome.
+        tokio::join!(runtime.running().wait(), runtime.running().shutdown())
     });
 
     assert!(

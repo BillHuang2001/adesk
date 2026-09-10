@@ -144,6 +144,14 @@ Painters preserve input order for windows, damage rects and action markers.
   shared kind appears later in `adesk-observer`/`adesk-proto`, the mapping is one `From` impl.
 - `OverlayStyle::default` uses stable debug colours (white outlines/text, translucent red damage,
   green focus, yellow cursor, cyan actions, magenta timing) so tests can pin exact pixels.
+- There is **no per-kind colour function**: each painter reads shared `OverlayStyle` fields, so a
+  kind's "colour" is whichever field it reads. `window_ids` and `app_ids` label with `text`
+  (white) over the `plate`; `surface_bounds` outlines with `outline` (white); `focus` outlines
+  *and* labels with `focus` (green); `damage` fills with `fill` (`rgba(255,0,0,48)`) then outlines
+  with `outline` (white); `cursor` crosshairs with `cursor` (yellow); `actions` markers/labels use
+  `action` (cyan); `commit_timing` uses `timing` (magenta). All eight kinds have a colour.
+- Overlay kinds are `adesk_core::OverlayKind` (there is no local mirror); every painter and
+  `paint::overlay`/`order_index` match all eight variants exhaustively.
 
 ## Cross-crate contract with `adesk-render`
 
@@ -185,7 +193,7 @@ post-processing to the server and drop the dependency.
 - `Error::Render` (`./src/error.rs`) is never constructed: `./src/post.rs` delegates to the infallible `adesk_render::crop`/`downscale`, so the `#[from]` arm exists only for a hand-written value (the server's error-mapping tests).
 - `Inspector::render` allocates an `ImageBuffer::new_rgba` (which writes alpha `255` into every pixel) and then `render_into` overwrites every byte with the input frame — the zero-fill pass is wasted work.
 - `paint/mod.rs` encodes the overlay order three times: `CANONICAL_ORDER`, the `order_index` match arms, and the `overlay` dispatch; only the dispatch is mandatory.
-- A second, independent implementation of the same §5.7 overlays lives in `adesk-compositor` (`src/render/elements.rs`: `overlay_color`, `border_rects`, `with_alpha`). Its palette disagrees with `OverlayStyle` for the same `OverlayKind` (`focus` yellow vs green, `surface_bounds` green vs white, `cursor` orange vs yellow), and the server only ever sends `RenderOutput { overlays: vec![] }`, so that compositor path has no production caller.
+- A second, independent implementation of the same §5.7 overlays lives in `adesk-compositor` (`src/render/elements.rs`: `overlay_elements`, `overlay_markers`, `overlay_color`, `border_rects`, `with_alpha`; consts `OVERLAY_BORDER = 2`, `OVERLAY_DAMAGE_ALPHA = 0.25`). It has **no per-kind colour agreement** with this crate: its `overlay_color` (f32 0..=1) is cyan/magenta/yellow/red/green/orange/white/blue for `window_ids`/`app_ids`/`focus`/`damage`/`surface_bounds`/`cursor`/`actions`/`commit_timing` respectively, whereas this crate paints white/white/green/white-border+red-fill/white/yellow/cyan/magenta for the same eight kinds — i.e. all eight differ. It also draws only 2 px geometry borders (no text, no real cursor; it marks every window for `cursor` and the window rect for `damage`). The compositor path is unreachable in production: `adesk-server` only ever sends `RuntimeCommand::RenderOutput { overlays: vec![], .. }` (`crates/adesk-server/src/inspection.rs::refresh`), and no other crate sends non-empty overlays; the compositor overlay code is exercised only by `elements.rs` unit tests and `render/headless.rs`'s no-window test. Deleting it would break nothing outside the compositor's own tests; the inspector is the sole production overlay painter.
 
 ## Notes for Agents
 

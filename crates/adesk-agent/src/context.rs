@@ -30,6 +30,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::client::RuntimeInfo;
 use crate::decision::ActionKind;
+use crate::text::truncate;
 
 /// Task description handed to the agent.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -143,7 +144,9 @@ impl EventSummary {
             seq: event.seq(),
             ts_ms: event.ts_ms(),
             window_id: event.window_id(),
-            detail: truncate_detail(describe_event(event), max_detail_chars),
+            // Details are elided silently (no marker): the summary is already a
+            // projection, so a trailing ellipsis would be noise.
+            detail: truncate(&describe_event(event), max_detail_chars, ""),
         }
     }
 }
@@ -211,19 +214,6 @@ fn commit_detail(commit_seq: u64, commits: u32, damage_rects: usize) -> String {
     } else {
         format!("commit {commit_seq} ({damage})")
     }
-}
-
-/// Truncates `detail` to at most `max_chars` characters, never splitting one.
-fn truncate_detail(mut detail: String, max_chars: usize) -> String {
-    if detail.chars().count() <= max_chars {
-        return detail;
-    }
-    let cut = detail
-        .char_indices()
-        .nth(max_chars)
-        .map_or(detail.len(), |(index, _)| index);
-    detail.truncate(cut);
-    detail
 }
 
 /// Bounded window metadata for the prompt.
@@ -509,9 +499,10 @@ impl ContextBuilder {
                 if let Some(head) = self.events.first_mut() {
                     head.seq = summary.seq;
                     head.ts_ms = summary.ts_ms;
-                    head.detail = truncate_detail(
-                        commit_detail(*commit_seq, commits, damage_rects),
+                    head.detail = truncate(
+                        &commit_detail(*commit_seq, commits, damage_rects),
                         self.budget.max_detail_chars,
+                        "",
                     );
                     return;
                 }

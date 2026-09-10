@@ -23,6 +23,11 @@ pub mod apps;
 /// §5.4 capture and observation methods (`capture_window`, `capture_region`,
 /// `observe`, `wait_for_change`, `wait_for_quiet`).
 pub mod capture;
+/// The compositor-command seam shared by the groups (`command + reply + await`).
+///
+/// Every item is `pub(crate)`; the module is crate-private so it adds no public
+/// API path.
+pub(crate) mod command;
 /// §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`).
 pub mod events;
 /// §5.5 input methods (11 methods, all returning `ActionResult` except
@@ -40,7 +45,6 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 
 use adesk_proto::{Method, RequestFrame, ResponseFrame};
-use tracing::Instrument;
 
 use crate::context::ServerContext;
 use crate::error::{Result, ServerError};
@@ -73,17 +77,13 @@ impl Dispatcher {
 
     /// Dispatches one request; always yields exactly one response frame.
     ///
-    /// The request runs inside a `request{id method}` span; the future is
-    /// instrumented rather than entered, so the span is never held across an
-    /// `.await`. A handler failure becomes an error response (never a panic and
-    /// never a closed connection).
+    /// The request already runs inside the `request{id method}` span opened by
+    /// the connection's read loop (`crate::connection::read_loop`), so this
+    /// method opens no second span. A handler failure becomes an error response
+    /// (never a panic and never a closed connection).
     pub async fn dispatch(&self, session: &Session, request: RequestFrame) -> ResponseFrame {
         let id = request.id;
-        let span = tracing::info_span!("request", id, method = request.method.method_name());
-        match route(&self.context, session, request)
-            .instrument(span)
-            .await
-        {
+        match route(&self.context, session, request).await {
             Ok(response) => response,
             Err(error) => error_response(id, &error),
         }

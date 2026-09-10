@@ -10,19 +10,18 @@
 mod common;
 
 use std::future::Future;
-use std::time::Duration;
 
 use adesk_client::{
-    CaptureRegionRequest, CaptureRequest, ClickRequest, Client, ClientError, ConnectOptions,
-    DragRequest, EventFilter, EventKind, ImagePayload, InspectCaptureRequest,
-    InspectSubscribeRequest, KeyChord, ObserveRequest, PointerButtonRequest, Renderer,
-    ScrollRequest, WaitForChangeRequest, WaitForQuietRequest,
+    CaptureRegionRequest, CaptureRequest, ClickRequest, ClientError, DragRequest, EventFilter,
+    EventKind, ImagePayload, InspectCaptureRequest, InspectSubscribeRequest, KeyChord,
+    ObserveRequest, PointerButtonRequest, Renderer, ScrollRequest, WaitForChangeRequest,
+    WaitForQuietRequest,
 };
 use adesk_core::{
     ActionId, AppId, AppInfo, Button, LaunchId, OverlayKind, Position, Rect, Size, WindowId,
-    WindowInfo, WindowState,
+    WindowState,
 };
-use common::MockServer;
+use common::{connect, window_info, MockServer, TIMEOUT};
 use image::ImageEncoder as _;
 use serde_json::{json, Value};
 
@@ -33,19 +32,6 @@ const PIXELS: [u8; 16] = [
     0, 0, 255, 255, //
     255, 255, 255, 128,
 ];
-
-/// Bound for one round trip; generous so a slow CI never flakes.
-const TIMEOUT: Duration = Duration::from_secs(10);
-
-/// Connect without the handshake `ping`: these tests script every request.
-async fn connect(server: &mut MockServer) -> Client {
-    let options = ConnectOptions::new(server.path()).verify_version(false);
-    let client = Client::connect_with(options)
-        .await
-        .expect("connect to the mock server");
-    server.accept().await;
-    client
-}
 
 /// Await one client `call` while `script` reads and answers it on the server.
 ///
@@ -70,22 +56,6 @@ fn png_payload() -> ImagePayload {
         .write_image(&PIXELS, 2, 2, image::ExtendedColorType::Rgba8)
         .expect("encode the fixture PNG");
     ImagePayload::from_png(2, 2, &png, 1.0)
-}
-
-/// The §4 `WindowInfo` fixture: window 17, active, 1280x800.
-fn window_info() -> WindowInfo {
-    WindowInfo {
-        id: WindowId(17),
-        app_id: Some(AppId::from("org.mozilla.firefox")),
-        title: Some("GitHub".to_owned()),
-        geometry: Rect::new(0, 0, 1280, 800),
-        state: WindowState::Active,
-        mapped: true,
-        pid: Some(4242),
-        created_seq: 800,
-        last_commit_seq: 8291,
-        popup_count: 0,
-    }
 }
 
 /// The §4 `AppInfo` fixture: Firefox.
@@ -1209,12 +1179,11 @@ async fn inspect_subscribe_roundtrip() {
     let mut server = MockServer::start().await;
     let client = connect(&mut server).await;
 
-    let request = InspectSubscribeRequest::new([OverlayKind::Focus]).min_interval_ms(250);
+    let request = InspectSubscribeRequest::new([OverlayKind::Focus]);
     let stream = round_trip(client.inspect_subscribe(request), async {
         let (id, method, params) = server.next_request().await;
         assert_eq!(method, "inspect_subscribe");
         assert_eq!(params["overlays"], json!(["focus"]));
-        assert_eq!(params["min_interval_ms"], json!(250));
         server.respond(id, json!({"subscription_id": 4})).await;
     })
     .await

@@ -1,8 +1,6 @@
 //! `decode_image` (src/image.rs): PNG and RGBA8 payloads, stride repacking,
 //! and failure modes — all offline, with no display, GPU or network.
 
-mod common;
-
 use adesk_client::{decode_image, ClientError, ImagePayload};
 use adesk_core::PixelFormat;
 use adesk_proto::ImageFormat as WireFormat;

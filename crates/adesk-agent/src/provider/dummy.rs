@@ -392,32 +392,13 @@ mod tests {
 
     use super::*;
     use crate::decision::ActionKind;
-
-    /// Minimal bounded context (no socket, no runtime).
-    fn ctx(task: &str) -> AgentContext {
-        AgentContext {
-            task: task.to_owned(),
-            success_criteria: None,
-            step: 0,
-            max_steps: 20,
-            runtime: None,
-            windows: Vec::new(),
-            active_window: None,
-            apps: Vec::new(),
-            recent_actions: Vec::new(),
-            recent_events: Vec::new(),
-            observation: None,
-            last_error: None,
-            image: None,
-            keyframe: None,
-        }
-    }
+    use crate::provider::test_context;
 
     /// Draw `n` decisions from a provider.
     async fn drain(provider: &DummyVlmProvider, n: usize) -> Vec<AgentDecision> {
         let mut out = Vec::with_capacity(n);
         for _ in 0..n {
-            out.push(provider.complete(&ctx("draw")).await.unwrap());
+            out.push(provider.complete(&test_context("draw")).await.unwrap());
         }
         out
     }
@@ -434,9 +415,15 @@ mod tests {
 
         assert_eq!(provider.config().mode, DummyMode::Fixed);
         assert_eq!(provider.remaining(), 2);
-        assert_eq!(provider.complete(&ctx("one")).await.unwrap(), decisions[0]);
+        assert_eq!(
+            provider.complete(&test_context("one")).await.unwrap(),
+            decisions[0]
+        );
         assert_eq!(provider.remaining(), 1);
-        assert_eq!(provider.complete(&ctx("two")).await.unwrap(), decisions[1]);
+        assert_eq!(
+            provider.complete(&test_context("two")).await.unwrap(),
+            decisions[1]
+        );
         assert_eq!(provider.remaining(), 0);
     }
 
@@ -444,14 +431,14 @@ mod tests {
     async fn fixed_falls_back_to_finish_without_panicking() {
         let provider = DummyVlmProvider::fixed(vec![AgentDecision::ListWindows]);
         assert_eq!(
-            provider.complete(&ctx("t")).await.unwrap(),
+            provider.complete(&test_context("t")).await.unwrap(),
             AgentDecision::ListWindows
         );
 
         // Every call past the end keeps returning a successful Finish — never a
         // panic and never a repeated script entry.
         for _ in 0..3 {
-            match provider.complete(&ctx("t")).await.unwrap() {
+            match provider.complete(&test_context("t")).await.unwrap() {
                 AgentDecision::Finish { success, summary } => {
                     assert!(success);
                     assert!(summary.contains("exhausted"), "summary: {summary}");
@@ -465,7 +452,7 @@ mod tests {
     async fn empty_fixed_script_finishes_immediately() {
         let provider = DummyVlmProvider::fixed(Vec::new());
         assert!(matches!(
-            provider.complete(&ctx("t")).await.unwrap(),
+            provider.complete(&test_context("t")).await.unwrap(),
             AgentDecision::Finish { success: true, .. }
         ));
     }
@@ -509,7 +496,7 @@ mod tests {
         });
 
         for _ in 0..5 {
-            let decision = provider.complete(&ctx("t")).await.unwrap();
+            let decision = provider.complete(&test_context("t")).await.unwrap();
             assert!(
                 !matches!(decision, AgentDecision::Finish { .. }),
                 "pooled decision expected before the budget, got {decision:?}"
@@ -519,7 +506,7 @@ mod tests {
 
         // The (budget + 1)-th call is guaranteed to finish, and stays finished.
         for _ in 0..2 {
-            match provider.complete(&ctx("t")).await.unwrap() {
+            match provider.complete(&test_context("t")).await.unwrap() {
                 AgentDecision::Finish { success, summary } => {
                     assert!(success);
                     assert!(summary.contains("step budget"), "summary: {summary}");
@@ -537,7 +524,7 @@ mod tests {
             ..DummyConfig::default()
         });
         assert!(matches!(
-            provider.complete(&ctx("t")).await.unwrap(),
+            provider.complete(&test_context("t")).await.unwrap(),
             AgentDecision::Finish { success: true, .. }
         ));
     }
@@ -554,12 +541,12 @@ mod tests {
         assert_eq!(provider.config().pool.len(), 1);
         for _ in 0..3 {
             assert_eq!(
-                provider.complete(&ctx("t")).await.unwrap(),
+                provider.complete(&test_context("t")).await.unwrap(),
                 AgentDecision::ListWindows
             );
         }
         assert!(matches!(
-            provider.complete(&ctx("t")).await.unwrap(),
+            provider.complete(&test_context("t")).await.unwrap(),
             AgentDecision::Finish { .. }
         ));
     }
@@ -575,8 +562,8 @@ mod tests {
     #[tokio::test]
     async fn contexts_are_recorded_in_call_order() {
         let provider = DummyVlmProvider::fixed(vec![AgentDecision::ListWindows]);
-        provider.complete(&ctx("first")).await.unwrap();
-        provider.complete(&ctx("second")).await.unwrap();
+        provider.complete(&test_context("first")).await.unwrap();
+        provider.complete(&test_context("second")).await.unwrap();
 
         assert_eq!(provider.context_count(), 2);
         let contexts = provider.contexts();
@@ -588,7 +575,7 @@ mod tests {
     async fn reset_rewinds_fixed_and_random_state() {
         let mut fixed =
             DummyVlmProvider::fixed(vec![AgentDecision::ListWindows, AgentDecision::ListWindows]);
-        fixed.complete(&ctx("t")).await.unwrap();
+        fixed.complete(&test_context("t")).await.unwrap();
         assert_eq!(fixed.context_count(), 1);
         fixed.reset();
         assert_eq!(fixed.remaining(), 2);
@@ -600,11 +587,11 @@ mod tests {
             step_budget: 4,
             ..DummyConfig::default()
         });
-        let first = random.complete(&ctx("t")).await.unwrap();
+        let first = random.complete(&test_context("t")).await.unwrap();
         random.reset();
         assert_eq!(random.remaining(), 4);
         assert_eq!(
-            random.complete(&ctx("t")).await.unwrap(),
+            random.complete(&test_context("t")).await.unwrap(),
             first,
             "reset must re-seed the generator"
         );

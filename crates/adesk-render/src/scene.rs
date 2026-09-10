@@ -46,34 +46,14 @@ impl<E> SceneNode<E> {
         &self.element
     }
 
-    /// Mutable access to the wrapped render element.
-    pub fn element_mut(&mut self) -> &mut E {
-        &mut self.element
-    }
-
     /// Placement of the element in scene coordinates.
     pub fn location(&self) -> Point<i32, Physical> {
         self.location
     }
 
-    /// Moves the element within the scene.
-    pub fn set_location(&mut self, location: Point<i32, Physical>) {
-        self.location = location;
-    }
-
     /// Damage of this element in scene coordinates (empty = unknown = full).
     pub fn damage(&self) -> &Region {
         &self.damage
-    }
-
-    /// Replaces the element's damage.
-    pub fn set_damage(&mut self, damage: Region) {
-        self.damage = damage;
-    }
-
-    /// Consumes the node, returning the element.
-    pub fn into_element(self) -> E {
-        self.element
     }
 }
 
@@ -106,11 +86,6 @@ impl<E> Scene<E> {
     /// Appends a node on top of the current topmost element.
     pub fn push(&mut self, node: SceneNode<E>) {
         self.nodes.push(node);
-    }
-
-    /// Appends several nodes in order.
-    pub fn extend(&mut self, nodes: impl IntoIterator<Item = SceneNode<E>>) {
-        self.nodes.extend(nodes);
     }
 
     /// The nodes in bottom-to-top z-order.

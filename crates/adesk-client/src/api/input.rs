@@ -160,18 +160,6 @@ impl DragRequest {
             duration_ms: 150,
         }
     }
-
-    /// Use a different button.
-    pub fn button(mut self, button: Button) -> Self {
-        self.button = button;
-        self
-    }
-
-    /// Override the drag duration.
-    pub fn duration_ms(mut self, duration_ms: u64) -> Self {
-        self.duration_ms = duration_ms;
-        self
-    }
 }
 
 /// Keys accepted by `keypress` — a single key or a chord (protocol §3).

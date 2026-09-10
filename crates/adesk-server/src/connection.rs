@@ -90,26 +90,49 @@ impl Connection {
 }
 
 /// Drains the outbound queue into the socket, one NDJSON line per frame.
+///
+/// The line buffer is reused across iterations, and every frame already queued
+/// when the loop wakes is appended to it before a single `write_all`, so a burst
+/// of responses/events costs one syscall instead of one per frame. The bytes on
+/// the wire are unchanged: each frame is one `\n`-terminated NDJSON line, emitted
+/// in queue order.
 async fn write_loop(
     mut half: OwnedWriteHalf,
     mut frames: mpsc::Receiver<Frame>,
     codec: NdjsonCodec,
 ) {
+    let mut buffer = String::new();
     while let Some(frame) = frames.recv().await {
-        let mut line = match codec.encode_str(&frame) {
-            Ok(line) => line,
-            Err(error) => {
-                tracing::warn!(%error, "dropping an unencodable outbound frame");
-                continue;
-            }
-        };
-        line.push('\n');
-        if let Err(error) = half.write_all(line.as_bytes()).await {
+        buffer.clear();
+        append_line(&mut buffer, &codec, &frame);
+        // Batch every frame already sitting in the queue into the same write.
+        while let Ok(queued) = frames.try_recv() {
+            append_line(&mut buffer, &codec, &queued);
+        }
+        if buffer.is_empty() {
+            // The whole batch failed to encode: there is nothing to write.
+            continue;
+        }
+        if let Err(error) = half.write_all(buffer.as_bytes()).await {
             tracing::debug!(%error, "connection write failed");
             break;
         }
     }
     let _ = half.shutdown().await;
+}
+
+/// Appends `frame` to `buffer` as one `\n`-terminated NDJSON line.
+///
+/// An unencodable frame is logged and dropped without breaking the batch, so
+/// the remaining queued frames are still delivered.
+fn append_line(buffer: &mut String, codec: &NdjsonCodec, frame: &Frame) {
+    match codec.encode_str(frame) {
+        Ok(line) => {
+            buffer.push_str(&line);
+            buffer.push('\n');
+        }
+        Err(error) => tracing::warn!(%error, "dropping an unencodable outbound frame"),
+    }
 }
 
 /// Reads NDJSON requests, dispatching each on its own task so slow requests do
@@ -238,16 +261,12 @@ fn request_id_from_line(text: &str) -> Option<u64> {
 #[derive(Clone)]
 pub struct ConnectionWriter {
     tx: mpsc::Sender<Frame>,
-    codec: NdjsonCodec,
 }
 
 impl ConnectionWriter {
     /// Wraps the queue that feeds the connection's writer task.
     pub fn new(tx: mpsc::Sender<Frame>) -> ConnectionWriter {
-        ConnectionWriter {
-            tx,
-            codec: NdjsonCodec,
-        }
+        ConnectionWriter { tx }
     }
 
     /// Queues one frame, awaiting capacity (backpressure for responses).
@@ -268,11 +287,6 @@ impl ConnectionWriter {
     /// by the event fan-out, which must never block the pump.
     pub fn try_send(&self, frame: Frame) -> bool {
         self.tx.try_send(frame).is_ok()
-    }
-
-    /// The NDJSON codec used for this connection.
-    pub fn codec(&self) -> &NdjsonCodec {
-        &self.codec
     }
 }
 
@@ -328,6 +342,37 @@ mod tests {
         assert!(!writer.try_send(response(1)));
     }
 
+    /// The batched, buffer-reusing `write_loop` emits exactly the same NDJSON
+    /// bytes as one `NdjsonCodec::encode_str` + `'\n'` per frame, in queue order.
+    #[tokio::test]
+    async fn write_loop_emits_one_ndjson_line_per_frame_in_order() {
+        let (stream, peer) = UnixStream::pair().expect("unix socket pair");
+        let (_read_half, write_half) = stream.into_split();
+        let (tx, rx) = mpsc::channel(8);
+        let writer = tokio::spawn(write_loop(write_half, rx, NdjsonCodec));
+
+        // Queue a burst so several frames are already waiting when the writer
+        // wakes, then close the queue so the task drains and finishes.
+        for id in 1..=4u64 {
+            tx.send(response(id)).await.unwrap();
+        }
+        drop(tx);
+
+        let mut reader = BufReader::new(peer);
+        let mut lines = Vec::new();
+        let mut line = String::new();
+        while reader.read_line(&mut line).await.unwrap() > 0 {
+            lines.push(std::mem::take(&mut line));
+        }
+        writer.await.expect("writer task must not panic");
+
+        assert_eq!(lines.len(), 4, "one line per queued frame");
+        for (index, raw) in lines.iter().enumerate() {
+            let id = index as u64 + 1;
+            let expected = NdjsonCodec.encode_str(&response(id)).unwrap();
+            assert_eq!(raw, &format!("{expected}\n"), "frame {id} bytes differ");
+        }
+    }
     #[test]
     fn request_id_is_lifted_from_a_raw_request_line() {
         assert_eq!(

@@ -59,12 +59,10 @@ dependencies = [
  "adesk-testkit",
  "adesk-wm",
  "calloop",
- "libc",
  "smithay",
  "thiserror 2.0.20",
  "tokio",
  "tracing",
- "wayland-server",
 ]
 
 [[package]]
@@ -147,7 +145,6 @@ dependencies = [
  "adesk-testkit",
  "adesk-viewer",
  "adesk-viewer-proto",
- "adesk-wm",
  "anyhow",
  "async-trait",
  "clap",

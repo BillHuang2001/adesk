@@ -13,7 +13,9 @@ pub mod openai;
 
 pub use dummy::{DummyConfig, DummyMode, DummyVlmProvider};
 pub use mock::{MockProvider, ScriptEntry};
-pub use openai::{ImageDetail, OpenAiCompatProvider, OpenAiConfig};
+pub use openai::{OpenAiCompatProvider, OpenAiConfig};
+
+use std::sync::Arc;
 
 use async_trait::async_trait;
 
@@ -39,6 +41,36 @@ pub trait LlmProvider: Send + Sync {
     /// Whether the provider accepts images in the context.
     fn supports_images(&self) -> bool {
         true
+    }
+}
+
+#[async_trait]
+impl LlmProvider for Box<dyn LlmProvider> {
+    async fn complete(&self, ctx: &AgentContext) -> Result<AgentDecision, ProviderError> {
+        (**self).complete(ctx).await
+    }
+
+    fn name(&self) -> &str {
+        (**self).name()
+    }
+
+    fn supports_images(&self) -> bool {
+        (**self).supports_images()
+    }
+}
+
+#[async_trait]
+impl<T: LlmProvider + ?Sized> LlmProvider for Arc<T> {
+    async fn complete(&self, ctx: &AgentContext) -> Result<AgentDecision, ProviderError> {
+        self.as_ref().complete(ctx).await
+    }
+
+    fn name(&self) -> &str {
+        self.as_ref().name()
+    }
+
+    fn supports_images(&self) -> bool {
+        self.as_ref().supports_images()
     }
 }
 
@@ -177,7 +209,6 @@ impl ProviderConfig {
             temperature: self.temperature,
             max_tokens: self.max_tokens,
             timeout_ms: self.timeout_ms,
-            image_detail: ImageDetail::Auto,
             system_prompt: non_empty(self.system_prompt.as_deref())
                 .unwrap_or(openai::DEFAULT_SYSTEM_PROMPT)
                 .to_owned(),
@@ -197,29 +228,31 @@ fn non_empty_env(name: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_owned())
 }
 
+/// Minimal bounded context shared by the provider tests (no socket, no runtime).
+#[cfg(test)]
+pub(crate) fn test_context(task: &str) -> AgentContext {
+    AgentContext {
+        task: task.to_owned(),
+        success_criteria: None,
+        step: 0,
+        max_steps: 20,
+        runtime: None,
+        windows: Vec::new(),
+        active_window: None,
+        apps: Vec::new(),
+        recent_actions: Vec::new(),
+        recent_events: Vec::new(),
+        observation: None,
+        last_error: None,
+        image: None,
+        keyframe: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::decision::AgentDecision;
-
-    fn context() -> AgentContext {
-        AgentContext {
-            task: String::from("smoke"),
-            success_criteria: None,
-            step: 0,
-            max_steps: 20,
-            runtime: None,
-            windows: Vec::new(),
-            active_window: None,
-            apps: Vec::new(),
-            recent_actions: Vec::new(),
-            recent_events: Vec::new(),
-            observation: None,
-            last_error: None,
-            image: None,
-            keyframe: None,
-        }
-    }
 
     #[test]
     fn provider_kind_names_match_the_cli() {
@@ -235,9 +268,9 @@ mod tests {
         assert!(provider.supports_images());
 
         // The empty script is the built-in dry-run sequence.
-        let decision = provider.complete(&context()).await.unwrap();
+        let decision = provider.complete(&test_context("smoke")).await.unwrap();
         assert_eq!(decision, AgentDecision::ListWindows);
-        let decision = provider.complete(&context()).await.unwrap();
+        let decision = provider.complete(&test_context("smoke")).await.unwrap();
         assert!(matches!(
             decision,
             AgentDecision::Finish { success: true, .. }
@@ -254,7 +287,7 @@ mod tests {
         };
         let provider = config.build().expect("mock builds");
         assert_eq!(
-            provider.complete(&context()).await.unwrap(),
+            provider.complete(&test_context("smoke")).await.unwrap(),
             AgentDecision::ListApps {
                 query: Some(String::from("term")),
             }
@@ -274,7 +307,6 @@ mod tests {
         assert_eq!(config.base_url, openai::DEFAULT_BASE_URL);
         assert_eq!(config.model, openai::DEFAULT_MODEL);
         assert_eq!(config.system_prompt, openai::DEFAULT_SYSTEM_PROMPT);
-        assert_eq!(config.image_detail, ImageDetail::Auto);
         assert_eq!(config.timeout_ms, openai::DEFAULT_TIMEOUT_MS);
 
         let explicit = ProviderConfig {
@@ -363,11 +395,11 @@ mod tests {
         assert_eq!(provider.name(), "dummy");
         assert!(provider.supports_images());
         assert_eq!(
-            provider.complete(&context()).await.unwrap(),
+            provider.complete(&test_context("smoke")).await.unwrap(),
             AgentDecision::ListWindows
         );
         assert!(matches!(
-            provider.complete(&context()).await.unwrap(),
+            provider.complete(&test_context("smoke")).await.unwrap(),
             AgentDecision::Finish { success: true, .. }
         ));
     }
@@ -386,9 +418,33 @@ mod tests {
         let mut first_seq = Vec::new();
         let mut second_seq = Vec::new();
         for _ in 0..10 {
-            first_seq.push(first.complete(&context()).await.unwrap());
-            second_seq.push(second.complete(&context()).await.unwrap());
+            first_seq.push(first.complete(&test_context("smoke")).await.unwrap());
+            second_seq.push(second.complete(&test_context("smoke")).await.unwrap());
         }
         assert_eq!(first_seq, second_seq);
+    }
+
+    #[tokio::test]
+    async fn boxed_and_arc_providers_delegate_to_the_inner_provider() {
+        let boxed: Box<dyn LlmProvider> =
+            Box::new(MockProvider::scripted(vec![AgentDecision::ListWindows]));
+        assert_eq!(boxed.name(), "mock");
+        assert!(boxed.supports_images());
+        assert_eq!(
+            boxed.complete(&test_context("wrapped")).await.unwrap(),
+            AgentDecision::ListWindows
+        );
+
+        // `MockProvider` is not `Clone`, so the second wrapper gets its own script.
+        let arc: Arc<MockProvider> =
+            Arc::new(MockProvider::scripted(vec![AgentDecision::ListApps {
+                query: None,
+            }]));
+        assert_eq!(arc.name(), "mock");
+        assert!(arc.supports_images());
+        assert_eq!(
+            arc.complete(&test_context("wrapped")).await.unwrap(),
+            AgentDecision::ListApps { query: None }
+        );
     }
 }

@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use crate::backend::{ViewerBackend, ViewerInput};
 use crate::error::{Result, ViewerError};
 use crate::server::{PeerInfo, ViewerServerConfig};
-use crate::transport::{read_line, write_line};
+use crate::transport::{read_line, read_line_into, write_line};
 
 /// Runs one viewer connection to completion (`docs/viewer.md` §2–§6).
 ///
@@ -101,6 +101,10 @@ where
     let mut last_sent: Option<Instant> = None;
     // A desktop change arrived while the pacing interval had not yet elapsed.
     let mut pending = false;
+    // One inbound line buffer reused for the whole connection: the select loop
+    // passes it to `read_line_into`, which clears and refills it each iteration,
+    // so steady-state message handling never allocates for a line.
+    let mut line_buf: Vec<u8> = Vec::new();
 
     loop {
         // The pacing arm is armed only while a change is pending; otherwise it is
@@ -116,11 +120,11 @@ where
         };
 
         tokio::select! {
-            inbound = read_line(&mut read, config.max_frame_len) => {
-                let line = match inbound {
-                    Ok(Some(line)) => line,
+            inbound = read_line_into(&mut read, &mut line_buf, config.max_frame_len) => {
+                match inbound {
                     // Clean EOF: the viewer went away (§5).
-                    Ok(None) => return Ok(()),
+                    Ok(false) => return Ok(()),
+                    Ok(true) => {}
                     // Framing corruption (over-cap line or invalid UTF-8) is a
                     // protocol error that closes the connection (§6).
                     Err(ViewerError::Transport(_)) => {
@@ -128,9 +132,19 @@ where
                         return Ok(());
                     }
                     Err(error) => return Err(error),
+                }
+
+                let line = match std::str::from_utf8(&line_buf) {
+                    Ok(line) => line,
+                    // Unreachable: `read_line_into` already rejected invalid
+                    // UTF-8; handled like any other malformed message.
+                    Err(_) => {
+                        send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
+                        return Ok(());
+                    }
                 };
 
-                let message = match decode_client(&line) {
+                let message = match decode_client(line) {
                     Ok(message) => message,
                     Err(_) => {
                         send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
@@ -430,83 +444,10 @@ fn is_peer_gone(error: &ViewerError) -> bool {
 mod tests {
     use super::*;
 
-    use adesk_core::Size;
-    use adesk_proto::{ImagePayload, RendererKind};
-    use adesk_viewer_proto::{
-        encode_client, ControlOwner, CursorState, DesktopState, ServerHello, ViewerFrame,
-        ViewerHello,
-    };
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use adesk_viewer_proto::{encode_client, ControlOwner};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-    use crate::backend::ChangeSignal;
-
-    /// A backend that records the input it was asked to apply, can be told to
-    /// report a desktop change, and can be made to fail rendering.
-    struct FakeBackend {
-        change: ChangeSignal,
-        actions: std::sync::Mutex<Vec<ViewerInput>>,
-        /// When set, [`ViewerBackend::render_frame`] fails.
-        fail_render: AtomicBool,
-    }
-
-    impl FakeBackend {
-        fn new() -> Arc<FakeBackend> {
-            Arc::new(FakeBackend {
-                change: ChangeSignal::new(),
-                actions: std::sync::Mutex::new(Vec::new()),
-                fail_render: AtomicBool::new(false),
-            })
-        }
-
-        fn last_action(&self) -> Option<ViewerInput> {
-            self.actions.lock().unwrap().last().cloned()
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ViewerBackend for FakeBackend {
-        fn display(&self) -> ServerHello {
-            ServerHello {
-                protocol_version: adesk_viewer_proto::PROTOCOL_VERSION,
-                runtime_version: "0.1.0".to_owned(),
-                output: Size::new(4, 2),
-                renderer: RendererKind::Pixman,
-                cursor: CursorState::hidden(),
-                control: ControlOwner::Ai,
-            }
-        }
-
-        async fn render_frame(&self) -> Result<ViewerFrame> {
-            if self.fail_render.load(Ordering::SeqCst) {
-                return Err(ViewerError::Backend("renderer failed".to_owned()));
-            }
-            let data = vec![0u8; 4 * 2 * 4];
-            Ok(ViewerFrame {
-                seq: 1,
-                ts_ms: 0,
-                image: ImagePayload::from_rgba8(4, 2, &data, 1.0).expect("valid rgba8 payload"),
-                cursor: CursorState::hidden(),
-                active_window_id: None,
-            })
-        }
-
-        async fn desktop_state(&self) -> Result<DesktopState> {
-            Ok(DesktopState {
-                active_window_id: None,
-                windows: Vec::new(),
-            })
-        }
-
-        async fn apply_input(&self, input: ViewerInput) -> Result<Option<adesk_core::ActionId>> {
-            self.actions.lock().unwrap().push(input);
-            Ok(Some(adesk_core::ActionId(7)))
-        }
-
-        fn change_signal(&self) -> ChangeSignal {
-            self.change.clone()
-        }
-    }
+    use crate::test_support::FakeBackend;
 
     /// The buffered line reader the tests use on the client half.
     type ClientLines =
@@ -571,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn handshake_replies_with_the_server_hello() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (handle, _lines, mut write) = start(backend, ViewerHello::new()).await;
 
         send_bye(&mut write).await;
@@ -581,7 +522,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_frame_is_answered_with_a_frame() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
 
         let request = encode_client(&ClientMessage::RequestFrame { id: None });
@@ -598,11 +539,11 @@ mod tests {
 
     #[tokio::test]
     async fn change_pushes_a_frame_and_input_is_forwarded() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (handle, mut lines, mut write) = start(backend.clone(), ViewerHello::new()).await;
 
         // A desktop change pushes a frame (unpaced: one frame per change).
-        backend.change.notify();
+        backend.notify_change();
         let frame = lines.next_line().await.unwrap().unwrap();
         assert!(frame.contains("\"frame\""), "{frame}");
 
@@ -625,7 +566,7 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_handshake_is_refused_and_closes() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (server_stream, client_stream) = tokio::io::duplex(4096);
         let config = config();
         let peer = PeerInfo::Other("test".to_owned());
@@ -647,7 +588,7 @@ mod tests {
 
     #[tokio::test]
     async fn version_mismatch_is_a_hard_error() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (server_stream, client_stream) = tokio::io::duplex(4096);
         let config = config();
         let peer = PeerInfo::Other("test".to_owned());
@@ -675,7 +616,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_message_type_is_ignored() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
 
         // An unrecognised `"type"` decodes to `Unknown` and is ignored (§1).
@@ -701,7 +642,7 @@ mod tests {
 
     #[tokio::test]
     async fn eof_before_hello_is_a_handshake_error() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (server_stream, client_stream) = tokio::io::duplex(4096);
         let config = config();
         let peer = PeerInfo::Other("test".to_owned());
@@ -719,7 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn request_state_and_set_control_round_trip() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
 
         let state = encode_client(&ClientMessage::RequestState { id: None });
@@ -745,8 +686,8 @@ mod tests {
 
     #[tokio::test]
     async fn render_failure_answers_error_and_keeps_the_connection_open() {
-        let backend = FakeBackend::new();
-        backend.fail_render.store(true, Ordering::SeqCst);
+        let backend = FakeBackend::shared();
+        backend.set_fail_render(true);
         let (handle, mut lines, mut write) = start(backend.clone(), ViewerHello::new()).await;
 
         let request = encode_client(&ClientMessage::RequestFrame { id: None });
@@ -757,7 +698,7 @@ mod tests {
         assert!(error.contains("render_failed"), "{error}");
 
         // The connection is still usable afterwards (§6).
-        backend.fail_render.store(false, Ordering::SeqCst);
+        backend.set_fail_render(false);
         write.write_all(request.as_bytes()).await.unwrap();
         write.write_all(b"\n").await.unwrap();
         write.flush().await.unwrap();
@@ -770,7 +711,7 @@ mod tests {
 
     #[tokio::test]
     async fn paced_changes_collapse_into_a_single_frame_per_interval() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         // The viewer asks for no pacing (`min_interval_ms == 0`), so the server
         // default (`200ms`) applies (§2).
         let config = ViewerServerConfig::default().with_default_min_interval_ms(200);
@@ -778,13 +719,13 @@ mod tests {
             start_with_config(backend.clone(), ViewerHello::new(), config).await;
 
         // The first change flushes immediately (no previous frame).
-        backend.change.notify();
+        backend.notify_change();
         let frame = lines.next_line().await.unwrap().unwrap();
         assert!(frame.contains("\"frame\""), "{frame}");
 
         // A second change within the interval is deferred, not queued: no frame
         // arrives right away.
-        backend.change.notify();
+        backend.notify_change();
         assert!(
             tokio::time::timeout(Duration::from_millis(50), lines.next_line())
                 .await
@@ -839,7 +780,7 @@ mod tests {
     /// cleanly instead of surfacing a peer-gone transport failure.
     #[tokio::test]
     async fn bye_acknowledgement_to_a_gone_peer_is_a_clean_exit() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         for kind in [
             std::io::ErrorKind::BrokenPipe,
             std::io::ErrorKind::ConnectionReset,
@@ -857,7 +798,7 @@ mod tests {
     /// so a genuine transport fault is never silently hidden.
     #[tokio::test]
     async fn bye_acknowledgement_failure_that_is_not_peer_gone_propagates() {
-        let backend = FakeBackend::new();
+        let backend = FakeBackend::shared();
         let mut write = FailingWriter {
             kind: std::io::ErrorKind::WouldBlock,
         };
