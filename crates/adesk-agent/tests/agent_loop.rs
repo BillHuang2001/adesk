@@ -5,6 +5,8 @@
 //! Every test here must run without a socket, compositor, GPU or network.
 #![cfg(feature = "test-support")]
 
+mod common;
+
 use std::sync::Arc;
 
 use adesk_agent::testing::{ClientMethod, ScriptedClient, ScriptedResponse};
@@ -14,10 +16,10 @@ use adesk_agent::{
     WindowList, PROTOCOL_VERSION,
 };
 use adesk_core::{
-    ActionId, Button, ErrorCode, Observation, Position, Rect, Size, WindowId, WindowInfo,
-    WindowState,
+    ActionId, Button, ErrorCode, Observation, Position, Rect, WindowId, WindowInfo, WindowState,
 };
 use async_trait::async_trait;
+use common::{empty_windows, runtime_info};
 
 /// Build a loop over a scripted client and mock provider (used by the phase-2
 /// tests below).
@@ -75,25 +77,6 @@ fn click_decision(window_id: u64) -> AgentDecision {
     }
 }
 
-/// Runtime identity as a conforming runtime reports it.
-fn runtime_info() -> adesk_agent::RuntimeInfo {
-    adesk_agent::RuntimeInfo {
-        protocol_version: PROTOCOL_VERSION,
-        runtime_version: "0.1.0".to_owned(),
-        uptime_ms: 42,
-        renderer: "pixman".to_owned(),
-        output: Size::new(1280, 800),
-    }
-}
-
-/// An empty window list (no windows known yet).
-fn empty_windows() -> WindowList {
-    WindowList {
-        windows: Vec::new(),
-        active_window_id: None,
-    }
-}
-
 /// One mapped, active window.
 fn window(id: u64) -> WindowInfo {
     WindowInfo {
@@ -112,23 +95,7 @@ fn window(id: u64) -> WindowInfo {
 
 /// A quiet observation causally after `after_action`.
 fn observation(after_action: Option<ActionId>) -> Observation {
-    Observation {
-        window_id: Some(WindowId(1)),
-        after_action,
-        commits: 1,
-        changed_regions: vec![Rect::new(0, 0, 10, 10)],
-        focus_changed: None,
-        title_changed: false,
-        new_windows: Vec::new(),
-        destroyed_windows: Vec::new(),
-        popups_appeared: Vec::new(),
-        popups_disappeared: Vec::new(),
-        elapsed_ms: 12,
-        quiet: true,
-        timed_out: false,
-        last_commit_seq: 3,
-        seq: 9,
-    }
+    common::observation(Some(WindowId(1)), after_action)
 }
 
 /// An `observe` result without pixels.

@@ -41,15 +41,9 @@ pub enum Error {
         /// Configured deadline in milliseconds.
         timeout_ms: u64,
     },
-    /// An action needed a window but none is active (recoverable).
-    #[error("no active window")]
-    NoActiveWindow,
     /// The provider returned a decision that cannot be executed.
     #[error("invalid decision: {0}")]
     InvalidDecision(String),
-    /// Invalid CLI or environment configuration.
-    #[error("configuration error: {0}")]
-    Config(String),
     /// Local I/O failure (report writing, script files).
     #[error(transparent)]
     Io(#[from] std::io::Error),
@@ -81,9 +75,6 @@ pub enum ProviderError {
     /// The provider response could not be parsed into an `AgentDecision`.
     #[error("invalid provider response: {0}")]
     InvalidResponse(String),
-    /// The provider/model cannot serve the request.
-    #[error("provider does not support: {0}")]
-    Unsupported(String),
 }
 
 /// How the loop reacts to an [`Error`].
@@ -103,10 +94,9 @@ impl Error {
     ///
     /// Mapping: `Client(Timeout | Busy)`, [`Error::Transport`], [`Error::Io`],
     /// and provider `Transport | Timeout` are [`ErrorClass::Retryable`];
-    /// `Client(UnknownWindow | UnknownApp | CaptureFailed | RenderFailed)` and
-    /// [`Error::NoActiveWindow`] are [`ErrorClass::Recoverable`]; everything else
-    /// (protocol mismatch, configuration, invalid decision, shutting down,
-    /// internal errors) is [`ErrorClass::Fatal`].
+    /// `Client(UnknownWindow | UnknownApp | CaptureFailed | RenderFailed)` is
+    /// [`ErrorClass::Recoverable`]; everything else (protocol mismatch, invalid
+    /// decision, shutting down, internal errors) is [`ErrorClass::Fatal`].
     pub fn class(&self) -> ErrorClass {
         match self {
             Error::Client(err) => match err.code {
@@ -126,9 +116,8 @@ impl Error {
                 ErrorClass::Retryable
             }
             Error::Provider(_) => ErrorClass::Fatal,
-            Error::NoActiveWindow => ErrorClass::Recoverable,
-            // Protocol mismatch, configuration, invalid decisions, budget
-            // exhaustion, deadlines and internal/JSON failures end the run.
+            // Protocol mismatch, invalid decisions, budget exhaustion, deadlines
+            // and internal/JSON failures end the run.
             _ => ErrorClass::Fatal,
         }
     }
@@ -147,15 +136,12 @@ impl Error {
     /// | `Provider(MissingApiKey)` | `provider_missing_api_key` |
     /// | `Provider(Status{..})` | `provider_status` |
     /// | `Provider(InvalidResponse)` | `provider_invalid_response` |
-    /// | `Provider(Unsupported)` | `provider_unsupported` |
     /// | `Transport` / `Io` / `Json` | `transport` / `io` / `json` |
     /// | `ProtocolVersion{..}` | `protocol_version_mismatch` |
     /// | `StepTimeout{..}` | `step_timeout` |
     /// | `StepBudgetExhausted` | `step_budget_exhausted` |
     /// | `FailureBudgetExhausted` | `failure_budget_exhausted` |
-    /// | `NoActiveWindow` | `no_active_window` |
     /// | `InvalidDecision` | `invalid_decision` |
-    /// | `Config` | `config` |
     pub fn kind_key(&self) -> String {
         match self {
             Error::Client(err) => err.code.as_str().to_string(),
@@ -165,16 +151,13 @@ impl Error {
                 ProviderError::Status { .. } => "provider_status".to_string(),
                 ProviderError::Timeout(_) => "provider_timeout".to_string(),
                 ProviderError::InvalidResponse(_) => "provider_invalid_response".to_string(),
-                ProviderError::Unsupported(_) => "provider_unsupported".to_string(),
             },
             Error::Transport(_) => "transport".to_string(),
             Error::ProtocolVersion { .. } => "protocol_version_mismatch".to_string(),
             Error::StepBudgetExhausted(_) => "step_budget_exhausted".to_string(),
             Error::FailureBudgetExhausted(_) => "failure_budget_exhausted".to_string(),
             Error::StepTimeout { .. } => "step_timeout".to_string(),
-            Error::NoActiveWindow => "no_active_window".to_string(),
             Error::InvalidDecision(_) => "invalid_decision".to_string(),
-            Error::Config(_) => "config".to_string(),
             Error::Io(_) => "io".to_string(),
             Error::Json(_) => "json".to_string(),
         }
@@ -212,7 +195,6 @@ mod tests {
             client(ErrorCode::UnknownApp),
             client(ErrorCode::CaptureFailed),
             client(ErrorCode::RenderFailed),
-            Error::NoActiveWindow,
         ];
         for err in recoverable {
             assert_eq!(err.class(), ErrorClass::Recoverable, "{err}");
@@ -232,7 +214,6 @@ mod tests {
                 body: "oops".into(),
             }),
             Error::Provider(ProviderError::InvalidResponse("not json".into())),
-            Error::Provider(ProviderError::Unsupported("vision".into())),
             Error::ProtocolVersion {
                 expected: 1,
                 got: 999,
@@ -244,7 +225,6 @@ mod tests {
                 timeout_ms: 30_000,
             },
             Error::InvalidDecision("missing window_id".into()),
-            Error::Config("no task".into()),
             Error::Json(serde_json::from_str::<u8>("nope").unwrap_err()),
         ];
         for err in fatal {
@@ -278,9 +258,6 @@ mod tests {
             .kind_key(),
             "protocol_version_mismatch"
         );
-        assert_eq!(Error::NoActiveWindow.kind_key(), "no_active_window");
-        assert_eq!(Error::Config("x".into()).kind_key(), "config");
-
         // Every AGP code maps to its wire name, so metrics keys never drift.
         for code in [
             ErrorCode::InvalidRequest,

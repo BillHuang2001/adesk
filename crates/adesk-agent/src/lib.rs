@@ -60,6 +60,9 @@ pub mod report;
 pub mod scenario;
 #[cfg(any(test, feature = "test-support"))]
 pub mod testing;
+/// Character-counted truncation shared by the eliding call sites (crate-internal,
+/// never part of the public API).
+mod text;
 
 pub use agent_loop::{AgentLoop, LoopConfig, LoopOutcome, StepRecord, StepStatus};
 pub use agp::AgpClient;
