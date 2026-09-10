@@ -80,16 +80,18 @@ Code rules:
 | Thread entry: display + calloop loop + three sources | `src/run.rs` |
 | `handle_command`: one command → outcome/reply (module `run::dispatch`) | `src/dispatch.rs` |
 | Wayland socket bind/name | `src/socket.rs` |
-| `WmBridge` + coordinate resolution | `src/wm.rs` |
+| `WmBridge` + coordinate resolution + hot-path lookups (`root_id`, `window_geometry`) | `src/wm.rs` |
+| `SurfaceRegistry`: pure surface-tree bookkeeping (stable keys, owner lookup, popup records) | `src/wm/registry.rs` |
 | `WmBridge` unit tests (included from `wm.rs` via `#[path]`) | `src/wm_tests.rs` |
 | Protocol handler impls + delegate macros | `src/protocols/` |
 | Input injection internals (keycode, keymap, injector) | `src/input/` |
-| Headless renderer + element collection | `src/render/` |
-| `compositor_smoke.rs` (public API only) + `window_lifecycle.rs`/`input_delivery.rs`/`popups.rs`/`clipboard.rs`/`reserve_seq.rs`/`output_composition.rs` integration suites + `integration_plan.md` scenario/suite map | `tests/` |
+| Headless renderer + element collection (own `CONTEXT.md`) | `src/render/` |
+| Integration suites + shared harness (`tests/common/mod.rs`) + `compositor_smoke.rs` (public API only, no `adesk-testkit`) + `integration_plan.md` scenario/suite map (own `CONTEXT.md`) | `tests/` |
 
 `src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
-`src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions + keyboard/pointer handle getters).
+`src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions, keyboard/pointer handle getters, cached level-modifier keycodes).
 `src/render/`: `headless.rs` (`HeadlessRenderer`: create/name/dmabuf_formats/render_window/render_output), `elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`, `overlay_elements`, `rect_to_smithay`), `mod.rs` (`OutputWindow`).
+`src/wm.rs` + `src/wm/registry.rs` + `src/wm_tests.rs`: `WmBridge` (the surface↔window bridge), `SurfaceRegistry` (keyed tree bookkeeping), the `wm` unit tests.
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
 - `../adesk-core/` — domain types and `RuntimeEvent`.
