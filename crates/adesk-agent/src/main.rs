@@ -29,7 +29,7 @@ use adesk_agent::{
 #[derive(Debug, Parser)]
 #[command(name = "adesk-agent", version, about, long_about = None)]
 struct Cli {
-    /// AGP Unix socket path (default: `$ADESK_SOCKET` or `$XDG_RUNTIME_DIR/adesk.sock`).
+    /// AGP Unix socket path (default: `$ADESK_SOCKET`, else `$XDG_RUNTIME_DIR/adesk.sock`, else `<temp dir>/adesk.sock`).
     #[arg(long, env = "ADESK_SOCKET")]
     socket: Option<PathBuf>,
 
@@ -227,16 +227,12 @@ fn provider_config(cli: &Cli) -> ProviderConfig {
 }
 
 /// Resolve the AGP socket: `--socket` / `$ADESK_SOCKET` (clap), else
-/// `$XDG_RUNTIME_DIR/adesk.sock`, else `/tmp/adesk.sock` — the documented
-/// default of `docs/protocol.md` §1.
+/// [`adesk_client::default_socket_path`]: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock`
+/// → `<temp dir>/adesk.sock` (the documented default of `docs/protocol.md` §1).
 fn resolve_socket(cli: &Cli) -> PathBuf {
-    if let Some(path) = &cli.socket {
-        return path.clone();
-    }
-    if let Some(dir) = std::env::var_os("XDG_RUNTIME_DIR") {
-        return PathBuf::from(dir).join("adesk.sock");
-    }
-    PathBuf::from("/tmp/adesk.sock")
+    cli.socket
+        .clone()
+        .unwrap_or_else(adesk_client::default_socket_path)
 }
 
 /// Resolve `--task` / `--scenario` into the run target; exactly one is required.

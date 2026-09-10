@@ -15,7 +15,7 @@ Everything below is re-exported at the crate root; `adesk-testkit` is designed a
 
 - `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>> }` (`src/config.rs`)
   - `new(socket_path, compositor)` (the constructor `adesk-testkit`'s harness calls) and `Default` (environment-resolved socket path, compositor defaults); builders `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
-  - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock` (`adesk_client::default_socket_path` currently diverges on the last fallback — see Known Issues).
+  - `default_socket_path()` resolves `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock` (`std::env::temp_dir()` honours `$TMPDIR`); `adesk_client::default_socket_path()` uses the identical chain.
   - `parse_size("WxH")` / `parse_renderer("auto|gl|pixman")` are the CLI value parsers.
 - `Server::start(ServerConfig) -> Result<RunningServer, ServerError>` — **async** (`src/server.rs`).
 - `RunningServer` (Clone handle; `Debug` prints only the socket path; dropping it does not stop the runtime):
@@ -131,14 +131,13 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 - **adesk-app-registry**: registry and correlator must share one `Arc<dyn Clock>`; after a successful `launch` emit `AppLaunched {launch_id, app_id, pid}` on the compositor's broadcast and `correlator.record_launch(record, &app_info)`; the pump then correlates each `WindowCreated` that lacks a `launch_id` (`Correlated` → stamp `launch_id` on the projected event; `Uncorrelated` → pass through, never guess); `scan()` is blocking; child reaping is the server's job; set `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` on launches via `LaunchEnv`.
 - **adesk-inspector**: implement `InspectionSource` (done by `InspectionCache`); full-output render before overlays; `inspect_capture` = `Inspector::new(overlays).render_request(input, request)` then PNG; `inspect_subscribe` = same per frame, throttled, one `Inspector` per subscription; map inspector errors with `adesk_core::Error::from`.
 - **adesk-proto**: `ObserveResult` serializes as `{"observation": {..., "image": ...}}`; `ImagePayload::from_rgba8`/`from_png` are the only constructors; `Method::from_parts` is the decode entry point; defaults (`timeout_ms=5000`, `quiet_ms=250`, `observe.include_image=true`, waits `false`, `format=png`) are the proto crate's, the server must not redefine them.
-- **adesk-client**: `ping` validates `protocol_version` (report `PROTOCOL_VERSION` exactly); error responses must not close the connection; waits never attach pixels unless `include_image` is set. Its default-socket fallback does not match this crate's (see Known Issues).
+- **adesk-client**: `ping` validates `protocol_version` (report `PROTOCOL_VERSION` exactly); error responses must not close the connection; waits never attach pixels unless `include_image` is set; its `default_socket_path()` chain matches this crate's exactly.
 
 ## Known Issues
 
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
-- **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions and input delivery still need the `adesk-testkit` wave. Launch correlation *is* covered by injecting a synthetic `WindowCreated` into the compositor's broadcast.
+- **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions and input delivery are not exercised here; that coverage now lives in the `adesk-testkit` and `adesk-agent` suites. Launch correlation *is* covered by injecting a synthetic `WindowCreated` into the compositor's broadcast.
 - **No E2E case exercises keyboard methods without `window_id`** (the no-focus path that must answer `invalid_request`, `input.rs::activate_if_needed` returns early and the compositor reports "no window has keyboard focus"), and no case exercises a *successful* injection — every §5.5 E2E call targets an unknown window.
-- **`adesk_client::default_socket_path()` diverges from this crate's third fallback** (`/tmp/adesk.sock` vs `std::env::temp_dir()/adesk.sock`; equal only when `TMPDIR` is `/tmp`). Pass an explicit socket path in tests and tooling; the client crate is outside this node's scope and the divergence is flagged to the parent.
 
 ## Test Strategy
 
