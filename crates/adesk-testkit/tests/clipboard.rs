@@ -21,7 +21,7 @@
 //!   supersede behaviour and the `Ok(None)` of an unadvertised mime type;
 //! - **fallback** — no offer arrived, so the test asserts that the offer counter is still zero
 //!   and that the read fails with the *documented* no-offer `Timeout`, under the short
-//!   [`READ_TIMEOUT`] so the suite stays fast (see [`assert_no_offer_read`]).
+//!   [`NO_OFFER_TIMEOUT`] so the suite stays fast (see [`assert_no_offer_read`]).
 //!
 //! Either way the failure is named and bounded — never a hang, never invented bytes.
 //! [`REQUIRE_CLIPBOARD_DELIVERY`] is `true`, so the fallback branch is a hard failure: with the
@@ -52,9 +52,9 @@
 //! Nothing here launches an application (`apply_env(false)`: the runtime releases the
 //! harness's process-env lock as soon as the server is up and both clients connect by
 //! absolute path), needs a display, GPU, network or installed application (pixman
-//! renderer), or sleeps to synchronize: [`OFFER_PROBE`], [`READ_TIMEOUT`] and [`DEADLINE`]
-//! are the only deadlines, all bounded. No test is `#[ignore]`d, env-gated, or needs
-//! `--test-threads=1`.
+//! renderer), or sleeps to synchronize: [`OFFER_PROBE`], [`READ_TIMEOUT`], [`NO_OFFER_TIMEOUT`]
+//! and [`DEADLINE`] are the only deadlines, all bounded. No test is `#[ignore]`d, env-gated,
+//! or needs `--test-threads=1`.
 
 use std::time::{Duration, Instant};
 
@@ -113,9 +113,15 @@ const NO_SELECTION_OFFER_WHAT: &str = "read_selection selection offer";
 /// instead of hanging it.
 const OFFER_PROBE: Duration = Duration::from_secs(2);
 
-/// Deadline for reads of the selection, and for the fallback's no-offer read (which must fail
-/// *fast*).
+/// Deadline for reads of a real selection transfer (the offer arrives, so the read should not
+/// spend anywhere near this long).
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Deadline for a read that has no selection offer to wait for, so it only ever expires.
+///
+/// A no-selection read cannot succeed, so it must fail *fast*: this is the only bound that
+/// matters for it (well below [`READ_TIMEOUT`]) and keeps the no-offer tests quick.
+const NO_OFFER_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// Every other bounded wait (the harness bound, far above one round trip).
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -280,9 +286,10 @@ fn selection_delivery(client: &WaylandTestClient, test: &str) -> Result<bool> {
 /// failure.
 ///
 /// Unreachable as a passing path in the shipped configuration (the flag is `true`), and the
-/// only branch that asserts less than the round trip. The deadline is [`READ_TIMEOUT`] (not the
-/// client's 10 s default) so a fallback run stays fast, and both `what` and the deadline inside
-/// the error are asserted so the failure cannot drift into a different one.
+/// only branch that asserts less than the round trip. The deadline is [`NO_OFFER_TIMEOUT`] (not
+/// the client's 10 s default, nor the longer [`READ_TIMEOUT`]) so a fallback run stays fast, and
+/// both `what` and the deadline inside the error are asserted so the failure cannot drift into a
+/// different one.
 fn assert_no_offer_read(client: &WaylandTestClient, mime: &str) {
     assert_eq!(
         client.selection_offer_count(),
@@ -290,9 +297,9 @@ fn assert_no_offer_read(client: &WaylandTestClient, mime: &str) {
         "the fallback branch only holds while no selection offer was announced"
     );
     let error = client
-        .read_selection_with_timeout(mime, READ_TIMEOUT)
+        .read_selection_with_timeout(mime, NO_OFFER_TIMEOUT)
         .expect_err("a read without a selection offer must not return bytes");
-    assert_timeout_named(&error, NO_SELECTION_OFFER_WHAT, READ_TIMEOUT);
+    assert_timeout_named(&error, NO_SELECTION_OFFER_WHAT, NO_OFFER_TIMEOUT);
 }
 
 /// Asserts `error` is the documented timeout named `what`, with the caller's deadline.
@@ -466,14 +473,14 @@ async fn read_selection_without_any_selection_times_out_bounded() -> Result<()> 
 
     let started = Instant::now();
     let error = client
-        .read_selection_with_timeout(TEXT_MIME, READ_TIMEOUT)
+        .read_selection_with_timeout(TEXT_MIME, NO_OFFER_TIMEOUT)
         .expect_err("a read with no selection must not return bytes");
     let elapsed = started.elapsed();
 
-    assert_timeout_named(&error, NO_SELECTION_OFFER_WHAT, READ_TIMEOUT);
+    assert_timeout_named(&error, NO_SELECTION_OFFER_WHAT, NO_OFFER_TIMEOUT);
     assert!(
         elapsed < DEADLINE,
-        "the read must fail within its own deadline ({READ_TIMEOUT:?}), never hang: took {elapsed:?}"
+        "the read must fail within its own deadline ({NO_OFFER_TIMEOUT:?}), never hang: took {elapsed:?}"
     );
 
     client.close().await?;
