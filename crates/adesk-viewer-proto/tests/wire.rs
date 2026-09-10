@@ -1,60 +1,34 @@
 //! Golden-JSON and version-helper tests for the VAP v1 type + message layer
 //! (`docs/viewer.md` §2–§4). No display, GPU, network or socket.
 
-use adesk_core::{
-    AppId, Button, ButtonState, ErrorCode, OverlayKind, Rect, Size, WindowId, WindowInfo,
-    WindowState,
-};
+mod common;
+
+use adesk_core::{Button, ButtonState, ErrorCode, OverlayKind, Size};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
-    check_version, is_compatible_version, ClientMessage, ControlOwner, CursorState, DesktopState,
-    KeyAction, ServerHello, ServerMessage, ViewerFrame, ViewerHello, ViewerProtoError,
+    check_version, is_compatible_version, ClientMessage, ControlOwner, CursorState, KeyAction,
+    ServerHello, ServerMessage, ViewerFrame, ViewerHello, ViewerProtoError,
     DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
 };
+use common::{
+    bye_message, bye_server_message, bye_without_reason, client, control_message, error_message,
+    frame_message, hello_message, input_ack_with_id, input_ack_without_id, key_tap_message,
+    pointer_button_pressed, pointer_move_message, request_frame_with_id, request_frame_without_id,
+    request_state_with_id, request_state_without_id, scroll_message, server, server_hello_message,
+    set_control_message, state_empty, state_with_window, text_message, unknown_client_message,
+    unknown_server_message,
+};
 use serde_json::{json, Value};
-
-/// Serializes a client message through its `Serialize` impl.
-fn client(message: &ClientMessage) -> Value {
-    serde_json::to_value(message).expect("client message serializes")
-}
-
-/// Serializes a server message through its `Serialize` impl.
-fn server(message: &ServerMessage) -> Value {
-    serde_json::to_value(message).expect("server message serializes")
-}
-
-fn sample_window() -> WindowInfo {
-    WindowInfo {
-        id: WindowId(17),
-        app_id: Some(AppId::from("org.mozilla.firefox")),
-        title: Some("GitHub".to_owned()),
-        geometry: Rect::new(0, 0, 1280, 800),
-        state: WindowState::Active,
-        mapped: true,
-        pid: Some(4242),
-        created_seq: 800,
-        last_commit_seq: 8291,
-        popup_count: 0,
-    }
-}
 
 // --- constants and version helpers ---------------------------------------
 
 #[test]
-fn protocol_version_and_compatibility() {
+fn protocol_version_is_one_and_checked() {
     assert_eq!(PROTOCOL_VERSION, 1);
     assert!(is_compatible_version(1));
     assert!(!is_compatible_version(0));
     assert!(!is_compatible_version(2));
-}
-
-#[test]
-fn check_version_accepts_the_current_version() {
     assert!(check_version(1).is_ok());
-}
-
-#[test]
-fn check_version_rejects_a_mismatch() {
     let error = check_version(2).expect_err("v2 is a mismatch");
     assert!(matches!(
         error,
@@ -122,19 +96,19 @@ fn client_hello_golden() {
 #[test]
 fn client_request_frame_and_state_golden() {
     assert_eq!(
-        client(&ClientMessage::RequestFrame { id: Some(7) }),
+        client(&request_frame_with_id()),
         json!({"type": "request_frame", "id": 7})
     );
     assert_eq!(
-        client(&ClientMessage::RequestFrame { id: None }),
+        client(&request_frame_without_id()),
         json!({"type": "request_frame"})
     );
     assert_eq!(
-        client(&ClientMessage::RequestState { id: Some(8) }),
+        client(&request_state_with_id()),
         json!({"type": "request_state", "id": 8})
     );
     assert_eq!(
-        client(&ClientMessage::RequestState { id: None }),
+        client(&request_state_without_id()),
         json!({"type": "request_state"})
     );
 }
@@ -142,7 +116,7 @@ fn client_request_frame_and_state_golden() {
 #[test]
 fn client_pointer_move_golden() {
     assert_eq!(
-        client(&ClientMessage::PointerMove { x: 0.42, y: 0.51 }),
+        client(&pointer_move_message()),
         json!({"type": "pointer_move", "x": 0.42, "y": 0.51})
     );
 }
@@ -150,12 +124,7 @@ fn client_pointer_move_golden() {
 #[test]
 fn client_pointer_button_golden() {
     assert_eq!(
-        client(&ClientMessage::PointerButton {
-            button: Button::Left,
-            state: ButtonState::Pressed,
-            x: None,
-            y: None,
-        }),
+        client(&pointer_button_pressed()),
         json!({"type": "pointer_button", "button": "left", "state": "pressed"})
     );
     assert_eq!(
@@ -178,12 +147,7 @@ fn client_pointer_button_golden() {
 #[test]
 fn client_scroll_golden() {
     assert_eq!(
-        client(&ClientMessage::Scroll {
-            dx: 0.0,
-            dy: -3.0,
-            x: None,
-            y: None,
-        }),
+        client(&scroll_message()),
         json!({"type": "scroll", "dx": 0.0, "dy": -3.0})
     );
 }
@@ -191,10 +155,7 @@ fn client_scroll_golden() {
 #[test]
 fn client_key_uses_the_state_wire_name() {
     assert_eq!(
-        client(&ClientMessage::Key {
-            keys: KeySpec::Single("a".to_owned()),
-            action: KeyAction::Tap,
-        }),
+        client(&key_tap_message()),
         json!({"type": "key", "keys": "a", "state": "tap"})
     );
     assert_eq!(
@@ -209,60 +170,37 @@ fn client_key_uses_the_state_wire_name() {
 #[test]
 fn client_text_set_control_and_bye_golden() {
     assert_eq!(
-        client(&ClientMessage::Text {
-            text: "hello".to_owned(),
-        }),
+        client(&text_message()),
         json!({"type": "text", "text": "hello"})
     );
     assert_eq!(
-        client(&ClientMessage::SetControl {
-            owner: ControlOwner::Human,
-        }),
+        client(&set_control_message()),
         json!({"type": "set_control", "owner": "human"})
     );
     assert_eq!(
-        client(&ClientMessage::Bye {
-            reason: Some("done".to_owned()),
-        }),
+        client(&bye_message()),
         json!({"type": "bye", "reason": "done"})
     );
-    assert_eq!(
-        client(&ClientMessage::Bye { reason: None }),
-        json!({"type": "bye"})
-    );
+    assert_eq!(client(&bye_without_reason()), json!({"type": "bye"}));
 }
 
 #[test]
 fn client_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "x": 1});
-    assert_eq!(
-        client(&ClientMessage::Unknown {
-            message_type: "future_thing".to_owned(),
-            value: value.clone(),
-        }),
-        value
-    );
+    assert_eq!(client(&unknown_client_message()), value);
 }
 
 #[test]
 fn client_message_type_tags() {
     let cases = [
-        (ClientMessage::Hello(ViewerHello::new()), "hello"),
-        (ClientMessage::RequestFrame { id: None }, "request_frame"),
-        (ClientMessage::RequestState { id: None }, "request_state"),
+        (hello_message(), "hello"),
+        (request_frame_without_id(), "request_frame"),
+        (request_state_without_id(), "request_state"),
         (
             ClientMessage::PointerMove { x: 0.0, y: 0.0 },
             "pointer_move",
         ),
-        (
-            ClientMessage::PointerButton {
-                button: Button::Left,
-                state: ButtonState::Pressed,
-                x: None,
-                y: None,
-            },
-            "pointer_button",
-        ),
+        (pointer_button_pressed(), "pointer_button"),
         (
             ClientMessage::Scroll {
                 dx: 0.0,
@@ -272,13 +210,7 @@ fn client_message_type_tags() {
             },
             "scroll",
         ),
-        (
-            ClientMessage::Key {
-                keys: KeySpec::from("a"),
-                action: KeyAction::Tap,
-            },
-            "key",
-        ),
+        (key_tap_message(), "key"),
         (
             ClientMessage::Text {
                 text: String::new(),
@@ -291,7 +223,7 @@ fn client_message_type_tags() {
             },
             "set_control",
         ),
-        (ClientMessage::Bye { reason: None }, "bye"),
+        (bye_without_reason(), "bye"),
         (
             ClientMessage::Unknown {
                 message_type: "mystery".to_owned(),
@@ -314,16 +246,8 @@ fn client_message_type_tags() {
 
 #[test]
 fn server_hello_golden() {
-    let hello = ServerHello {
-        protocol_version: PROTOCOL_VERSION,
-        runtime_version: "0.1.0".to_owned(),
-        output: Size::new(1280, 800),
-        renderer: RendererKind::Pixman,
-        cursor: CursorState::hidden(),
-        control: ControlOwner::Ai,
-    };
     assert_eq!(
-        server(&ServerMessage::Hello(hello)),
+        server(&server_hello_message()),
         json!({
             "type": "hello",
             "protocol_version": 1,
@@ -338,16 +262,8 @@ fn server_hello_golden() {
 
 #[test]
 fn server_frame_golden() {
-    let image = ImagePayload::from_png(1, 1, b"x", 1.0);
-    let frame = ViewerFrame {
-        seq: 8291,
-        ts_ms: 51234,
-        image,
-        cursor: CursorState::at(0.42, 0.51),
-        active_window_id: Some(WindowId(17)),
-    };
     assert_eq!(
-        server(&ServerMessage::Frame(frame)),
+        server(&frame_message()),
         json!({
             "type": "frame",
             "seq": 8291,
@@ -380,12 +296,8 @@ fn server_frame_golden() {
 
 #[test]
 fn server_state_golden() {
-    let state = DesktopState {
-        active_window_id: Some(WindowId(17)),
-        windows: vec![sample_window()],
-    };
     assert_eq!(
-        server(&ServerMessage::State(state)),
+        server(&state_with_window()),
         json!({
             "type": "state",
             "active_window_id": 17,
@@ -408,31 +320,19 @@ fn server_state_golden() {
 #[test]
 fn server_control_input_ack_error_bye_golden() {
     assert_eq!(
-        server(&ServerMessage::Control {
-            owner: ControlOwner::Human,
-        }),
+        server(&control_message()),
         json!({"type": "control", "owner": "human"})
     );
     assert_eq!(
-        server(&ServerMessage::InputAck {
-            id: Some(3),
-            action_id: adesk_core::ActionId(582),
-        }),
+        server(&input_ack_with_id()),
         json!({"type": "input_ack", "id": 3, "action_id": 582})
     );
     assert_eq!(
-        server(&ServerMessage::InputAck {
-            id: None,
-            action_id: adesk_core::ActionId(582),
-        }),
+        server(&input_ack_without_id()),
         json!({"type": "input_ack", "action_id": 582})
     );
     assert_eq!(
-        server(&ServerMessage::Error {
-            code: ErrorCode::UnknownWindow,
-            message: "no such window".to_owned(),
-            id: Some(3),
-        }),
+        server(&error_message()),
         json!({
             "type": "error",
             "code": "unknown_window",
@@ -441,9 +341,7 @@ fn server_control_input_ack_error_bye_golden() {
         })
     );
     assert_eq!(
-        server(&ServerMessage::Bye {
-            reason: "shutdown".to_owned(),
-        }),
+        server(&bye_server_message()),
         json!({"type": "bye", "reason": "shutdown"})
     );
 }
@@ -451,21 +349,12 @@ fn server_control_input_ack_error_bye_golden() {
 #[test]
 fn server_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "y": true});
-    assert_eq!(
-        server(&ServerMessage::Unknown {
-            message_type: "future_thing".to_owned(),
-            value: value.clone(),
-        }),
-        value
-    );
+    assert_eq!(server(&unknown_server_message()), value);
 }
 
 #[test]
 fn server_message_type_tags() {
-    let state = ServerMessage::State(DesktopState {
-        active_window_id: None,
-        windows: Vec::new(),
-    });
+    let state = state_empty();
     let frame = ServerMessage::Frame(ViewerFrame {
         seq: 1,
         ts_ms: 2,

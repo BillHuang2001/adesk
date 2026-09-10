@@ -212,7 +212,7 @@ impl ClientMessage {
                 Ok(ClientMessage::Text { text: fields.text })
             }
             "set_control" => {
-                let fields: SetControlFields = decode(value)?;
+                let fields: OwnerFields = decode(value)?;
                 Ok(ClientMessage::SetControl {
                     owner: fields.owner,
                 })
@@ -332,7 +332,7 @@ impl ServerMessage {
             "frame" => Ok(ServerMessage::Frame(decode(value)?)),
             "state" => Ok(ServerMessage::State(decode(value)?)),
             "control" => {
-                let fields: ControlFields = decode(value)?;
+                let fields: OwnerFields = decode(value)?;
                 Ok(ServerMessage::Control {
                     owner: fields.owner,
                 })
@@ -526,9 +526,10 @@ struct TextFields {
     text: String,
 }
 
-/// Deserializes the `set_control` field.
+/// Deserializes the `owner` field shared by `set_control` and `control` (the
+/// client and server `ControlOwner` payloads).
 #[derive(Deserialize)]
-struct SetControlFields {
+struct OwnerFields {
     owner: ControlOwner,
 }
 
@@ -537,12 +538,6 @@ struct SetControlFields {
 struct ByeFields {
     #[serde(default)]
     reason: Option<String>,
-}
-
-/// Deserializes the `control` field.
-#[derive(Deserialize)]
-struct ControlFields {
-    owner: ControlOwner,
 }
 
 /// Deserializes `input_ack` fields.

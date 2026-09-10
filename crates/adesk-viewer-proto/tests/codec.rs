@@ -2,154 +2,16 @@
 //! `"type"` handling, unknown-field tolerance and malformed input. No display,
 //! GPU, network or socket.
 
-use adesk_core::{
-    ActionId, AppId, Button, ButtonState, ErrorCode, WindowId, WindowInfo, WindowState,
-};
-use adesk_proto::{ImagePayload, KeySpec};
+mod common;
+
+use adesk_core::{ErrorCode, WindowId};
+use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
     check_version, decode_client, decode_server, encode_client, encode_server, ClientMessage,
-    ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ServerMessage, ViewerFrame,
-    ViewerHello, ViewerProtoError,
+    KeyAction, ServerMessage, ViewerHello, ViewerProtoError,
 };
+use common::{every_client_message, every_server_message};
 use serde_json::{json, Value};
-
-fn every_client_message() -> Vec<ClientMessage> {
-    vec![
-        ClientMessage::Hello(ViewerHello::new()),
-        ClientMessage::Hello(ViewerHello {
-            protocol_version: 1,
-            client: Some("adesk-viewer".to_owned()),
-            overlays: vec![adesk_core::OverlayKind::WindowIds],
-            min_interval_ms: 0,
-        }),
-        ClientMessage::RequestFrame { id: Some(7) },
-        ClientMessage::RequestFrame { id: None },
-        ClientMessage::RequestState { id: Some(8) },
-        ClientMessage::RequestState { id: None },
-        ClientMessage::PointerMove { x: 0.42, y: 0.51 },
-        ClientMessage::PointerButton {
-            button: Button::Left,
-            state: ButtonState::Pressed,
-            x: None,
-            y: None,
-        },
-        ClientMessage::PointerButton {
-            button: Button::Side,
-            state: ButtonState::Released,
-            x: Some(0.1),
-            y: Some(0.9),
-        },
-        ClientMessage::Scroll {
-            dx: 0.0,
-            dy: -3.0,
-            x: None,
-            y: None,
-        },
-        ClientMessage::Scroll {
-            dx: 1.5,
-            dy: 2.5,
-            x: Some(0.5),
-            y: Some(0.5),
-        },
-        ClientMessage::Key {
-            keys: KeySpec::Single("a".to_owned()),
-            action: KeyAction::Tap,
-        },
-        ClientMessage::Key {
-            keys: KeySpec::Chord(vec!["CTRL".to_owned(), "L".to_owned()]),
-            action: KeyAction::Released,
-        },
-        ClientMessage::Text {
-            text: "hello".to_owned(),
-        },
-        ClientMessage::SetControl {
-            owner: ControlOwner::Human,
-        },
-        ClientMessage::Bye {
-            reason: Some("done".to_owned()),
-        },
-        ClientMessage::Bye { reason: None },
-        ClientMessage::Unknown {
-            message_type: "future_thing".to_owned(),
-            value: json!({"type": "future_thing", "x": 1}),
-        },
-    ]
-}
-
-fn every_server_message() -> Vec<ServerMessage> {
-    let window = WindowInfo {
-        id: WindowId(17),
-        app_id: Some(AppId::from("org.mozilla.firefox")),
-        title: Some("GitHub".to_owned()),
-        geometry: adesk_core::Rect::new(0, 0, 1280, 800),
-        state: WindowState::Active,
-        mapped: true,
-        pid: Some(4242),
-        created_seq: 800,
-        last_commit_seq: 8291,
-        popup_count: 0,
-    };
-    vec![
-        ServerMessage::Hello(ServerHello {
-            protocol_version: 1,
-            runtime_version: "0.1.0".to_owned(),
-            output: adesk_core::Size::new(1280, 800),
-            renderer: adesk_proto::RendererKind::Pixman,
-            cursor: CursorState::hidden(),
-            control: ControlOwner::Ai,
-        }),
-        ServerMessage::Frame(ViewerFrame {
-            seq: 8291,
-            ts_ms: 51234,
-            image: ImagePayload::from_png(1, 1, b"x", 1.0),
-            cursor: CursorState::at(0.42, 0.51),
-            active_window_id: Some(WindowId(17)),
-        }),
-        ServerMessage::Frame(ViewerFrame {
-            seq: 1,
-            ts_ms: 2,
-            image: ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 0.5).unwrap(),
-            cursor: CursorState::hidden(),
-            active_window_id: None,
-        }),
-        ServerMessage::State(DesktopState {
-            active_window_id: Some(WindowId(17)),
-            windows: vec![window],
-        }),
-        ServerMessage::State(DesktopState {
-            active_window_id: None,
-            windows: Vec::new(),
-        }),
-        ServerMessage::Control {
-            owner: ControlOwner::Human,
-        },
-        ServerMessage::InputAck {
-            id: Some(3),
-            action_id: ActionId(582),
-        },
-        ServerMessage::InputAck {
-            id: None,
-            action_id: ActionId(582),
-        },
-        ServerMessage::Error {
-            code: ErrorCode::UnknownWindow,
-            message: "no such window".to_owned(),
-            id: Some(3),
-        },
-        ServerMessage::Error {
-            code: ErrorCode::RenderFailed,
-            message: "boom".to_owned(),
-            id: None,
-        },
-        ServerMessage::Bye {
-            reason: "shutdown".to_owned(),
-        },
-        ServerMessage::Unknown {
-            message_type: "future_thing".to_owned(),
-            value: json!({"type": "future_thing", "y": true}),
-        },
-    ]
-}
 
 // --- round-trips ----------------------------------------------------------
 
