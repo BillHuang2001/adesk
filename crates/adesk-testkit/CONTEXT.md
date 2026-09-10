@@ -5,6 +5,7 @@
 `adesk-testkit` makes the whole ADesk runtime testable without a display, GPU, network or installed application.
 It is the only supported way to run ADesk end-to-end tests: an in-process runtime on private temp paths, a real Wayland protocol client, `.desktop` fixtures, a helper process, and deadline-bounded image/event assertions.
 **Dev-dependency target only** — no runtime crate may depend on it, and the `adesk-test-app` binary is never shipped.
+Status: complete — `src/` and `tests/` contain no `todo!()`/`unimplemented!()` bodies, and no behavioural test is skipped (the only `ignore`d doc blocks are doc-code fences).
 
 ## API Surface
 
@@ -72,7 +73,8 @@ It is the only supported way to run ADesk end-to-end tests: an in-process runtim
 
 - Self-tests live in `tests/`: `runtime.rs` (start/stop, ping, renderer, drop), `wayland_client.rs` (toplevel appears in `list_windows` with the tiling configure, commit → `SurfaceCommit`, captured pixels match the fill, popups, resize), `input_capture.rs` (real-seat pointer/keyboard recording: motion surface coordinates match AGP injection, press/release ordering, axis + frame, `ctrl+c` chord press/reverse-release, focus enters), `clipboard.rs` (selection round trip between two clients, second `set_selection` supersedes the first offer, unadvertised mime → `Ok(None)`, bounded no-selection timeout, no payload leak into events; every publication is ordered by the `publish` barrier described in that file's module docs), `fixtures.rs` (`.desktop` writing, launch path, helper process), `assertions.rs` (ImageAssert/EventAssert/`wait_until` self-checks), `api_surface.rs` (signature stability), `e2e_launch_observe.rs` (capstone: launch → observe → capture → input → close round trip) and `e2e_close.rs` (cooperating-client proof that `close_window` really sends `xdg_toplevel.close`).
 - Unit tests inside `src/assert/`, `src/wayland/`, `src/fixtures/` and `src/bin/adesk-test-app.rs` cover the harness plumbing.
-- Run with `./scripts/dev.sh cargo test -p adesk-testkit --all-features`; the only gate is the GL paths (skip cleanly without `ADESK_TEST_GL=1`).
+- Run with `./scripts/dev.sh cargo test -p adesk-testkit`; the crate declares no Cargo `[features]`, so `--all-features` is a no-op. GL-dependent paths are gated by the `ADESK_TEST_GL=1` environment variable (`src/gate.rs`), which skips cleanly when unset.
+- No test is `#[ignore]`d; the doc-fence inventory is 3 `no_run` (`src/lib.rs`, `src/gate.rs`, `src/fixtures/mod.rs`) + 3 `ignore` + 5 `text`.
 - No test needs a display, GPU, network or installed app; the helper binary is built by cargo (`env!("CARGO_BIN_EXE_adesk-test-app")` is available to this package's integration tests).
 - Launch tests mutate the process env; the harness serializes env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 
@@ -84,6 +86,8 @@ It is the only supported way to run ADesk end-to-end tests: an in-process runtim
 ## Known Issues
 
 - `tests/fixtures.rs` prints `Io error: Broken pipe (os error 32)` on stdout while still passing — log noise from the helper-process path, not a failure.
+- Superseded SHM buffer ranges are never returned to the pool (`src/wayland/CONTEXT.md` Known Issues): the 16 MiB pool grows one frame per `commit_frame` and exhausts after ~3 fresh 1280x800 frames; latent today because in-tree tests commit at most two fresh frames per client.
+- `tests/e2e_launch_observe.rs:159-161` states window↔launch attribution is not implemented (`launch_id: None`), but `tests/fixtures.rs:142` asserts `launch_id == Some(launched.launch_id)` for the same flow — the comment is stale and the capstone omits a correlation assertion already proven elsewhere.
 
 ## Notes for Agents
 

@@ -3,7 +3,7 @@
 ## Intent
 
 Integration tests that prove `adesk-testkit` works: runtime lifecycle, the real Wayland protocol path, fixtures/launch, assertions, and public-API stability.
-Run them with `./scripts/dev.sh cargo test -p adesk-testkit --all-features`; none of them needs a display, GPU, network or installed application, and every wait is deadline-bounded.
+Run them with `./scripts/dev.sh cargo test -p adesk-testkit` (the crate declares no Cargo `[features]`, so `--all-features` is a no-op); none of them needs a display, GPU, network or installed application, and every wait is deadline-bounded.
 
 ## API Surface
 
@@ -32,3 +32,4 @@ Run them with `./scripts/dev.sh cargo test -p adesk-testkit --all-features`; non
 ## Known Issues
 
 - `crates/adesk-compositor/tests/clipboard.rs` keeps the publication/focus-change race this directory closes: its `publish` helper ends with `roundtrip()` and documents a `wl_display.sync` callback the client never sends. The barrier in this directory's `clipboard.rs` is the pattern that fixes it.
+- `e2e_launch_observe.rs` phase 5 cannot observe `xdg_toplevel.close`: the helper ignores close and self-exits after `HELPER_LIFETIME`, so its `WindowDestroyed` wait would pass even if the compositor never sent the event; the real close-event proof is `e2e_close.rs` (both files document this split).
