@@ -31,7 +31,7 @@
 //! | 2 runtime | `TestRuntime::start_with(..with_apply_env(true))`: the registry launches children with the process env |
 //! | 3 launch | `launch_app` → `AppLaunched`, `WindowCreatedFor`, `WindowActivated`, `get_window` |
 //! | 4 capture | `TestRuntime::capture` → `ImageAssert::matches_pattern` (the fixture's fill) |
-//! | 5 close | `close_window(launched)` → `WindowDestroyed(launched)` |
+//! | 5 close | `close_window(launched)` → the helper honours `xdg_toplevel.close` and exits → `WindowDestroyed(launched)`; the window then vanishes from `list_windows` and `get_window` errors |
 //! | 6 input | `click` → `ActionId`; a second frame from the test client → `SurfaceCommit` with non-empty damage after the action; `observe(quiet).after_action(action)` → quiet, `commits >= 1`, causal link |
 //!
 //! Phases 3–5 run before phase 6 on purpose: the single-visible-toplevel policy
@@ -41,26 +41,28 @@
 //! [`DEADLINE`]; there is no sleep and no `--test-threads` dependence (the
 //! harness serializes process-env mutation itself).
 //!
-//! # Why the fixture has a bounded lifetime
+//! # Why the close leg is a real close proof
 //!
-//! `adesk-test-app`'s CLI is frozen: it commits exactly one frame and then pumps
-//! events until its stdin says `exit` or `--exit-after` elapses, and it does not
-//! destroy its surface on `xdg_toplevel.close`. `close_window` is therefore a
-//! genuine *request* (as the AGP §5.3 contract says: the window's disappearance
-//! is observed, never assumed), and the fixture's [`HELPER_LIFETIME`] makes the
-//! client side of that request observable within the test: the helper exits,
-//! its connection closes and the compositor emits `window_destroyed`. The
-//! deadline is many times the cost of phases 3–4, so `close_window` always runs
-//! while the window still exists — if it did not, `close_window` would fail with
-//! `unknown_window` instead of letting the wait below pass vacuously.
+//! The fixture is launched with `--exit-on-close`, so the compositor's
+//! `xdg_toplevel.close` request is the helper's *only* graceful exit path within
+//! this test: the helper is registry-launched (the harness never drives its
+//! stdin, so no `exit` command can arrive) and it is given no `--exit-after`, so
+//! it keeps pumping until it is told to close. `close_window` therefore sends a
+//! genuine request — the AGP §5.3 contract says the window's disappearance is
+//! *observed*, never assumed — and the helper honours it by tearing its surface
+//! down; its connection then closes and the compositor emits `window_destroyed`.
+//! A compositor that never sent the event would leave the helper pumping until
+//! [`DEADLINE`] expired, so the wait below cannot pass vacuously, and the window
+//! is confirmed gone from the runtime's model afterwards.
 //!
 //! # Why the test client commits the second frame
 //!
-//! The same frozen CLI is why the commit that must be correlated with the
-//! injected click comes from a client the test drives — [`WaylandTestClient`] —
-//! which is also how an ordinary application would react to input. The
-//! *launched* application supplies phases 3–5 (its own process, its own
-//! `.desktop`, its own pixels, its own exit).
+//! The fixture's CLI is frozen: it commits exactly one frame and then only reacts
+//! to close, to a stdin `exit`, or to `--exit-after`. The commit that must be
+//! correlated with the injected click is therefore driven by a client the test
+//! controls — [`WaylandTestClient`] — which is also how an ordinary application
+//! would react to input. The *launched* application supplies phases 3–5 (its own
+//! process, its own `.desktop`, its own pixels, its own exit).
 
 use std::time::Duration;
 
@@ -76,16 +78,6 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// Quiet window the temporal observation waits for, in milliseconds.
 const QUIET_MS: u64 = 250;
-
-/// Self-exit deadline given to the fixture helper (see the module docs).
-///
-/// The helper's frozen CLI has no "exit when the compositor asks me to close"
-/// mode: it commits one frame and then pumps events until its stdin says `exit`
-/// or this deadline elapses, ignoring `xdg_toplevel.close`. The deadline is
-/// therefore the mechanism that makes the launched window disappear after the
-/// AGP close request, and it must comfortably outlast phases 3–4 (launch,
-/// inspect, capture) while staying far below [`DEADLINE`].
-const HELPER_LIFETIME: Duration = Duration::from_secs(3);
 
 /// App id (and `StartupWMClass`) of the fixture launched over AGP.
 const LAUNCHED_APP_ID: &str = "org.example.e2e";
@@ -105,7 +97,9 @@ async fn launch_observe_input_close_round_trip() -> Result<()> {
         .with_title("Capstone")
         .with_size(Size::new(320, 200))
         .with_fill(launched_fill)
-        .with_exit_after(HELPER_LIFETIME);
+        // The helper honours `xdg_toplevel.close`; with no `--exit-after` that is its only
+        // graceful exit path, so the close phase below is a real proof (see the module docs).
+        .with_arg("--exit-on-close");
     let app_id = fixtures.write_app(&spec)?;
     assert_eq!(app_id, AppId::from(LAUNCHED_APP_ID));
     assert_eq!(app_id, *spec.app_id());
@@ -197,22 +191,30 @@ async fn launch_observe_input_close_round_trip() -> Result<()> {
     ImageAssert::new(&image).matches_pattern(launched_fill);
 
     // ---------------------------------------------------------------- phase 5
-    // Close: runtime-native (`xdg_toplevel.close`), never synthesized input.
-    // The window's disappearance is *observed* via `window_destroyed`, never
-    // assumed — and the request is load-bearing: it only succeeds while the
-    // window still exists, so a window that vanished early would fail here
-    // instead of silently satisfying the wait below.
+    // Close: runtime-native (`xdg_toplevel.close`), never synthesized input. The
+    // helper was launched with `--exit-on-close` and no `--exit-after`, so this
+    // request is its only graceful exit path: honouring it destroys the surface,
+    // closes the connection and makes the compositor emit `window_destroyed`. The
+    // window's disappearance is *observed*, never assumed — and the request is
+    // load-bearing, since it only succeeds while the window still exists.
     let close_action = client.close_window(launched_id).await?;
     assert!(close_action.0 > 0, "close_window returns an action id");
     let destroyed = events
         .wait_for_expected(&Expected::WindowDestroyed(launched_id), DEADLINE)
         .await?;
     assert_eq!(destroyed.window_id(), Some(launched_id));
+
+    // The window is gone from the runtime's model, and asking for it is a reported
+    // error, never a panic.
     let listed = client.list_windows().await?;
     assert!(
         listed.windows.is_empty(),
         "the closed window was the only one and is gone, got {:?}",
         listed.windows
+    );
+    assert!(
+        client.get_window(launched_id).await.is_err(),
+        "get_window on the closed window returns an error"
     );
 
     // ---------------------------------------------------------------- phase 6
