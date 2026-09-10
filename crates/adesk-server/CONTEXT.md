@@ -13,7 +13,7 @@ Every module is implemented (`src/` has no `todo!()`); `cargo test -p adesk-serv
 
 Everything below is re-exported at the crate root; `adesk-testkit` is designed against exactly this surface.
 
-- `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>> }` (`src/config.rs`)
+- `ServerConfig { socket_path: PathBuf, compositor: CompositorConfig, app_dirs: Option<Vec<PathBuf>>, viewer: ViewerConfig }` (`src/config.rs`)
   - `new(socket_path, compositor)` (the constructor `adesk-testkit`'s harness calls) and `Default` (environment-resolved socket path, compositor defaults); builders `with_socket_path`, `with_compositor`, `with_output_size`, `with_renderer`, `with_xkb`, `with_app_dirs`; `socket_path()`.
   - `viewer: ViewerConfig { enabled: bool (default true), socket_path: Option<PathBuf> (None = derive), tcp: Option<SocketAddr> (None = off) }` — the viewer (VAP v1) endpoint configuration; builders `with_viewer`, `with_viewer_socket`, `with_viewer_tcp`, `without_viewer`.
   - `viewer_socket_path(&self) -> Option<PathBuf>`: `None` when the endpoint is disabled, else the explicit override, else `viewer_socket_sibling(&self.socket_path)` — a free fn deriving the sibling of the AGP socket (stem gains `-viewer`, directory and extension kept: `…/adesk.sock` → `…/adesk-viewer.sock`). `default_viewer_socket_path()` is the sibling of `default_socket_path()`. `config.rs` never reads `$ADESK_VIEWER_SOCKET`; clap owns it, so the precedence is `--viewer-socket` > `$ADESK_VIEWER_SOCKET` > derived sibling.
