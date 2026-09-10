@@ -6,14 +6,10 @@
 
 use adesk_core::Rect;
 use smithay::backend::renderer::element::RenderElement;
-use smithay::backend::renderer::{
-    Bind, Color32F, ExportMem, Frame, ImportAll, Renderer,
-};
+use smithay::backend::renderer::{Bind, Color32F, ExportMem, Frame, ImportAll, Renderer};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{
-    Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform,
-};
+use smithay::utils::{Buffer as BufferCoords, Physical, Point, Rectangle, Scale, Size, Transform};
 use smithay::wayland::compositor::SurfaceData;
 
 use crate::config::{RenderConfig, READBACK_FORMAT};
@@ -82,12 +78,13 @@ where
     let target_rect = Rectangle::<i32, Physical>::from_size(target_physical);
     let scale = Scale::from(1.0);
 
-    let mut framebuffer = renderer
-        .bind(target.texture_mut())
-        .map_err(|err| RenderError::TargetBind {
-            size: target_size,
-            source: Box::new(err),
-        })?;
+    let mut framebuffer =
+        renderer
+            .bind(target.texture_mut())
+            .map_err(|err| RenderError::TargetBind {
+                size: target_size,
+                source: Box::new(err),
+            })?;
 
     let mut frame = renderer
         .render(&mut framebuffer, target_physical, Transform::Normal)
@@ -132,9 +129,11 @@ where
     let sync = frame.finish().map_err(|err| RenderError::RenderFailed {
         source: Box::new(err),
     })?;
-    renderer.wait(&sync).map_err(|err| RenderError::RenderFailed {
-        source: Box::new(err),
-    })?;
+    renderer
+        .wait(&sync)
+        .map_err(|err| RenderError::RenderFailed {
+            source: Box::new(err),
+        })?;
 
     let readback_region = Rect::from_size(target_size);
     let mapping = renderer
@@ -172,8 +171,14 @@ where
 
     let image = match config.crop {
         Some(crop_rect) => {
-            let origin = to_target(Point::<i32, Physical>::from((crop_rect.x, crop_rect.y)), config.source);
-            crop(&image, Rect::new(origin.x, origin.y, crop_rect.w, crop_rect.h))
+            let origin = to_target(
+                Point::<i32, Physical>::from((crop_rect.x, crop_rect.y)),
+                config.source,
+            );
+            crop(
+                &image,
+                Rect::new(origin.x, origin.y, crop_rect.w, crop_rect.h),
+            )
         }
         None => image,
     };

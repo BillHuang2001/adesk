@@ -215,10 +215,12 @@ fn canonical_fixture() -> Fixture {
 }
 
 fn pixel(frame: &RenderedFrame, x: u32, y: u32) -> [u8; 4] {
-    frame
-        .image
-        .pixel(x, y)
-        .unwrap_or_else(|| panic!("pixel ({x}, {y}) outside {}x{}", frame.image.width, frame.image.height))
+    frame.image.pixel(x, y).unwrap_or_else(|| {
+        panic!(
+            "pixel ({x}, {y}) outside {}x{}",
+            frame.image.width, frame.image.height
+        )
+    })
 }
 
 /// Asserts the canonical fixture rendered exactly, for any renderer.
@@ -253,9 +255,18 @@ fn assert_canonical(fixture: &Fixture, frame: &RenderedFrame) {
     // Recorded draw arguments pin the coordinate math.
     let red_calls = fixture.calls[0].borrow();
     assert_eq!(red_calls.len(), 1);
-    assert_eq!(red_calls[0].dst, Rectangle::new(Point::from((0, 0)), Size::from((8, 8))));
-    assert_eq!(red_calls[0].src, Rectangle::new(Point::from((0.0, 0.0)), Size::from((8.0, 8.0))));
-    assert_eq!(red_calls[0].damage, vec![Rectangle::new(Point::from((0, 0)), Size::from((8, 8)))]);
+    assert_eq!(
+        red_calls[0].dst,
+        Rectangle::new(Point::from((0, 0)), Size::from((8, 8)))
+    );
+    assert_eq!(
+        red_calls[0].src,
+        Rectangle::new(Point::from((0.0, 0.0)), Size::from((8.0, 8.0)))
+    );
+    assert_eq!(
+        red_calls[0].damage,
+        vec![Rectangle::new(Point::from((0, 0)), Size::from((8, 8)))]
+    );
     assert!(red_calls[0].opaque.is_empty());
     drop(red_calls);
 
@@ -339,20 +350,15 @@ fn pixman_renders_canonical_scene() {
     let mut target = create_target::<_, PixmanTarget>(&mut renderer, fixture.config.target_size())
         .expect("offscreen target");
 
-    let frame = render_scene(&mut renderer, &mut target, &fixture.scene, &fixture.config)
-        .expect("render");
+    let frame =
+        render_scene(&mut renderer, &mut target, &fixture.scene, &fixture.config).expect("render");
 
     assert_canonical(&fixture, &frame);
 }
 
 #[test]
 fn pixman_clips_partially_visible_node_and_damage_is_element_local() {
-    let (node, calls) = element(
-        Point::from((0, 0)),
-        Size::from((8, 8)),
-        RED,
-        Vec::new(),
-    );
+    let (node, calls) = element(Point::from((0, 0)), Size::from((8, 8)), RED, Vec::new());
     let mut scene = Scene::new(1);
     // Node hangs off the top-left corner: only its bottom-right 4x4 is visible.
     scene.push(SceneNode::with_damage(
@@ -371,7 +377,10 @@ fn pixman_clips_partially_visible_node_and_damage_is_element_local() {
 
     let calls = calls.borrow();
     assert_eq!(calls.len(), 1);
-    assert_eq!(calls[0].dst, Rectangle::new(Point::from((-4, -4)), Size::from((8, 8))));
+    assert_eq!(
+        calls[0].dst,
+        Rectangle::new(Point::from((-4, -4)), Size::from((8, 8)))
+    );
     // Full visible rectangle in element-local coordinates.
     assert_eq!(
         calls[0].damage,
@@ -397,7 +406,10 @@ fn pixman_skips_nodes_outside_the_source() {
         .expect("offscreen target");
     let frame = render_scene(&mut renderer, &mut target, &scene, &config).expect("render");
 
-    assert!(calls.borrow().is_empty(), "off-target node must not be drawn");
+    assert!(
+        calls.borrow().is_empty(),
+        "off-target node must not be drawn"
+    );
     for y in 0..4 {
         for x in 0..4 {
             assert_eq!(pixel(&frame, x, y), CLEAR);
@@ -574,16 +586,14 @@ fn gl_renders_canonical_scene() {
 
     let (reference_fixture, reference) = pixman_reference();
     let fixture = canonical_fixture();
-    let mut target = match create_target::<_, GlesRenderbuffer>(
-        &mut renderer,
-        fixture.config.target_size(),
-    ) {
-        Ok(target) => target,
-        Err(err) => {
-            eprintln!("skipping GL test: GL renderbuffer target unavailable: {err}");
-            return;
-        }
-    };
+    let mut target =
+        match create_target::<_, GlesRenderbuffer>(&mut renderer, fixture.config.target_size()) {
+            Ok(target) => target,
+            Err(err) => {
+                eprintln!("skipping GL test: GL renderbuffer target unavailable: {err}");
+                return;
+            }
+        };
     assert_eq!(target.core_size(), CoreSize::new(8, 8));
     assert_eq!(target.format(), TARGET_FORMAT);
 
@@ -627,12 +637,20 @@ fn gl_renders_canonical_scene() {
     // never leaks the clear color.
     assert_eq!(pixel(&frame, 0, 0), RED8);
     assert_eq!(pixel(&frame, 2, 2), GREEN8);
-    assert_eq!(pixel(&frame, 2, 5), GREEN8, "green still covers scene rows 2..5");
+    assert_eq!(
+        pixel(&frame, 2, 5),
+        GREEN8,
+        "green still covers scene rows 2..5"
+    );
     assert_eq!(pixel(&frame, 4, 4), BLUE8, "blue at target (4, 4)");
     assert_eq!(pixel(&frame, 2, 6), RED8, "red past the green node");
     for y in 0..8 {
         for x in 0..8 {
-            assert_ne!(pixel(&frame, x, y), CLEAR, "clear color leaked at ({x},{y})");
+            assert_ne!(
+                pixel(&frame, x, y),
+                CLEAR,
+                "clear color leaked at ({x},{y})"
+            );
         }
     }
 

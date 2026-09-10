@@ -185,19 +185,16 @@ fn popup_commit(owner: WindowId) -> Expected {
 /// Both ids are constrained, so the disappearance of a *different* popup (or the same popup of
 /// another window) can never satisfy the wait.
 fn popup_disappeared(owner: WindowId, popup_id: u64) -> Expected {
-    Expected::custom(
-        "popup_disappeared of the tracked popup id",
-        move |event| {
-            matches!(
-                event,
-                RuntimeEvent::PopupDisappeared {
-                    window_id,
-                    popup_id: disappeared,
-                    ..
-                } if *window_id == owner && *disappeared == popup_id
-            )
-        },
-    )
+    Expected::custom("popup_disappeared of the tracked popup id", move |event| {
+        matches!(
+            event,
+            RuntimeEvent::PopupDisappeared {
+                window_id,
+                popup_id: disappeared,
+                ..
+            } if *window_id == owner && *disappeared == popup_id
+        )
+    })
 }
 
 /// Matches any further lifecycle event naming the destroyed `owner`: another popup of that

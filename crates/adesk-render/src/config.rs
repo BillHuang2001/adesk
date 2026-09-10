@@ -89,7 +89,9 @@ impl RenderConfig {
 
     /// Size of the image the pipeline returns, after crop and downscale.
     pub fn output_size(&self) -> Size {
-        let base = self.crop.map_or_else(|| self.target_size(), |crop| crop.size());
+        let base = self
+            .crop
+            .map_or_else(|| self.target_size(), |crop| crop.size());
         match self.max_dimension {
             Some(max_dimension) => fit_dimensions(base, max_dimension),
             None => base,
@@ -196,7 +198,9 @@ mod tests {
         let config = RenderConfig::new(source());
         assert_eq!(config.target_size(), Size::new(64, 48));
         // Crop and downscale only affect the output, never the target.
-        let config = config.with_crop(Rect::new(10, 20, 8, 8)).with_max_dimension(2);
+        let config = config
+            .with_crop(Rect::new(10, 20, 8, 8))
+            .with_max_dimension(2);
         assert_eq!(config.target_size(), Size::new(64, 48));
     }
 

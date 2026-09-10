@@ -170,7 +170,10 @@ impl ResponseOutcome {
 
 impl Serialize for ResponseFrame {
     /// Emits `{"id": n, "result": ...}` or `{"id": n, "error": ...}`.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
         let mut map = serializer.serialize_map(Some(2))?;
@@ -277,7 +280,10 @@ impl EventFrame {
 
 impl Serialize for EventFrame {
     /// Emits `{"event": ..., "seq": ..., "ts_ms": ..., "data": {...}}`.
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         use serde::ser::{Error as _, SerializeMap};
 
         let data = self.data.to_data().map_err(S::Error::custom)?;
@@ -358,7 +364,10 @@ impl From<EventFrame> for Frame {
 
 impl Serialize for Frame {
     /// Delegates to the variant's wire shape (§1).
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         match self {
             Frame::Request(frame) => frame.serialize(serializer),
             Frame::Response(frame) => frame.serialize(serializer),

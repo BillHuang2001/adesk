@@ -88,15 +88,13 @@ const FILL_A_RGBA: [u8; 4] = [200, 42, 42, 255];
 
 /// A's fill pattern: the same colour as [`FILL_A_RGBA`], built through [`FillPattern::solid_rgb`]
 /// so the SHM buffer the client writes and the pixel the assertion expects cannot drift apart.
-const FILL_A: FillPattern =
-    FillPattern::solid_rgb(FILL_A_RGBA[0], FILL_A_RGBA[1], FILL_A_RGBA[2]);
+const FILL_A: FillPattern = FillPattern::solid_rgb(FILL_A_RGBA[0], FILL_A_RGBA[1], FILL_A_RGBA[2]);
 
 /// B's fill: a strongly saturated blue, fully opaque (see [`FILL_A_RGBA`]).
 const FILL_B_RGBA: [u8; 4] = [40, 80, 200, 255];
 
 /// B's fill pattern (see [`FILL_A`]).
-const FILL_B: FillPattern =
-    FillPattern::solid_rgb(FILL_B_RGBA[0], FILL_B_RGBA[1], FILL_B_RGBA[2]);
+const FILL_B: FillPattern = FillPattern::solid_rgb(FILL_B_RGBA[0], FILL_B_RGBA[1], FILL_B_RGBA[2]);
 
 /// A runtime whose Wayland socket a client can connect to.
 ///
@@ -282,7 +280,10 @@ async fn activate_and_sync(
             tail[0]
         );
     };
-    assert_eq!(*activated, window_id, "the activation names the requested window");
+    assert_eq!(
+        *activated, window_id,
+        "the activation names the requested window"
+    );
     assert_eq!(
         *previous, expected_previous,
         "the activation names the window that held the visible slot"

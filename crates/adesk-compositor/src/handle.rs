@@ -176,9 +176,7 @@ impl CompositorHandle {
     pub async fn shutdown(&self) -> Result<()> {
         let (reply, acknowledged) = oneshot::channel();
         self.send(RuntimeCommand::Shutdown { reply })?;
-        acknowledged
-            .await
-            .map_err(|_| CompositorError::Stopped)
+        acknowledged.await.map_err(|_| CompositorError::Stopped)
     }
 
     /// Take the compositor thread's join handle, if it has not been taken before.

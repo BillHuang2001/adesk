@@ -290,10 +290,7 @@ fn a_late_app_id_is_written_back_into_the_window_model() {
         "the changed app id is written back into the window model"
     );
     assert_eq!(
-        bridge
-            .manager
-            .window_info(id)
-            .and_then(|info| info.app_id),
+        bridge.manager.window_info(id).and_then(|info| info.app_id),
         Some(late.clone()),
         "QueryState/list_windows report the late value"
     );
@@ -308,5 +305,8 @@ fn a_late_app_id_is_written_back_into_the_window_model() {
             .and_then(|record| record.app_id.clone()),
         None
     );
-    assert_eq!(bridge.manager.window_info(id).and_then(|info| info.app_id), None);
+    assert_eq!(
+        bridge.manager.window_info(id).and_then(|info| info.app_id),
+        None
+    );
 }

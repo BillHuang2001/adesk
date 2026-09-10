@@ -17,7 +17,7 @@
 //! [`adesk_core::Error::invalid_request`], never as an internal error.
 
 use adesk_core::{Error, KeyState};
-use smithay::input::keyboard::xkb::{self, KEYSYM_CASE_INSENSITIVE, Keysym as XkbKeysym};
+use smithay::input::keyboard::xkb::{self, Keysym as XkbKeysym, KEYSYM_CASE_INSENSITIVE};
 
 /// The alias table of `docs/protocol.md` §3: protocol name → xkb keysym name.
 ///
@@ -268,7 +268,10 @@ mod tests {
 
     #[test]
     fn aliases_are_case_insensitive() {
-        assert_eq!(Keysym::parse("ctrl").unwrap(), Keysym::parse("CTRL").unwrap());
+        assert_eq!(
+            Keysym::parse("ctrl").unwrap(),
+            Keysym::parse("CTRL").unwrap()
+        );
         assert_eq!(Keysym::parse("Esc").unwrap(), Keysym::parse("ESC").unwrap());
         assert_eq!(Keysym::parse("Esc").unwrap().name(), "Escape");
         assert_eq!(Keysym::parse("pageup").unwrap().name(), "Prior");
@@ -299,7 +302,11 @@ mod tests {
             ("LEFT", "Left"),
             ("RIGHT", "Right"),
         ] {
-            assert_eq!(Keysym::parse(input).expect(input).name(), expected, "{input}");
+            assert_eq!(
+                Keysym::parse(input).expect(input).name(),
+                expected,
+                "{input}"
+            );
         }
     }
 
@@ -332,8 +339,9 @@ mod tests {
         assert_eq!(names, ["Control_L", "l"]);
         assert_eq!(chord.display_name(), "CTRL+L");
 
-        let ordered = KeyCode::parse_chord(vec!["SHIFT".to_owned(), "CTRL".to_owned(), "L".to_owned()])
-            .unwrap();
+        let ordered =
+            KeyCode::parse_chord(vec!["SHIFT".to_owned(), "CTRL".to_owned(), "L".to_owned()])
+                .unwrap();
         let names: Vec<&str> = ordered.keysyms().iter().map(Keysym::name).collect();
         assert_eq!(names, ["Shift_L", "Control_L", "l"]);
         assert_eq!(ordered.display_name(), "SHIFT+CTRL+L");

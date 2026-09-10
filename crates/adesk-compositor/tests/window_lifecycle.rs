@@ -170,9 +170,8 @@ async fn map_toplevel(
     title: &str,
     fill: FillPattern,
 ) -> Result<(TestWindow, WindowId)> {
-    let window = client.create_toplevel(
-        ToplevelSpec::new(app_id, title, Size::new(320, 200)).with_fill(fill),
-    )?;
+    let window = client
+        .create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)).with_fill(fill))?;
     let configure = window.wait_for_configure(DEADLINE)?;
     assert_eq!(
         configure.size(),

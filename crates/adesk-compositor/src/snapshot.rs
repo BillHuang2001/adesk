@@ -77,14 +77,19 @@ impl StateSnapshot {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use adesk_core::{WindowState};
+    use adesk_core::WindowState;
 
     fn window(id: u64) -> WindowInfo {
         WindowInfo {
             id: WindowId(id),
             app_id: None,
             title: None,
-            geometry: Rect { x: 0, y: 0, w: 1280, h: 800 },
+            geometry: Rect {
+                x: 0,
+                y: 0,
+                w: 1280,
+                h: 800,
+            },
             state: WindowState::Active,
             mapped: true,
             pid: None,
@@ -105,14 +110,26 @@ mod tests {
         };
         assert_eq!(snapshot.len(), 2);
         assert!(!snapshot.is_empty());
-        assert_eq!(snapshot.window(WindowId(2)).map(|w| w.id), Some(WindowId(2)));
+        assert_eq!(
+            snapshot.window(WindowId(2)).map(|w| w.id),
+            Some(WindowId(2))
+        );
         assert!(snapshot.window(WindowId(9)).is_none());
     }
 
     #[test]
     fn rendered_frame_reports_image_size() {
         let image = ImageBuffer::new_rgba(4, 2);
-        let frame = RenderedFrame::new(image, 7, vec![Rect { x: 0, y: 0, w: 4, h: 2 }]);
+        let frame = RenderedFrame::new(
+            image,
+            7,
+            vec![Rect {
+                x: 0,
+                y: 0,
+                w: 4,
+                h: 2,
+            }],
+        );
         assert_eq!(frame.size(), Size { w: 4, h: 2 });
         assert_eq!(frame.commit_seq, 7);
         assert_eq!(frame.damage.len(), 1);

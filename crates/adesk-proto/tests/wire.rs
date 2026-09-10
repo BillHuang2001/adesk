@@ -131,7 +131,10 @@ fn event_kind_wire_names() {
     assert_eq!(expected.len(), EventKind::SUBSCRIBABLE.len() + 1);
     for (kind, name) in expected {
         assert_eq!(wire(&kind), json!(name));
-        assert_eq!(serde_json::from_value::<EventKind>(json!(name)).unwrap(), kind);
+        assert_eq!(
+            serde_json::from_value::<EventKind>(json!(name)).unwrap(),
+            kind
+        );
     }
     assert_eq!(EventKind::SUBSCRIBABLE.len(), 11);
     assert!(EventKind::SUBSCRIBABLE
@@ -640,7 +643,10 @@ fn launch_app_args_default_to_empty() {
     let params: LaunchAppParams =
         serde_json::from_value(json!({"app_id": "org.mozilla.firefox"})).expect("defaults");
     assert!(params.args.is_empty());
-    assert_eq!(wire(&params), json!({"app_id": "org.mozilla.firefox", "args": []}));
+    assert_eq!(
+        wire(&params),
+        json!({"app_id": "org.mozilla.firefox", "args": []})
+    );
 }
 
 #[test]

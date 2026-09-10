@@ -126,7 +126,9 @@ mod tests {
     fn shifted_characters_resolve_at_level_one() {
         let table = us_table();
         let plus = Keysym::parse("+").unwrap();
-        let resolved = table.resolve(plus.value()).expect("`+` is in the us keymap");
+        let resolved = table
+            .resolve(plus.value())
+            .expect("`+` is in the us keymap");
         assert_eq!(resolved.level, 1);
     }
 

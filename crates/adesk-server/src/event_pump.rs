@@ -278,13 +278,10 @@ mod tests {
     #[test]
     fn window_created_without_launch_id_is_stamped_by_the_correlator() {
         let correlator = correlator();
-        correlator
-            .lock()
-            .unwrap()
-            .record_launch(
-                launch(1, "org.example.launched", Some(4242)),
-                &app("org.example.launched", "Launched Fixture", None),
-            );
+        correlator.lock().unwrap().record_launch(
+            launch(1, "org.example.launched", Some(4242)),
+            &app("org.example.launched", "Launched Fixture", None),
+        );
 
         let event = window_created(None);
         let rewritten = correlate_window(&correlator, &event);
@@ -333,13 +330,10 @@ mod tests {
     #[test]
     fn window_created_with_a_launch_id_is_never_re_correlated() {
         let correlator = correlator();
-        correlator
-            .lock()
-            .unwrap()
-            .record_launch(
-                launch(9, "org.example.launched", Some(4242)),
-                &app("org.example.launched", "Launched Fixture", None),
-            );
+        correlator.lock().unwrap().record_launch(
+            launch(9, "org.example.launched", Some(4242)),
+            &app("org.example.launched", "Launched Fixture", None),
+        );
         let event = window_created(Some(LaunchId(1)));
 
         let rewritten = correlate_window(&correlator, &event);
@@ -354,13 +348,10 @@ mod tests {
     #[test]
     fn events_other_than_window_created_are_never_correlated() {
         let correlator = correlator();
-        correlator
-            .lock()
-            .unwrap()
-            .record_launch(
-                launch(1, "org.example.launched", Some(4242)),
-                &app("org.example.launched", "Launched Fixture", None),
-            );
+        correlator.lock().unwrap().record_launch(
+            launch(1, "org.example.launched", Some(4242)),
+            &app("org.example.launched", "Launched Fixture", None),
+        );
 
         let events = [
             RuntimeEvent::WindowDestroyed {
@@ -396,13 +387,10 @@ mod tests {
     #[test]
     fn a_poisoned_correlator_lock_still_correlates() {
         let correlator = correlator();
-        correlator
-            .lock()
-            .unwrap()
-            .record_launch(
-                launch(1, "org.example.launched", Some(4242)),
-                &app("org.example.launched", "Launched Fixture", None),
-            );
+        correlator.lock().unwrap().record_launch(
+            launch(1, "org.example.launched", Some(4242)),
+            &app("org.example.launched", "Launched Fixture", None),
+        );
 
         // Poison the lock the way a panicking request handler would.
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

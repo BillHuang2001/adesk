@@ -33,9 +33,7 @@ use serde_json::{json, Value};
 
 mod common;
 
-use common::{
-    eventually, expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT,
-};
+use common::{eventually, expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT};
 
 /// How long a test waits for a server-side registry effect to settle.
 ///

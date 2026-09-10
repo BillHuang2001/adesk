@@ -321,9 +321,11 @@ fn overlay_markers(
                     color: with_alpha(color, OVERLAY_DAMAGE_ALPHA),
                 });
             }
-            markers.extend(border_rects(geometry, OVERLAY_BORDER).into_iter().map(
-                |rect| OverlayMarker { rect, color },
-            ));
+            markers.extend(
+                border_rects(geometry, OVERLAY_BORDER)
+                    .into_iter()
+                    .map(|rect| OverlayMarker { rect, color }),
+            );
         }
     }
     markers
@@ -498,10 +500,8 @@ mod tests {
 
     #[test]
     fn overlapping_scene_damage_coalesces_into_its_bounding_box() {
-        let scene = scene_from_elements(
-            vec![Stub::new(0, 0, 100, 50), Stub::new(10, 10, 20, 20)],
-            0,
-        );
+        let scene =
+            scene_from_elements(vec![Stub::new(0, 0, 100, 50), Stub::new(10, 10, 20, 20)], 0);
         assert_eq!(
             scene.damage().simplified(),
             vec![Rect::new(0, 0, 100, 50)],
@@ -620,12 +620,18 @@ mod tests {
 
     #[test]
     fn focus_overlay_only_marks_the_active_window() {
-        let windows = [(Rect::new(0, 0, 20, 20), false), (Rect::new(20, 0, 20, 20), true)];
+        let windows = [
+            (Rect::new(0, 0, 20, 20), false),
+            (Rect::new(20, 0, 20, 20), true),
+        ];
         let markers = overlay_markers(windows, &[OverlayKind::Focus]);
         assert_eq!(markers.len(), 4);
-        assert!(markers
-            .iter()
-            .all(|marker| marker.rect.x >= 20 && marker.color == overlay_color(OverlayKind::Focus)));
+        assert!(
+            markers
+                .iter()
+                .all(|marker| marker.rect.x >= 20
+                    && marker.color == overlay_color(OverlayKind::Focus))
+        );
     }
 
     #[test]
@@ -708,8 +714,7 @@ mod tests {
 
         // Smithay rejects negative sizes at construction, so `to_core_rect`'s
         // clamp is defensive only; a zero-size rect is the smallest real input.
-        let smithay =
-            Rectangle::<i32, Physical>::new(Point::from((1, 2)), Size::from((0, 0)));
+        let smithay = Rectangle::<i32, Physical>::new(Point::from((1, 2)), Size::from((0, 0)));
         assert_eq!(to_core_rect(smithay), Rect::new(1, 2, 0, 0));
     }
 

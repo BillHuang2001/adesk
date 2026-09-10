@@ -104,7 +104,10 @@ mod tests {
 
     #[test]
     fn render_failure_maps_to_render_failed() {
-        assert_eq!(CompositorError::Render("boom".into()).code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            CompositorError::Render("boom".into()).code(),
+            ErrorCode::RenderFailed
+        );
     }
 
     #[test]

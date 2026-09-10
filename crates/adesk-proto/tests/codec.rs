@@ -6,8 +6,8 @@
 //! same change.
 
 use adesk_core::{
-    ActionId, AppId, Button, ErrorCode, LaunchId, Observation, Position, Rect, Region, RuntimeEvent,
-    WindowId,
+    ActionId, AppId, Button, ErrorCode, LaunchId, Observation, Position, Rect, Region,
+    RuntimeEvent, WindowId,
 };
 use adesk_proto::*;
 use serde_json::json;
@@ -91,10 +91,7 @@ fn encode_click_request_matches_protocol_example() {
 
 #[test]
 fn round_trip_all_frame_kinds() {
-    let request = Frame::Request(RequestFrame::new(
-        1,
-        Method::GetFocus(GetFocusParams {}),
-    ));
+    let request = Frame::Request(RequestFrame::new(1, Method::GetFocus(GetFocusParams {})));
     let response_ok = Frame::Response(
         ResponseFrame::result(
             2,

@@ -221,7 +221,10 @@ mod tests {
     fn monitor_size_is_millimeters_at_96_dpi() {
         // 1280x800 px at 96 DPI -> 339x212 mm (wl_output geometry, not pixels).
         let config = CompositorConfig::default();
-        assert_eq!(config.monitor_size_mm(), smithay::utils::Size::from((339, 212)));
+        assert_eq!(
+            config.monitor_size_mm(),
+            smithay::utils::Size::from((339, 212))
+        );
         // Degenerate sizes still report at least 1mm per axis.
         let tiny = CompositorConfig::new().with_output_size(Size { w: 0, h: 1 });
         assert_eq!(tiny.monitor_size_mm(), smithay::utils::Size::from((1, 1)));
@@ -238,6 +241,9 @@ mod tests {
         assert_eq!(config.renderer, RendererKind::Pixman);
         assert_eq!(config.socket_name.as_deref(), Some("wayland-9"));
         assert_eq!(config.event_channel_capacity, 8192);
-        assert_eq!(config.physical_size(), smithay::utils::Size::from((800, 600)));
+        assert_eq!(
+            config.physical_size(),
+            smithay::utils::Size::from((800, 600))
+        );
     }
 }

@@ -17,7 +17,12 @@ fn make(width: u32, height: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> ImageBuffer
 }
 
 /// Builds an image with a padded stride (more bytes per row than `width * 4`).
-fn make_padded(width: u32, height: u32, stride: u32, f: impl Fn(u32, u32) -> [u8; 4]) -> ImageBuffer {
+fn make_padded(
+    width: u32,
+    height: u32,
+    stride: u32,
+    f: impl Fn(u32, u32) -> [u8; 4],
+) -> ImageBuffer {
     let mut data = vec![0xEEu8; (stride * height) as usize];
     for y in 0..height {
         for x in 0..width {
@@ -179,7 +184,10 @@ fn encode_png_repacks_padded_stride() {
 #[test]
 fn encode_png_rejects_empty_images() {
     let err = encode_png(&ImageBuffer::new_rgba(0, 0)).unwrap_err();
-    assert!(matches!(err, adesk_render::RenderError::InvalidImage { .. }));
+    assert!(matches!(
+        err,
+        adesk_render::RenderError::InvalidImage { .. }
+    ));
 }
 
 #[test]

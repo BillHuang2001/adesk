@@ -270,7 +270,12 @@ fn result_payload_new_and_decode() {
 
 #[test]
 fn event_frame_matches_protocol_example() {
-    let frame = EventFrame::new(EventKind::SurfaceCommit, 8291, 51234, surface_commit_payload());
+    let frame = EventFrame::new(
+        EventKind::SurfaceCommit,
+        8291,
+        51234,
+        surface_commit_payload(),
+    );
     let line = encode_frame(&Frame::Event(frame.clone())).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&line).unwrap(),
@@ -400,22 +405,19 @@ fn from_data_rejects_surface_damage_and_mismatched_data() {
         ProtoError::Malformed(_)
     ));
     assert!(matches!(
-        decode_frame(r#"{"event": "surface_damage", "seq": 1, "ts_ms": 1, "data": {}}"#).unwrap_err(),
+        decode_frame(r#"{"event": "surface_damage", "seq": 1, "ts_ms": 1, "data": {}}"#)
+            .unwrap_err(),
         ProtoError::Malformed(_)
     ));
 
     // Shape mismatches are `invalid_event_data`, naming the kind.
-    let err =
-        EventPayload::from_data(EventKind::WindowDestroyed, json!({"window_id": "17"})).unwrap_err();
+    let err = EventPayload::from_data(EventKind::WindowDestroyed, json!({"window_id": "17"}))
+        .unwrap_err();
     assert!(
         matches!(err, ProtoError::InvalidEventData { ref kind, .. } if kind == "window_destroyed"),
         "unexpected error: {err:?}"
     );
-    assert!(EventPayload::from_data(
-        EventKind::SurfaceCommit,
-        json!({"window_id": 17})
-    )
-    .is_err());
+    assert!(EventPayload::from_data(EventKind::SurfaceCommit, json!({"window_id": 17})).is_err());
     assert!(EventPayload::from_data(EventKind::Quiet, json!(null)).is_err());
 
     // Unknown kinds and wrong field types are rejected before `data` matters.
@@ -475,7 +477,8 @@ fn event_frame_accepts_known_data_and_ignores_unknown_fields() {
 
 #[test]
 fn frame_serde_discriminates_by_keys() {
-    let response: Frame = serde_json::from_str(r#"{"id": 1, "result": {"action_id": 582}}"#).unwrap();
+    let response: Frame =
+        serde_json::from_str(r#"{"id": 1, "result": {"action_id": 582}}"#).unwrap();
     assert!(matches!(response, Frame::Response(_)));
 
     let event: Frame = serde_json::from_str(

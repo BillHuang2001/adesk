@@ -251,12 +251,16 @@ mod tests {
     #[test]
     fn payload_fields_are_preserved() {
         let (mut sink, mut rx) = sink();
-        sink.surface_commit(WindowId(5), 12, Region::from_rect(adesk_core::Rect {
-            x: 1,
-            y: 2,
-            w: 3,
-            h: 4,
-        }));
+        sink.surface_commit(
+            WindowId(5),
+            12,
+            Region::from_rect(adesk_core::Rect {
+                x: 1,
+                y: 2,
+                w: 3,
+                h: 4,
+            }),
+        );
         match rx.try_recv().expect("event queued") {
             RuntimeEvent::SurfaceCommit {
                 window_id,
