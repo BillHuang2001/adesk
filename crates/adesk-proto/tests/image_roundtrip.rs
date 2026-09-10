@@ -1,14 +1,15 @@
 //! Image layer acceptance tests (`docs/protocol.md` §4).
 //!
-//! `image_payload_base64_helpers` mirrors the frozen acceptance test in
-//! `tests/codec.rs`; the remaining tests pin the edge cases of the same four
-//! bodies.
+//! `image_payload_base64_helpers` is the authoritative copy of the constructor
+//! golden; the remaining tests pin the edge cases of the same four bodies.
+
+mod common;
 
 use adesk_core::PixelFormat;
 use adesk_proto::{ImageFormat, ImagePayload, ProtoError};
 use serde_json::json;
 
-/// Verbatim mirror of the frozen acceptance test `image_payload_base64_helpers`.
+/// The base64/RGBA construction golden for the §4 image payload.
 #[test]
 fn image_payload_base64_helpers() {
     let rgba: Vec<u8> = (0..32).collect(); // 4x2 pixels

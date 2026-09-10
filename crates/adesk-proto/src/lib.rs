@@ -11,8 +11,8 @@
 //!   a response with [`ResultPayload::decode`].
 //! - [`EventKind`] / [`EventPayload`] are the subscription filter and the typed
 //!   event `data` object (§5.6).
-//! - [`NdjsonCodec`], [`encode_frame`] and [`decode_frame`] are the wire codec
-//!   (§1); a future binary framing can be added behind [`Codec`] (§7).
+//! - [`NdjsonCodec`] and [`Codec`] are the wire codec (§1); a future binary
+//!   framing can be added behind [`Codec`] (§7).
 //!
 //! ```
 //! use adesk_proto::EventKind;
@@ -33,7 +33,7 @@ mod image;
 pub mod methods;
 mod types;
 
-pub use codec::{decode_frame, encode_frame, Codec, NdjsonCodec};
+pub use codec::{Codec, NdjsonCodec};
 pub use error::{ProtoError, Result};
 pub use event::{
     AppLaunchedEvent, EventKind, EventPayload, FocusChangedEvent, InspectFrameEvent,

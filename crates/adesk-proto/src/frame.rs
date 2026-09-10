@@ -62,8 +62,11 @@ pub enum ResponseOutcome {
 /// Untyped result payload.
 ///
 /// A codec cannot know which method an `id` belongs to, so responses carry the
-/// result untyped; decode it with the method's typed result struct:
-/// `response.outcome.result_payload().unwrap().decode::<PingResult>()?`.
+/// result untyped. Pattern-match [`ResponseOutcome`] to reach the success
+/// payload, then decode it with the method's typed result struct through
+/// [`ResultPayload::decode`] (or `into_decode` to consume the payload) — e.g.
+/// `let ResponseOutcome::Result(payload) = &response.outcome else { unreachable!() };`
+/// followed by `let result: PingResult = payload.decode()?;`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ResultPayload(pub serde_json::Value);
@@ -142,29 +145,6 @@ impl ResponseFrame {
             id,
             outcome: ResponseOutcome::Error(error),
         }
-    }
-}
-
-impl ResponseOutcome {
-    /// The result payload, when this outcome is a success.
-    pub fn result_payload(&self) -> Option<&ResultPayload> {
-        match self {
-            ResponseOutcome::Result(payload) => Some(payload),
-            ResponseOutcome::Error(_) => None,
-        }
-    }
-
-    /// The error payload, when this outcome is an error.
-    pub fn error_payload(&self) -> Option<&ErrorPayload> {
-        match self {
-            ResponseOutcome::Result(_) => None,
-            ResponseOutcome::Error(error) => Some(error),
-        }
-    }
-
-    /// Whether this outcome is an error.
-    pub fn is_error(&self) -> bool {
-        matches!(self, ResponseOutcome::Error(_))
     }
 }
 

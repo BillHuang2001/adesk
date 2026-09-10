@@ -5,39 +5,12 @@
 //! embed `Method`'s serde, which is owned by `src/methods*.rs` and covered at
 //! integration.
 
-use adesk_core::{
-    ActionId, AppId, ErrorCode, LaunchId, Rect, Region, RuntimeEvent, Size, WindowId,
-};
+mod common;
+
+use adesk_core::{ActionId, AppId, ErrorCode, LaunchId, Region, RuntimeEvent, WindowId};
 use adesk_proto::*;
+use common::*;
 use serde_json::json;
-
-fn damage() -> Region {
-    let mut region = Region::empty();
-    region.push(Rect::new(630, 220, 410, 180));
-    region
-}
-
-fn image_payload() -> ImagePayload {
-    ImagePayload {
-        width: 1280,
-        height: 800,
-        format: ImageFormat::Rgba8,
-        stride: Some(5120),
-        data: "AAAA".to_owned(),
-        scale: 1.0,
-    }
-}
-
-fn ping_result() -> PingResult {
-    PingResult {
-        protocol_version: 1,
-        runtime_version: "0.1.0".to_owned(),
-        uptime_ms: 5,
-        renderer: RendererKind::Gl,
-        output: Size::new(1280, 800),
-    }
-}
-
 fn surface_commit_payload() -> EventPayload {
     EventPayload::SurfaceCommit(SurfaceCommitEvent {
         window_id: WindowId(17),
@@ -167,29 +140,27 @@ fn response_result_matches_protocol_example() {
         )
         .unwrap(),
     );
-    let line = encode_frame(&frame).unwrap();
+    let line = NdjsonCodec.encode_str(&frame).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&line).unwrap(),
         json!({"id": 1, "result": {"action_id": 582}})
     );
 
-    let decoded = decode_frame(r#"{"id": 1, "result": {"action_id": 582}}"#).unwrap();
+    let decoded = NdjsonCodec
+        .decode_str(r#"{"id": 1, "result": {"action_id": 582}}"#)
+        .unwrap();
     match &decoded {
         Frame::Response(response) => {
             assert_eq!(response.id, 1);
-            assert!(response.outcome.error_payload().is_none());
-            assert!(!response.outcome.is_error());
-            assert_eq!(
-                response
-                    .outcome
-                    .result_payload()
-                    .unwrap()
-                    .decode::<ActionResult>()
-                    .unwrap(),
-                ActionResult {
-                    action_id: ActionId(582)
-                }
-            );
+            match &response.outcome {
+                ResponseOutcome::Result(payload) => assert_eq!(
+                    payload.decode::<ActionResult>().unwrap(),
+                    ActionResult {
+                        action_id: ActionId(582)
+                    }
+                ),
+                ResponseOutcome::Error(other) => panic!("expected a result payload, got {other:?}"),
+            }
         }
         other => panic!("expected response frame, got {other:?}"),
     }
@@ -201,7 +172,7 @@ fn response_error_matches_protocol_example() {
     let error = ErrorPayload::new(ErrorCode::UnknownWindow, "window 99 is not known")
         .with_data(json!({"window_id": 99}));
     let frame = Frame::Response(ResponseFrame::error(1, error));
-    let line = encode_frame(&frame).unwrap();
+    let line = NdjsonCodec.encode_str(&frame).unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&line).unwrap(),
         json!({
@@ -214,16 +185,19 @@ fn response_error_matches_protocol_example() {
         })
     );
 
-    let decoded = decode_frame(
+    let decoded = NdjsonCodec.decode_str(
         r#"{"id": 1, "error": {"code": "unknown_window", "message": "window 99 is not known", "data": {"window_id": 99}}}"#,
     )
     .unwrap();
     match decoded {
         Frame::Response(response) => {
             assert_eq!(response.id, 1);
-            assert!(response.outcome.result_payload().is_none());
-            assert!(response.outcome.is_error());
-            let error = response.outcome.error_payload().unwrap();
+            let error = match &response.outcome {
+                ResponseOutcome::Error(error) => error,
+                ResponseOutcome::Result(other) => {
+                    panic!("expected an error payload, got {other:?}")
+                }
+            };
             assert_eq!(error.code, ErrorCode::UnknownWindow);
             assert_eq!(error.message, "window 99 is not known");
             assert_eq!(error.data, Some(json!({"window_id": 99})));
@@ -238,7 +212,10 @@ fn response_with_both_or_neither_outcome_is_malformed() {
     let neither = r#"{"id": 1}"#;
     for line in [both, neither] {
         assert!(
-            matches!(decode_frame(line).unwrap_err(), ProtoError::Malformed(_)),
+            matches!(
+                NdjsonCodec.decode_str(line).unwrap_err(),
+                ProtoError::Malformed(_)
+            ),
             "line {line:?} must be malformed"
         );
         // The same contract holds for the typed serde entry point.
@@ -246,12 +223,14 @@ fn response_with_both_or_neither_outcome_is_malformed() {
     }
 
     // An id alone is not enough, and an id is required either way.
-    assert!(decode_frame(r#"{"result": {}}"#).is_err());
-    assert!(decode_frame(r#"{"id": "1", "result": {}}"#).is_err());
+    assert!(NdjsonCodec.decode_str(r#"{"result": {}}"#).is_err());
+    assert!(NdjsonCodec
+        .decode_str(r#"{"id": "1", "result": {}}"#)
+        .is_err());
 }
 
 #[test]
-fn result_payload_new_and_decode() {
+fn payload_new_and_decode() {
     let payload = ResultPayload::new(&ping_result()).unwrap();
     assert_eq!(payload.as_value()["protocol_version"], json!(1));
     assert_eq!(payload.decode::<PingResult>().unwrap(), ping_result());
@@ -262,10 +241,12 @@ fn result_payload_new_and_decode() {
 
     // `ResponseFrame::result` uses the same encoding.
     let response = ResponseFrame::result(7, &ping_result()).unwrap();
-    assert_eq!(
-        response.outcome.result_payload().unwrap(),
-        &ResultPayload::new(&ping_result()).unwrap()
-    );
+    match &response.outcome {
+        ResponseOutcome::Result(payload) => {
+            assert_eq!(payload, &ResultPayload::new(&ping_result()).unwrap());
+        }
+        ResponseOutcome::Error(other) => panic!("expected a result payload, got {other:?}"),
+    }
 }
 
 #[test]
@@ -276,7 +257,9 @@ fn event_frame_matches_protocol_example() {
         51234,
         surface_commit_payload(),
     );
-    let line = encode_frame(&Frame::Event(frame.clone())).unwrap();
+    let line = NdjsonCodec
+        .encode_str(&Frame::Event(frame.clone()))
+        .unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&line).unwrap(),
         json!({
@@ -290,7 +273,7 @@ fn event_frame_matches_protocol_example() {
             }
         })
     );
-    assert_eq!(decode_frame(&line).unwrap(), Frame::Event(frame));
+    assert_eq!(NdjsonCodec.decode_str(&line).unwrap(), Frame::Event(frame));
 }
 
 #[test]
@@ -302,8 +285,13 @@ fn every_payload_kind_round_trips_through_the_wire() {
         let frame = EventFrame::new(kind, seq, ts_ms, payload.clone());
         assert_eq!(frame.event, kind);
 
-        let line = encode_frame(&Frame::Event(frame.clone())).unwrap();
-        assert_eq!(decode_frame(&line).unwrap(), Frame::Event(frame.clone()));
+        let line = NdjsonCodec
+            .encode_str(&Frame::Event(frame.clone()))
+            .unwrap();
+        assert_eq!(
+            NdjsonCodec.decode_str(&line).unwrap(),
+            Frame::Event(frame.clone())
+        );
 
         let data = payload.to_data().unwrap();
         assert_eq!(EventPayload::from_data(kind, data).unwrap(), payload);
@@ -320,8 +308,10 @@ fn runtime_events_round_trip_through_event_frames() {
         assert_eq!(frame.ts_ms, event.ts_ms());
         assert_eq!(frame.to_runtime().unwrap(), event);
 
-        let line = encode_frame(&Frame::Event(frame.clone())).unwrap();
-        assert_eq!(decode_frame(&line).unwrap(), Frame::Event(frame));
+        let line = NdjsonCodec
+            .encode_str(&Frame::Event(frame.clone()))
+            .unwrap();
+        assert_eq!(NdjsonCodec.decode_str(&line).unwrap(), Frame::Event(frame));
     }
 }
 
@@ -405,7 +395,8 @@ fn from_data_rejects_surface_damage_and_mismatched_data() {
         ProtoError::Malformed(_)
     ));
     assert!(matches!(
-        decode_frame(r#"{"event": "surface_damage", "seq": 1, "ts_ms": 1, "data": {}}"#)
+        NdjsonCodec
+            .decode_str(r#"{"event": "surface_damage", "seq": 1, "ts_ms": 1, "data": {}}"#)
             .unwrap_err(),
         ProtoError::Malformed(_)
     ));
@@ -422,26 +413,32 @@ fn from_data_rejects_surface_damage_and_mismatched_data() {
 
     // Unknown kinds and wrong field types are rejected before `data` matters.
     assert!(matches!(
-        decode_frame(r#"{"event": "bogus", "seq": 1, "ts_ms": 1, "data": {}}"#).unwrap_err(),
+        NdjsonCodec.decode_str(r#"{"event": "bogus", "seq": 1, "ts_ms": 1, "data": {}}"#).unwrap_err(),
         ProtoError::UnknownEventKind(ref name) if name == "bogus"
     ));
     assert!(matches!(
-        decode_frame(r#"{"event": 5, "seq": 1, "ts_ms": 1, "data": {}}"#).unwrap_err(),
+        NdjsonCodec
+            .decode_str(r#"{"event": 5, "seq": 1, "ts_ms": 1, "data": {}}"#)
+            .unwrap_err(),
         ProtoError::Malformed(_)
     ));
     assert!(matches!(
-        decode_frame(r#"{"event": "quiet", "data": {}}"#).unwrap_err(),
+        NdjsonCodec
+            .decode_str(r#"{"event": "quiet", "data": {}}"#)
+            .unwrap_err(),
         ProtoError::Malformed(_)
     ));
     assert!(matches!(
-        decode_frame(r#"{"event": "quiet", "seq": 1, "ts_ms": 2, "data": {}}"#).unwrap_err(),
+        NdjsonCodec
+            .decode_str(r#"{"event": "quiet", "seq": 1, "ts_ms": 2, "data": {}}"#)
+            .unwrap_err(),
         ProtoError::InvalidEventData { .. }
     ));
 }
 
 #[test]
 fn event_frame_accepts_known_data_and_ignores_unknown_fields() {
-    let frame = decode_frame(
+    let frame = NdjsonCodec.decode_str(
         r#"{"event": "window_destroyed", "seq": 1, "ts_ms": 2, "data": {"window_id": 17, "future_field": 42}}"#,
     )
     .unwrap();
@@ -457,7 +454,7 @@ fn event_frame_accepts_known_data_and_ignores_unknown_fields() {
         ))
     );
 
-    let quiet = decode_frame(
+    let quiet = NdjsonCodec.decode_str(
         r#"{"event": "quiet", "seq": 3, "ts_ms": 4, "data": {"window_id": null, "quiet_ms": 250}}"#,
     )
     .unwrap();
@@ -488,7 +485,10 @@ fn frame_serde_discriminates_by_keys() {
     assert!(matches!(event, Frame::Event(_)));
 
     for line in ["null", "42", "\"ping\"", "[]", "{}"] {
-        assert!(decode_frame(line).is_err(), "line {line:?} must not decode");
+        assert!(
+            NdjsonCodec.decode_str(line).is_err(),
+            "line {line:?} must not decode"
+        );
         assert!(serde_json::from_str::<Frame>(line).is_err());
     }
 }
@@ -505,7 +505,10 @@ fn malformed_lines_are_rejected() {
         "{\"id\": 1, \"result\": {}, \"error\": {\"code\": \"internal\", \"message\": \"x\"}}",
         "{\"event\": \"bogus\", \"seq\": 1, \"ts_ms\": 1, \"data\": {}}",
     ] {
-        assert!(decode_frame(line).is_err(), "line {line:?} must not decode");
+        assert!(
+            NdjsonCodec.decode_str(line).is_err(),
+            "line {line:?} must not decode"
+        );
     }
 }
 
@@ -520,10 +523,7 @@ fn ndjson_codec_encodes_without_a_terminator_and_round_trips() {
     let line = NdjsonCodec.encode_str(&frame).unwrap();
     assert!(!line.contains('\n'), "payload carries no terminator");
     assert!(!line.ends_with('\n'), "transport adds the newline");
-    assert_eq!(encode_frame(&frame).unwrap(), line);
     assert_eq!(NdjsonCodec.decode_str(&line).unwrap(), frame);
-    assert_eq!(decode_frame(&line).unwrap(), frame);
-
     let codec: &dyn Codec = &NdjsonCodec;
     assert_eq!(codec.name(), "ndjson");
     let bytes = codec.encode(&frame).unwrap();

@@ -15,7 +15,7 @@ Crate root (`src/lib.rs`):
 Frames (`src/frame.rs`):
 - `Frame::{Request, Response, Event}` with `From<RequestFrame|ResponseFrame|EventFrame>` and manual `Serialize`/`Deserialize` that discriminate by keys (`method` → request, `id` + exactly one of `result`/`error` → response, `event` → event).
 - `RequestFrame { id: u64, method: Method }` (`new`).
-- `ResponseFrame { id, outcome: ResponseOutcome }` with `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, accessors `result_payload`/`error_payload`/`is_error`, constructors `ResponseFrame::result::<R>(id, &R)` and `::error(id, ErrorPayload)`.
+- `ResponseFrame { id, outcome: ResponseOutcome }` with `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}` (an ordinary enum consumers pattern-match), constructors `ResponseFrame::result::<R>(id, &R)` and `::error(id, ErrorPayload)`.
 - `ResultPayload(serde_json::Value)` with `new::<R>(&R)`, `decode::<R>()`, `as_value()`.
 - `ErrorPayload { code: ErrorCode, message: String, data: Option<Value> }` with `new`, `with_data`.
 - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }` with `new`, `from_runtime(&RuntimeEvent)`, `to_runtime() -> Option<RuntimeEvent>`.
@@ -33,11 +33,9 @@ Events (`src/event.rs`):
 
 Images (`src/image.rs`): `ImagePayload { width, height, format, stride: Option<u32>, data: String (base64), scale: f64 }` with `from_rgba8`, `from_png`, `decode_data`, `to_rgba8_buffer`.
 
-Vocabulary (`src/types.rs`): `ImageFormat::{Png, Rgba8}`, `RendererKind::{Gl, Pixman}`, `Condition::{Quiet{quiet_ms}, Change, Timeout}` (tagged by `type`), `KeySpec::{Single(String), Chord(Vec<String>)}` (untagged) with `keys()` and `From` impls.
+Vocabulary (`src/types.rs`): `ImageFormat::{Png, Rgba8}`, `RendererKind::{Gl, Pixman}`, `Condition::{Quiet{quiet_ms}, Change, Timeout}` (tagged by `type`), `KeySpec::{Single(String), Chord(Vec<String>)}` (untagged) with `keys()` and a single `From<&str>` conversion.
 
-Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, decode(&[u8]) -> Result<Frame> }`, `NdjsonCodec` with `encode_str`/`decode_str`, free `encode_frame(&Frame) -> Result<String>` and `decode_frame(&str) -> Result<Frame>`.
-
-Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidParams`, `InvalidEventData`, `UnknownEventKind`, `InvalidResult`, `VersionMismatch`, `Json`, `Base64`), `error_code()`, `From<ProtoError> for adesk_core::Error`, `pub type Result<T>`.
+Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, decode(&[u8]) -> Result<Frame> }`, `NdjsonCodec` with `encode_str`/`decode_str`.Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidParams`, `InvalidEventData`, `UnknownEventKind`, `InvalidResult`, `VersionMismatch`, `Json`, `Base64`), `error_code()`, `From<ProtoError> for adesk_core::Error`, `pub type Result<T>`.
 
 ## Constraints
 
@@ -59,7 +57,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | `Method` enum, `ActionResult`, per-group params/results | `src/methods.rs`, `src/methods/*.rs` |
 | `EventKind` filter, `EventPayload`, event data structs | `src/event.rs` |
 | `ImagePayload` and base64/RGBA conversions | `src/image.rs` |
-| `Codec` trait, `NdjsonCodec`, `encode_frame`/`decode_frame` | `src/codec.rs` |
+| `Codec` trait, `NdjsonCodec` | `src/codec.rs` |
 | `ProtoError`, `Result`, AGP error-code mapping | `src/error.rs` |
 | Spec defaults used by `#[serde(default = ...)]` | `src/defaults.rs` (crate-private) |
 | Protocol vocabulary types | `src/types.rs` |
@@ -79,7 +77,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `EventKind::Quiet` is subscribable (`is_subscribable()` returns true; it is in `SUBSCRIBABLE`) but protocol-only: no `RuntimeEvent` maps to `EventPayload::Quiet` (`from_runtime` has no such arm), `EventKind::Quiet::matches` is always false, and within this crate the payload is produced only by wire decoding (`EventPayload::from_data`) and tests.
 - Response results are untyped at frame level (`ResultPayload(serde_json::Value)`): a codec cannot correlate an `id` to a method, so server/client decode with the method's typed result via `ResultPayload::decode::<R>()`.
   `decode::<R>` cannot borrow (serde's `from_value` is by-value), so it clones `self.0`; a consumer that only needs the owned `Value` can destructure the public tuple field (`let ResultPayload(value) = payload;`) and move it out with no clone — `as_value(&self)` is the borrow-only accessor, there is no `into_value`.
-- All decode entry points (`decode_frame`, `NdjsonCodec::{decode, decode_str}`) route through crate-internal `Frame::from_value`, because serde's `Deserialize` cannot carry `ProtoError` payloads while the frozen acceptance spec requires exact `UnknownMethod(name)`/`Malformed(_)`/`UnknownEventKind(name)`; the serde `Deserialize` impls map errors to generic serde errors.
+- All decode entry points (`NdjsonCodec::{decode, decode_str}`) route through crate-internal `Frame::from_value`, because serde's `Deserialize` cannot carry `ProtoError` payloads while the frozen acceptance spec requires exact `UnknownMethod(name)`/`Malformed(_)`/`UnknownEventKind(name)`; the serde `Deserialize` impls map errors to generic serde errors.
 - `Frame::from_value` discrimination order is `event` → `method` → `id` + exactly one outcome; missing/null `params`/`data` are treated as `{}`; non-objects and unrecognized shapes are `Malformed`; JSON syntax errors are `Json`/`Malformed`.
 - `Method::from_parts` is the canonical `(name, params)` decoder — the frame layer calls it directly so `ProtoError::UnknownMethod`/`InvalidParams` survive; `Method`'s serde impls exist for `#[serde(flatten)]` in `RequestFrame` and accept the same `{"method", "params"}` mapping.
 - `EventPayload::to_data`/`from_data` carry only the variant fields (no tag); shape mismatches are `InvalidEventData{kind, message}`.
@@ -95,27 +93,23 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 
 ## Test Strategy
 
+- `tests/common/mod.rs` holds the shared helpers and fixtures (`wire<T: Serialize>`, `roundtrip<T>`, `image_payload()`, `observation()`, `damage()`, `window_info()`, `app_info()`, `ping_result()`); each test file declares `mod common;`. It carries `#![allow(dead_code)]` because every test binary compiles the whole module.
 - `tests/wire.rs` (24) pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
-- `tests/codec.rs` (19) freezes the frame-level acceptance spec; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
+- `tests/codec.rs` (3) keeps the frame-envelope NDJSON goldens unique to it: the exact encoded `ping`/`click` request lines and a full encode/decode round-trip over every frame kind.
 - `tests/methods_roundtrip.rs` (19): all 29 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape.
 - `tests/frames_events_roundtrip.rs` (14): response/error/event golden JSON, all 11 payload kinds and all 9 `RuntimeEvent`s round-tripped, `EventKind::matches` table, malformed lines, codec trait.
-- `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases.
-- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (91 tests + 1 doctest at `lib.rs:17`) — the dev shell is required for linking.
+- `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases, plus the authoritative `image_payload_base64_helpers` constructor golden.
+- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (75 tests + 1 doctest at `lib.rs:17`) — the dev shell is required for linking.
 - There are 0 lib unit tests: no `#[cfg(test)] mod tests` exists anywhere in `src/`; every assertion is an integration test or the single `lib.rs` doctest.
-- The five integration files share no `tests/common` module (there is no `mod common`, no `include!`): each re-defines its own helpers.
-  `wire<T: Serialize>` is duplicated verbatim in `wire.rs` and `methods_roundtrip.rs`; `roundtrip<T>` exists only in `wire.rs`.
-  Fixture builders are copy-pasted: `image_payload()` in 4 files, `observation()`/`damage()` in 3 files each, `window_info()` in 2 files, `app_info()` only in `wire.rs` (an equivalent `AppInfo` literal is re-written inline at `methods_roundtrip.rs:827`).
-  There are no `rect()`/`size()`/`position()`/`client()`/`server()` helpers — `Rect`/`Size`/`Position` are built inline via `Rect::new`/`Size::new`/`Position::pixels`/`Position::normalized`.
-  `PingResult` is constructed 4× (a `ping_result()` helper in `frames_events_roundtrip.rs:31` plus inline literals at `codec.rs:403`, `wire.rs:517`, `methods_roundtrip.rs:803`).
-- Cross-file coverage overlap (current state, not a bug): `tests/codec.rs` is largely subsumed — `image_payload_base64_helpers` (`codec.rs:416`) is byte-identical to `image_roundtrip.rs:12`; `event_frame_matches_protocol_example` (`codec.rs:228`) is byte-identical to `frames_events_roundtrip.rs:271`; and 14 of its other 17 tests are strict subsets of tests in `frames_events_roundtrip.rs`/`methods_roundtrip.rs` (response golden/error, both-or-neither outcome, unknown method/event kind, null params, unknown-field tolerance, quiet/inspect `to_runtime`, observe result, result payload, `EventKind::matches`, malformed lines, NDJSON codec trait). Only `encode_ping_request_exact_json`, `encode_click_request_matches_protocol_example` and `round_trip_all_frame_kinds` are unique to it.
-  `wire.rs` re-pins the same golden JSON bodies that the envelope layers pin: the `click` normalized-position literal appears 3× (`wire.rs:448`, `methods_roundtrip.rs:327`, `codec.rs:78`), `ErrorPayload` 3× (`wire.rs:471`, `frames_events_roundtrip.rs:207`, `codec.rs:147`), the `surface_commit` event JSON 2× (`codec.rs:243`, `frames_events_roundtrip.rs:282`), and `ImagePayload` in 4 of 5 files. Justified only as layered spec-goldens (§2/§3/§4 type layer vs §5 method envelope vs §1 frame envelope), not as independent verification — all three drive the same serde impls.
+- `wire<T>` is the single shared golden-JSON helper; no test file re-defines it. There are no `rect()`/`size()`/`position()`/`client()`/`server()` helpers — `Rect`/`Size`/`Position` are built inline via `Rect::new`/`Size::new`/`Position::pixels`/`Position::normalized`.
+- Cross-file goldens sit at different envelope layers and each is pinned once: the `click` normalized-position literal at the type layer (`wire.rs`), the method envelope (`methods_roundtrip.rs`) and the encoded NDJSON frame line (`codec.rs`); `ErrorPayload` at the type layer (`wire.rs`) and the frame envelope (`frames_events_roundtrip.rs`); the `surface_commit` event JSON at the frame envelope (`frames_events_roundtrip.rs`); `ImagePayload` at the type layer (`wire.rs`), method layer (`methods_roundtrip.rs`), frame layer (`frames_events_roundtrip.rs`) and image layer (`image_roundtrip.rs`). This is layered spec-golden coverage (§2/§3/§4 type layer vs §5 method envelope vs §1 frame envelope), not independent verification — all drive the same serde impls.
 - No test uses a sleep, `Instant`, `Duration`, I/O, async or a timeout; the whole suite is in-memory serialization, so it is wall-clock-free and reproducible.
-- Cross-crate overlap: ~26 of the 91 tests assert exact golden JSON for `adesk_core` types *embedded in proto wire structs* — Position/Button/WindowId (`wire.rs:439`, `codec.rs:65`, `methods_roundtrip.rs:319`), Rect/Region damage (`wire.rs:686`, `codec.rs:229`, `frames_events_roundtrip.rs:272`), full WindowInfo (`wire.rs:653`, `methods_roundtrip.rs:801`), partial AppInfo (`wire.rs:673`), Observation subsets (`codec.rs:368`, `methods_roundtrip.rs:740`), Size (`wire.rs:516`), ActionId (`wire.rs:459`), ErrorCode wire names (`wire.rs:468`, `codec.rs:126`) — these mirror shapes also pinned in `adesk-core/tests/serde_wire.rs`. The proto versions add the AGP method/frame envelope + base64 image coverage, not new core-type shapes.
+- Cross-crate overlap: several tests assert exact golden JSON for `adesk_core` types *embedded in proto wire structs* — Position/Button/WindowId (`wire.rs`, `methods_roundtrip.rs`), Rect/Region damage (`wire.rs`, `frames_events_roundtrip.rs`, `methods_roundtrip.rs`), full WindowInfo (`wire.rs`, `methods_roundtrip.rs`), partial AppInfo (`wire.rs`), Observation subsets (`methods_roundtrip.rs`), Size (`wire.rs`), ActionId (`wire.rs`), ErrorCode wire names (`wire.rs`, `frames_events_roundtrip.rs`) — these mirror shapes also pinned in `adesk-core/tests/serde_wire.rs`. The proto versions add the AGP method/frame envelope + base64 image coverage, not new core-type shapes.
 - `adesk_core::EventKind` (9 variants) is never imported by proto tests; proto tests exercise only the crate's own 12-variant `EventKind` (superset, in `src/event.rs`).
 
 ## Notes for Agents
 
-- Several public helpers have no in-repo consumer outside this crate's own tests: the free `encode_frame`/`decode_frame` (`src/codec.rs`), `ResponseOutcome::{result_payload, error_payload, is_error}` (`src/frame.rs`), `EventFrame::to_runtime`/`EventPayload::to_runtime` (also called by `adesk-server/tests/subscriptions.rs`), `ImagePayload::to_rgba8_buffer` (also called from `adesk-server/src/images.rs`'s test module) and `PingResult::is_compatible`. Consumers instead use `NdjsonCodec`/the `Codec` trait directly or pattern-match `ResponseOutcome`/`Frame`. They are the documented public surface: a workspace grep miss is not permission to delete, and removing any of them is a public-API change.
+- Public helpers whose only in-repo consumers are this crate's own tests plus a couple of cross-crate test call sites: `EventFrame::to_runtime`/`EventPayload::to_runtime` (also called by `adesk-server/tests/subscriptions.rs`), `ImagePayload::to_rgba8_buffer` (also called from `adesk-server/src/images.rs`'s test module) and `PingResult::is_compatible`. Consumers otherwise use `NdjsonCodec`/the `Codec` trait directly or pattern-match `ResponseOutcome`/`Frame`. They are the documented public surface: a workspace grep miss is not permission to delete, and removing any of them is a public-API change.
 - `EventKind::InspectFrame` is a real enum variant, so `subscribe_events.kinds` deserializes it even though §5.6 lists 11 filterable kinds; enforcing filterability is `adesk-server`'s job, not this crate's.
 - `ObserveResult`'s custom serde assumes core `Observation` has no `image` field; adding one in `adesk-core` would break the split (see Design Decisions).
 - Requests are always fully explicit on the wire: `#[serde(default)]` values are still emitted when serializing params (e.g. `format:"png"`, `count:1`), which is additive-safe.
@@ -142,5 +136,5 @@ Every frame is on the hot path: the server encodes each response/event (`connect
 ## Status
 
 - `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
-- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 91/91 green; `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
+- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 75/75 green (+1 doctest); `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
 - `cargo doc -p adesk-proto --no-deps --document-private-items` is warning-free: every intra-doc link resolves and no link carries a redundant explicit target (write `[`ProtoError::Json`]`, not `[`ProtoError::Json`](crate::ProtoError::Json)`, and qualify out-of-scope items as `[`crate::ProtoError::Json`]`).
