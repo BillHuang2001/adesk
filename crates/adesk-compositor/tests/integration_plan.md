@@ -1,172 +1,175 @@
-# adesk-compositor integration test plan (Phase 2)
+# adesk-compositor integration tests
 
-Document only — no code here. These are the five behavior tests that prove the
-compositor core, written against `adesk-testkit` once that crate lands
-(`docs/architecture.md` §10). Until then they are tracked here so the Phase 2
-implementations (protocol handlers, seat path, WM bridge) have acceptance criteria.
+`tests/window_lifecycle.rs`, `tests/input_delivery.rs`, `tests/popups.rs` and
+`tests/clipboard.rs` hold the 15 integration tests that prove the compositor core end to end.
+Each starts a **real in-process runtime** — one compositor thread, one virtual output, the real
+protocol handlers and seat — and drives it the way an ordinary application does: a
+`wayland-client` connection (`adesk-testkit`) over the runtime's own socket, `RuntimeCommand`s
+on the command channel, and the compositor's `RuntimeEvent` broadcast plus the window model as
+the assertion surface. There is no AGP client, no screenshot loop and no fixture application in
+these suites.
+
+They build on `adesk-testkit` (a dev-dependency of this crate) and are ordinary
+`#[tokio::test]`s: no `#[ignore]`, no feature gate, no external service.
+
+```sh
+./scripts/dev.sh cargo test -p adesk-compositor                    # all suites
+./scripts/dev.sh cargo test -p adesk-compositor --test clipboard   # one suite
+```
 
 ## Ground rules
 
-- **No desktop, no GPU, no network, no installed application.** Every test starts a
-  real compositor thread in-process on a temporary `XDG_RUNTIME_DIR` with
-  `RendererKind::Pixman`, and drives it with a `wayland-client` test client.
-- **Events are the assertion surface**, not sleeps: read from the broadcast tap and
-  assert on `seq` order, then assert state via `QueryState`. Deadlines are explicit
-  and generous; no test sleeps in a loop.
-- **`RenderWindow`/`RenderOutput` only when pixels are the assertion**; they are
-  commands, not a frame loop.
-- **GL-only tests** (renderer fallback, DMA-BUF readback) are gated behind
-  `ADESK_TEST_GL=1` and must skip cleanly when it is unset (`docs/architecture.md` §10).
-- File: `crates/adesk-compositor/tests/window_lifecycle.rs`, `input_delivery.rs`,
-  `popups.rs`, `clipboard.rs` (one file per scenario group is fine; keep each test
-  independent).
+- **No desktop, GPU, network or installed application.** Every test starts its own compositor
+  thread on a private temp `XDG_RUNTIME_DIR` (mode `0700`, created by the harness) with
+  `RendererKind::Pixman` (the `TestRuntimeConfig` default) and connects by absolute socket path.
+  Nothing is launched, so `TestRuntimeConfig::new().with_apply_env(false)` releases the harness's
+  process-env lock after startup and the tests stay independent and parallel.
+- **Events are the assertion surface**, not sleeps: read the broadcast through `EventAssert` and
+  assert on `seq` order, then assert state via `QueryState`. Deadlines are explicit (a 10 s
+  `DEADLINE`; a 250 ms `QUIET_BOUND` for negative claims) and no test sleeps or polls in a loop.
+  The broadcast never replays, so a tap is installed *before* the action it must observe.
+- **`RenderWindow` only where pixels are the assertion**; it is a command, not a frame loop.
+  (`RenderOutput` is not used by these suites.)
+- **GL-only paths** (renderer selection, DMA-BUF readback) sit behind `ADESK_TEST_GL=1` and skip
+  cleanly when it is unset (`adesk_testkit::{gl_enabled, require_gl}`). Every test in these four
+  files runs under pixman and is ungated.
+- **One file per scenario group**, each test independent: its own runtime, its own Wayland
+  connection(s), its own window ids.
+- **Expectations come from the window model**, never a hard-coded `1280x800`:
+  `TestRuntime::output_size`, `TestRuntime::tiled_rect` and `expected_window_geometry`.
 
-## Planned testkit surface these tests rely on
+## 1. A window appears with a tiling configure — `tests/window_lifecycle.rs`
+
+- `window_appears_with_tiling_configure` — a client asking for the output size is configured by
+  the tiling policy with the full output, a non-zero serial and the `activated` state, not with
+  the size it requested. The mapping commit then produces `window_created` (fresh id, echoed
+  `app_id`/`title`), `window_activated` and `surface_commit` (`commit_seq >= 1`, window-relative
+  damage covering the committed area); `QueryState` reports exactly one window — `mapped`,
+  `Active`, `geometry == tiled_rect()`, `last_commit_seq >= 1`, `active_window_id ==
+  keyboard_focus == id`. `RenderWindow` returns a frame at the tiled size whose `commit_seq` is
+  the window's and whose pixels match the committed checker fill (and differ from a blank frame).
+
+## 2. Focus follows activation — `tests/window_lifecycle.rs`
+
+- `focus_follows_activation` — two clients `A`/`B`; `B`'s map auto-activates `B` and leaves `A`
+  `Inactive` but still `mapped` at the tiled geometry. `ActivateWindow { A }` then emits exactly
+  `window_activated { A, previous: Some(B) }` followed by `focus_changed { Some(A) }` (two events,
+  increasing `seq`, and the reply resolves only after both are queued), while `QueryState` shows
+  `A` `Active` / `B` `Inactive` / both mapped / `active_window_id == keyboard_focus == A`. The
+  seat really moved (`wl_keyboard.leave` on `B`, a later `enter` on `A`), an unknown `WindowId`
+  replies `unknown_window` and changes nothing (`Expected::Any` bounded by `QUIET_BOUND`, snapshot
+  watermark unmoved), and neither connection saw a pointer or key event from the activation.
+
+**Current semantics: activation does not re-tile.** `adesk-wm`'s `activate` returns exactly
+`[WmAction::Activate { id }]`, and `ConfigureWindow` — the only action that sends
+`xdg_toplevel.configure` — comes from `on_map` and `on_output_size` only. An activation therefore
+sends no configure to either connection: `last_configure`/`pending_configure` are asserted
+unchanged on both clients (after round trips flush the protocol), and the tiling state that a
+configure would have carried is asserted positively instead (`geometry == tiled_rect()` for both
+windows, `A`'s last configure being the full-output tiling configure with `activated`).
+
+## 3. Input through the real seat — `tests/input_delivery.rs`
+
+- `pointer_move_delivers_the_window_model_point` — the entry move arrives as `wl_pointer.enter` at
+  the window model's point; the following `PointerMove { Normalized(0.5, 0.5) }` arrives as
+  exactly one `wl_pointer.motion` at that same model point, an interior pixel of the tiled rect
+  (never a hard-coded `(0, 0)`), within 0.25 px of the model's integer point and within one pixel
+  of the naive `n * dim` product.
+- `pointer_button_press_and_release_are_two_ordered_events` — Left press and release arrive as two
+  distinct `wl_pointer.button` events carrying `BTN_LEFT`, in command order, with nothing else in
+  the filtered history.
+- `pointer_axis_is_negative_vertical_and_framed` — `PointerAxis { dx: 0.0, dy: -3.0 }` arrives as a
+  single `wl_pointer.axis` on the vertical axis with a negative value (the injected delta
+  quantized to `wl_fixed`, 1/256 px); the zero horizontal delta is omitted rather than reported as
+  `0.0`, and a `wl_pointer.frame` follows the axis.
+- `ctrl_c_chord_is_a_press_in_order_and_a_reverse_release` — a pressed chord is delivered as
+  LeftCtrl↓, `c`↓, `c`↑, LeftCtrl↑ in exactly that order (`KEY_LEFTCTRL`/`KEY_C`), starting from a
+  seat that really holds the keyboard focus.
+- `a_released_chord_is_rejected_and_delivers_nothing` — a chord with `KeyState::Released` replies
+  `invalid_request`, and the only key the client ever records is the single key injected afterwards
+  (a leaked key would have been written to the socket first).
+- `injection_without_a_focused_window_fails_without_panicking` — with no window at all, every input
+  command (`PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`) replies `invalid_request`, the
+  model is untouched and the thread keeps serving commands.
+
+**Current semantics.** Chords are built with `KeyCode::parse_chord(["CTRL", "C"])`:
+`KeyCode::parse` is the *single-key* parser (`KeyCode::parse("ctrl+c")` is an error, asserted in
+the test), which is also what the server's `keypress` path uses. Pointer button and axis delivery
+require pointer focus, and the first move onto a surface is reported as `wl_pointer.enter`, not as
+`motion` — so every test makes a leading move, waits for it, and clears the recorded history
+before the injection under test. No window at all yields `invalid_request` (zero windows makes
+`unknown_window` unreachable on this path).
+
+## 4. Popups — `tests/popups.rs`
+
+- `popup_lifecycle_renders_into_the_owner_and_destroy_keeps_the_window` — `popup_appeared` names
+  the *owner's* `WindowId` (a popup never consumes a window id) and `QueryState` reports
+  `popup_count == 1` for that window with still exactly one window. The popup's commit is reported
+  as `surface_commit` against the owner with window-relative damage covering the popup rect and a
+  `commit_seq` that advances the window's single counter (read back as `last_commit_seq` and
+  carried by the `RenderedFrame`). The popup is composed into the owner's frame: the pixel at its
+  origin plus a popup-local offset is the popup's own fill, while the owner's pixels survive
+  everywhere else. Destroying the popup emits `popup_disappeared` with that exact `popup_id` and
+  owner, `popup_count` returns to `0`, the popup's pixels leave the composition, and the window
+  stays `mapped` and `Active`.
+- `owner_destroyed_with_open_popup_reports_popup_disappeared_first` — destroying the owner while a
+  popup is open reports `popup_disappeared` (same owner, same `popup_id`) *before* `window_destroyed`,
+  with `seq` ascending across the pair; afterwards the model keeps neither record, `active_window_id`
+  and `keyboard_focus` are `None`, and no further lifecycle event names the destroyed window.
+
+## 5. Clipboard — `tests/clipboard.rs`
+
+- `reader_receives_the_offer_and_reads_the_exact_bytes` — a freshly connected client has no offer;
+  after the owner publishes, the reader still has none (a selection is announced only to the
+  data-device-focus client), and activating the reader makes `wl_data_offer` arrive, from which the
+  exact published bytes are read back.
+- `second_set_selection_supersedes_the_first_offer` — the first publication is readable, then the
+  owner re-takes the focus, publishes a different payload and the reader (focused again) receives a
+  *new* offer (count 2, announced once) carrying the second payload; the superseded payload is no
+  longer reachable.
+- `unadvertised_mime_type_reads_as_none` — reading a mime type the offer does not advertise is
+  `Ok(None)` rather than an error or a hang, while the advertised mime type still round-trips
+  through the same offer (non-vacuity).
+- `focus_moves_to_the_reader_and_it_publishes_back` — the newly focused reader reads what the owner
+  published, publishes its own payload (with its own real input serial) and the owner, once focused
+  again, reads the reader's bytes: the transfer direction is reversible.
+- `no_runtime_event_carries_clipboard_payload` — a distinctive payload really crosses the protocol,
+  then the whole recorded event history (proven live by a later `surface_commit`) is scanned and
+  must not contain it; `window_created`, `window_activated` and `surface_commit` are present as
+  non-vacuity evidence.
+
+**Current semantics.** Smithay accepts `wl_data_device.set_selection` only from the client that
+currently holds **keyboard focus**, and announces a selection only to the client that holds
+**data-device focus**. The compositor keeps the two together — `State::apply_activate` is the only
+keyboard-focus path and moves the data-device focus in the same call — so the tests must produce
+both: the owner maps **second** (the single-visible-toplevel policy gives the visible slot and the
+focus to the newest toplevel), the serial `set_selection` quotes comes from a real input event (one
+injected pointer move, whose peer's own `wl_pointer.enter` is awaited), and the reader becomes the
+selection target by being *activated*, never by synthesized input. The compositor stores no
+selection bytes at all (`SelectionHandler::SelectionUserData` is `()`), so nothing clipboard-shaped
+exists to log or to put in an event.
+
+## Testkit surface used
 
 | Helper | Used for |
 |---|---|
-| `TestRuntime::start(CompositorConfig) -> TestRuntime` | in-process compositor + temp runtime dir + socket |
-| `runtime.handle() -> CompositorHandle` | command/event/readiness access |
-| `runtime.events() -> EventTap` (`next()`, `drain()`, `await_seq(n)`) | ordered event assertions |
-| `runtime.connect() -> WaylandTestClient` | one `wayland-client` connection |
-| `client.create_toplevel(size) -> TestToplevel` | `wl_surface` + `xdg_toplevel` |
-| `client.commit_shm_buffer(&toplevel, pattern)` | SHM buffer with a known pixel pattern |
-| `toplevel.await_configure() -> (Size, WindowState)` | observe the tiling configure |
-| `toplevel.set_title(..)`, `toplevel.set_app_id(..)`, `toplevel.destroy()` | lifecycle mutations |
-| `client.create_popup(&toplevel, position)` | xdg-popup child surface |
-| `client.set_selection(mime, bytes)` / `client.read_selection(mime)` | `wl_data_device` clipboard |
-| `assert_pixel_eq`, `assert_region_avg`, `assert_differs` | image assertions |
-| `desktop_fixture(name, exec)` + helper process | launch/correlation tests (not used here) |
-
-If a landed helper name differs, reconcile the test and this table in the same
-commit.
-
-## 1. A window appears with a tiling configure
-
-**Setup:** `TestRuntime::start(pixman_config().with_output_size(1280x800))`, one
-`WaylandTestClient`, one `create_toplevel()`.
-
-**Steps:** commit an SHM buffer of exactly the output size; await the configure.
-
-**Assertions:**
-- configure size is `1280x800` and state is `Activated` (`docs/architecture.md` §4).
-- event tap yields `window_created` with a fresh `window_id`, `app_id`/`title` as
-  set by the client, and `seq` strictly greater than the previous event.
-- a follow-up `QueryState` reports exactly one `WindowInfo`: `mapped == true`,
-  `state == Active`, `geometry == {0,0,1280,800}`, `active_window_id == Some(id)`,
-  `keyboard_focus == Some(id)`.
-- the first `SurfaceCommit` for the window carries `commit_seq >= 1` and a damage
-  `Region` that intersects the committed area (never empty for a full-buffer commit).
-- `RenderWindow { window_id, region: None, max_dimension: None }` returns an image of
-  the window's size whose pixels match the committed pattern.
-
-**Helpers:** `runtime.handle()`, `runtime.events()`, `client.commit_shm_buffer`,
-`toplevel.await_configure`, `assert_pixel_eq`.
-
-## 2. Focus follows activation
-
-**Setup:** two clients, each with one toplevel (`A` mapped first, then `B`), so the
-policy has already auto-activated `B` on map.
-
-**Steps:** `handle.send(RuntimeCommand::ActivateWindow { window_id: A })`; drain the
-event tap until the activation is acknowledged.
-
-**Assertions:**
-- event order is exactly `window_activated { window_id: A, previous: Some(B) }`
-  followed by `focus_changed { window_id: Some(A) }` — both with increasing `seq`.
-- the `ActivateWindow` reply is `Ok(())` and is delivered *after* both events are
-  observable (commands are FIFO; the reply is sent when the state change is done).
-- `QueryState` shows `active_window_id == Some(A)`, `keyboard_focus == Some(A)`,
-  `A.state == Active`, `B.state == Inactive`, both `mapped == true` (the inactive
-  window stays mapped, it is only not visible).
-- `A` receives a new tiling configure for the full output; `B` receives none.
-- `ActivateWindow` with an unknown `WindowId` replies `Err(unknown_window)` and emits
-  no events (state is untouched).
-- activation is **never** synthesized input: the event tap contains no
-  `SurfaceCommit`/pointer events caused by the activation itself.
-
-**Helpers:** `runtime.events()`, `toplevel.await_configure`, `QueryState`.
-
-## 3. Input delivery through the real seat path
-
-**Setup:** one client with a focused toplevel; the test client installs
-`wl_pointer`/`wl_keyboard` listeners and records every event.
-
-**Steps:** `PointerMove { position: Normalized(0.5, 0.5) }`, then
-`PointerButton { button: Left, state: Pressed }` / `Released`, then
-`PointerAxis { dx: 0.0, dy: -3.0 }`, then `KeyEvent { key: KeyCode::parse("ctrl+c"),
-state: Pressed }`.
-
-**Assertions:**
-- the pointer `wl_pointer.motion` surface coordinates equal the point the window
-  model produces for the window's geometry (window-relative → output → surface, via
-  `WmBridge::resolve_position`, never a hard-coded `(0,0)` assumption).
-- `wl_pointer.button` reports `BTN_LEFT` with the matching `state`; press and release
-  are two distinct events in command order.
-- `wl_pointer.axis` reports `vertical` with a negative value and is followed by
-  `wl_pointer.frame`.
-- the chord `ctrl+c` arrives as `wl_keyboard.key` for LeftCtrl (`Pressed`) then `c`
-  (`Pressed`), then the reverse order for the implicit release — press in order,
-  release in reverse (`docs/architecture.md` §8).
-- `KeyEvent { state: Released }` with a chord replies `Err(invalid_request)` and
-  sends nothing to the client.
-- injection with no focused window replies `Err(...)` (mapped to
-  `unknown_window`/`invalid_request`), never panics.
-
-**Helpers:** `client.commit_shm_buffer` (to give the window real geometry),
-`runtime.events()`, `QueryState` for geometry cross-checks.
-
-## 4. Popup tracking
-
-**Setup:** one client with a mapped toplevel; `client.create_popup(&toplevel, pos)`.
-
-**Steps:** map the popup and commit a buffer, then destroy the popup surface.
-
-**Assertions:**
-- `popup_appeared { window_id, popup_id }` is emitted with the *owner* window id, and
-  `QueryState` reports `popup_count == 1` for that window.
-- `RenderWindow` of the owner includes the popup content (the pixel at the popup
-  position matches the popup pattern, not the toplevel pattern).
-- popup commits emit `surface_commit` with the owner `window_id` and a monotonic
-  `commit_seq` that shares the window's counter.
-- destroying the popup emits `popup_disappeared` with the same `popup_id` and
-  `popup_count` returns to `0`; the window itself stays mapped and active.
-- destroying the owner window while a popup is open emits `popup_disappeared` first,
-  then `window_destroyed` (no dangling popup ids in later snapshots).
-
-**Helpers:** `client.create_popup`, `runtime.events()`, `QueryState`,
-`assert_region_avg`.
-
-## 5. Clipboard basics
-
-**Setup:** two clients (`owner`, `reader`) with mapped toplevels; `owner` has
-keyboard focus.
-
-**Steps:** `owner` calls `wl_data_device.set_selection` with `text/plain;charset=utf-8`
-and a known payload; `reader` requests the same mime type.
-
-**Assertions:**
-- `reader` receives a `wl_data_offer` containing the advertised mime type and can
-  read back the exact bytes through the pipe (no truncation, no re-encoding).
-- a second `set_selection` by `owner` invalidates the previous offer and the `reader`
-  read-back returns the new payload.
-- `set_selection` with a mime type the reader does not request is not delivered to
-  the reader; requesting an unadvertised mime type fails at the client, not with a
-  compositor panic.
-- when the focus moves to `reader` (scenario 2 mechanism), `reader` becomes the
-  selection target and can `set_selection` itself; the compositor never inspects or
-  logs the payload (no pixel/selection data in logs).
-
-**Helpers:** `client.set_selection`, `client.read_selection`, `runtime.events()`
-(assert no clipboard content appears in any event).
-
-## Phase 2 gate
-
-These tests are added only after: (a) the protocol handlers call the `State`
-side-effect API instead of `todo!()`, (b) `adesk-wm` and `adesk-render` have landed
-and `WmBridge`'s assumed surface (see `src/wm.rs`) has been reconciled, and
-(c) `adesk-testkit` exposes the helpers above. Until then the public-API smoke tests
-in `tests/compositor_smoke.rs` are the only live end-to-end coverage: they run
-unconditionally (no `#[ignore]`) against a real compositor thread, each one serialized
-on a process-wide lock and pointed at a private writable `XDG_RUNTIME_DIR` under
-`std::env::temp_dir()`.
+| `TestRuntime::start_with(TestRuntimeConfig)` | in-process compositor + private temp `XDG_RUNTIME_DIR` + bound socket |
+| `TestRuntimeConfig::{new, with_apply_env}` | pixman renderer, `1280x800` output, env scoping |
+| `runtime.compositor() -> &CompositorHandle` | command channel (`RuntimeCommand` + reply oneshots) |
+| `runtime.wayland_client() -> WaylandTestClient` | one `wayland-client` connection (absolute socket path) |
+| `runtime.output_size()`, `runtime.tiled_rect()` | expected geometry from the wm policy |
+| `runtime.shutdown()` | bounded runtime teardown |
+| `expected_window_geometry(Size)`, `wait_until(deadline, what, cond)` | single-sourced tiling rect, bounded state polls |
+| `EventAssert::tap(&runtime)` | ordered event assertions from the broadcast |
+| `Expected::{WindowCreatedFor, WindowActivated, WindowDestroyed, SurfaceCommit, PopupAppeared, Any, custom}` | event matchers |
+| `EventAssert::{wait_for_expected, wait_for, expect_none, drain, seen, assert_seen_order}` | waits, bounded negative claims, history scans |
+| `WaylandTestClient::{create_toplevel(ToplevelSpec), create_popup(&TestWindow, PopupSpec)}` | protocol-path surfaces |
+| `WaylandTestClient::{roundtrip, flush, close}` | protocol barriers and connection teardown |
+| `WaylandTestClient::{pointer_events, keyboard_events, clear_input_events, wait_for_pointer_event, wait_for_pointer_button, wait_for_keyboard_event, wait_for_key, last_modifiers}` | recorded `PointerEvent`/`KeyboardEvent` history as assertion source |
+| `WaylandTestClient::{set_selection, read_selection, read_selection_with_timeout, selection_offer_count, wait_for_selection_offer}` | `wl_data_device` clipboard |
+| `TestWindow::{wait_for_configure, apply_configure, commit_frame(FillPattern), destroy, size, damage_hint, pending_configure, last_configure}` | toplevel lifecycle |
+| `TestPopup::{wait_for_configure, apply_configure, commit_frame, destroy}` | popup lifecycle |
+| `ToplevelSpec::{new, with_fill}`, `PopupSpec::{new, with_offset}` | surface parameters (size, app id, title, fill, positioner offset) |
+| `FillPattern::{default, solid_rgb, checker}` + `FillPattern::at` | known pixel patterns and their expected pixels |
+| `ImageAssert::{new, pixel, matches_pattern, differs_from}`, `ImageBuffer::new_rgba` | pixel assertions on `RenderedFrame` payloads |
+| `BTN_LEFT`, `KEY_LEFTCTRL`, `KEY_C`, `AxisKind`, `ButtonState`, `KeyState` | properties asserted on recorded seat events |
