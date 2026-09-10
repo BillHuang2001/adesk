@@ -43,6 +43,7 @@ Errors (`src/error.rs`): `ViewerProtoError { Malformed, Unknown { message_type }
 | `ViewerProtoError`, AGP error-code mapping | `./src/error.rs` |
 | Golden-JSON + round-trip tests | `./tests/wire.rs` |
 | Codec acceptance (unknown type, malformed, unknown fields) | `./tests/codec.rs` |
+| Shared message fixtures (not a test target) | `./tests/common/mod.rs` |
 ## Design Decisions
 - **Tag dispatch is manual, never `#[serde(tag = "type")]`.** Serde's internally-tagged impl errors on an unknown tag, but §1 requires unknown types to be ignored. Both enums implement `Serialize`/`Deserialize` by hand over a `serde_json::Value`: `to_value()` builds the flat object form (`{"type": ..., <fields>}`), and `from_value()` reads the raw `"type"` string, dispatching a recognised tag to its typed payload and any other tag to the `Unknown` variant. All decode entry points route through `ClientMessage::from_value`/`ServerMessage::from_value` (crate-internal).
 - **`key`'s wire field is `state`.** `docs/viewer.md` §4 names it `state`; the Rust field is `action` (`Key { keys, action }`). The builder emits `"state"` and the decode helper renames it, so the on-wire shape matches the normative spec while the Rust API stays ergonomic.
