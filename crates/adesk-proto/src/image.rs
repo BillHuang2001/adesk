@@ -38,7 +38,7 @@ impl ImagePayload {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Malformed`](crate::ProtoError::Malformed) when
+    /// Returns [`ProtoError::Malformed`] when
     /// `data.len() != width * height * 4` or when the implied stride/byte count
     /// does not fit in `u32`.
     pub fn from_rgba8(width: u32, height: u32, data: &[u8], scale: f64) -> Result<ImagePayload> {
@@ -87,7 +87,7 @@ impl ImagePayload {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Base64`](crate::ProtoError::Base64) for invalid base64.
+    /// Returns [`ProtoError::Base64`] for invalid base64.
     pub fn decode_data(&self) -> Result<Vec<u8>> {
         Ok(STANDARD.decode(&self.data)?)
     }

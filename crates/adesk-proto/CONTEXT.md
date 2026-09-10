@@ -64,7 +64,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | Spec defaults used by `#[serde(default = ...)]` | `src/defaults.rs` (crate-private) |
 | Protocol vocabulary types | `src/types.rs` |
 | Type-level + golden-JSON tests | `tests/wire.rs` |
-| Frozen frame-level acceptance spec (active) | `tests/codec.rs` |
+| Frame-level acceptance spec | `tests/codec.rs` |
 | Method round-trip + golden JSON tests | `tests/methods_roundtrip.rs` |
 | Frame/event/codec round-trip tests | `tests/frames_events_roundtrip.rs` |
 | Image payload tests | `tests/image_roundtrip.rs` |
@@ -95,7 +95,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 ## Test Strategy
 
 - `tests/wire.rs` (24) pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
-- `tests/codec.rs` (19) is the frozen frame-level acceptance spec, all active; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
+- `tests/codec.rs` (19) freezes the frame-level acceptance spec; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
 - `tests/methods_roundtrip.rs` (19): all 29 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape.
 - `tests/frames_events_roundtrip.rs` (14): response/error/event golden JSON, all 11 payload kinds and all 9 `RuntimeEvent`s round-tripped, `EventKind::matches` table, malformed lines, codec trait.
 - `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases.
@@ -114,4 +114,6 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 
 ## Status
 
-- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes, `cargo check`/`clippy -p adesk-proto --all-targets` clean, 91/91 tests pass under the dev shell.
+- `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
+- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 91/91 green; `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
+- `cargo doc -p adesk-proto --no-deps --document-private-items` is warning-free: every intra-doc link resolves and no link carries a redundant explicit target (write `[`ProtoError::Json`]`, not `[`ProtoError::Json`](crate::ProtoError::Json)`, and qualify out-of-scope items as `[`crate::ProtoError::Json`]`).
