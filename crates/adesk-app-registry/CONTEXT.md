@@ -132,6 +132,8 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - `adesk-testkit` provides `.desktop` fixtures (`FixtureDir`, `TestApp`) and a helper process for end-to-end tests; this crate's own tests use `tempfile` directly and never spawn real processes.
 - `RawEntry`, `DesktopEntry` and the `ProcessSpawner`/`Clock` traits are public so tests and `adesk-testkit` can build fixtures without reimplementing parsing or launch plumbing.
 - `tests/support/mod.rs` carries a module-level `#![allow(dead_code)]` because it is compiled into five test binaries and each uses a subset of its helpers.
+- The same allow also hides four genuinely unused items that no test calls and that can be pruned: `RecordingSpawner::failing`, `FakeClock::now`, `<RecordingSpawner as Default>::default` and `<FakeClock as Default>::default`; `entry_text` and `parse` are not dead (they are used by the other helpers in the module).
+- `AppRegistry::launch` rejects an empty `argv` before building the command, so both `NoExec` arms inside the command construction (the `TerminalSpec::wrap` `None` case and the `argv.split_first()` `None` case) are unreachable defensive code, not real failure paths — do not chase coverage for them.
 - `Error::Io`, `Error::InvalidEntry` and `Error::InvalidArgument` exist for API completeness but are never constructed by this crate: `scan()` reports per-file problems as `ScanIssue`s (it only returns `Ok`), and `launch()` can only fail with `UnknownApp`, `TryExecNotFound`, `NoExec`, `InvalidExec` or `Spawn`.
 
 ## Status
