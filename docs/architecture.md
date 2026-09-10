@@ -49,11 +49,16 @@ Rules:
 
 `adesk_core::RuntimeEvent` is the single event vocabulary. Every event carries:
 
-- `seq: u64` — global monotonic sequence, assigned by the compositor under one lock.
+- `seq: u64` — global monotonic sequence. There is exactly **one** `seq` domain: it
+  covers the events the compositor emits *and* the events the server synthesizes itself
+  (`AppLaunched`, `inspect_frame`), because both take their number from the
+  compositor's single counter (§3 `ReserveSeq`). Gaps are allowed (a reserved number
+  may go unused), reuse is not.
 - `ts_ms: u64` — monotonic ms since compositor start.
 - `window_id: Option<WindowId>` — the window the event belongs to, when applicable.
 
-Emitted by the compositor:
+Emitted on the runtime's event broadcast (the compositor emits every one of them except
+`AppLaunched`, which the server synthesizes from the `launch_app` it just served):
 
 | Event | Emitted when |
 |---|---|
@@ -82,6 +87,9 @@ enum RuntimeCommand {
     RenderOutput { overlays: Vec<OverlayKind>, region: Option<Rect>, max_dimension: Option<u32>,
                    reply: oneshot::Sender<Result<RenderedFrame, Error>> },
     QueryState { reply: oneshot::Sender<StateSnapshot> },   // windows, focus, seq watermarks
+    NoteLaunch { launch_id: LaunchId, app_id: AppId, pid: Option<i32>,
+                 reply: oneshot::Sender<()> },
+    ReserveSeq { reply: oneshot::Sender<u64> },
     ActivateWindow { window_id: WindowId, reply: oneshot::Sender<Result<(), Error>> },
     CloseWindow { window_id: WindowId, reply: oneshot::Sender<Result<(), Error>> },
     PointerMove { position: Point, reply: ... },
@@ -96,6 +104,13 @@ enum RuntimeCommand {
 - A command must never block the loop; render work is synchronous but bounded by the
   output size, and replies are sent immediately after the frame is produced.
 - `RenderedFrame` = `adesk_core::ImageBuffer` + `commit_seq` + damage regions used.
+- `NoteLaunch` records a successful `launch_app` in the compositor's launch ledger, so
+  the `WindowCreated` the compositor itself publishes can carry `launch_id`. It is
+  infallible bookkeeping and acknowledges with `()`.
+- `ReserveSeq` changes nothing but the sequence counter: it hands out the next `seq` and
+  emits no event. Server-synthesized events (`AppLaunched`, `inspect_frame`) allocate
+  their `seq` here, which is what keeps those events inside the single `seq` domain
+  of §2.
 
 ## 4. Window model and tiling policy (`adesk-wm`)
 
@@ -145,12 +160,24 @@ Wait implementation (all in the server):
 - `wait_for_change(window?, since_commit?, timeout)`: resolve when the first counted
   event arrives; resolve with `timed_out` at the deadline.
 - `wait_for_quiet(window?, quiet_ms, timeout, after_action?)`: resolve when
-  `now - last_commit_at >= quiet_ms`; re-arm on every counted commit.
+  `now - max(anchor_ts, last counted commit ts) >= quiet_ms`, where `anchor_ts` is the
+  `after_action`'s `ts_ms` when one is given, else the time the wait was issued; every
+  counted commit re-arms the timer. Without a counted commit the anchor is `anchor_ts`
+  alone, so the wait resolves at `anchor_ts + quiet_ms` — immediately when the action
+  is already that old.
 - `observe(until, after_action?, timeout)`: same machinery with an `until` condition;
   `include_image` triggers `RenderWindow` at resolution time, after the condition, so
   the image reflects the settled state.
 - Counted events are filtered by `window_id` (if given) and by `seq > action_seq`
-  (if `after_action` given). `changed_regions` is the union of damage in that window.
+  (if `after_action` given); a *counted commit* is a `SurfaceCommit` that passes those
+  filters, and only commits re-arm the quiet timer. `changed_regions` is the union of
+  damage in that window.
+- `timeout` is a hard bound on every wait: reaching it resolves with `timed_out` (except
+  `until: timeout`, whose horizon is its condition). `quiet` in the observation is
+  evidence evaluated at resolution time, not a promise about the wait's condition —
+  measured from the last counted commit (else the wait start) against the condition's
+  `quiet_ms` for a quiet wait, the runtime default otherwise — so a timed-out `change`
+  wait can legitimately carry `quiet: true` (`protocol.md` §5.4).
 - Timers use `tokio::time`; tests use `tokio::time::pause()` where possible, otherwise
   real time with generous margins. The observer never sleeps in a loop — it waits on
   a `tokio::sync::Notify`/`watch` updated by the event pump.
