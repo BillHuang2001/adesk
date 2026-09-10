@@ -68,19 +68,11 @@ impl ServerError {
                 adesk_observer::Error::UnknownAction(_) => ErrorCode::InvalidRequest,
                 adesk_observer::Error::Internal(_) => ErrorCode::Internal,
             },
-            ServerError::Registry(error) => match error {
-                adesk_app_registry::Error::UnknownApp(_) => ErrorCode::UnknownApp,
-                adesk_app_registry::Error::NoExec { .. } => ErrorCode::NotSupported,
-                adesk_app_registry::Error::InvalidExec { .. }
-                | adesk_app_registry::Error::TryExecNotFound { .. }
-                | adesk_app_registry::Error::Spawn(_) => ErrorCode::LaunchFailed,
-                adesk_app_registry::Error::InvalidEntry { .. }
-                | adesk_app_registry::Error::Io { .. } => ErrorCode::Internal,
-                // `adesk_app_registry::Error` is `#[non_exhaustive]`: anything
-                // added later keeps the registry crate's own pinned mapping
-                // instead of silently degrading to `internal`.
-                _ => error.code(),
-            },
+            // `adesk_app_registry` owns its own mapping; delegate so every code
+            // stays pinned in one place, and an `#[non_exhaustive]` addition
+            // keeps the registry crate's mapping instead of degrading to
+            // `internal`.
+            ServerError::Registry(error) => error.code(),
             ServerError::Inspector(error) => match error {
                 adesk_inspector::Error::InvalidFrame(_)
                 | adesk_inspector::Error::InvalidRequest(_) => ErrorCode::InvalidRequest,

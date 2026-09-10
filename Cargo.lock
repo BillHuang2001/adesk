@@ -147,7 +147,6 @@ dependencies = [
  "adesk-testkit",
  "adesk-viewer",
  "adesk-viewer-proto",
- "adesk-wm",
  "anyhow",
  "async-trait",
  "clap",
