@@ -137,7 +137,7 @@ Rendering:
 - There is **no unified offscreen abstraction** (GL uses `Offscreen<GlesTexture>`, pixman `Offscreen<Image>`), which is why `HeadlessRenderer` is an enum with per-backend render paths; the GL variant is boxed (`Gl(Box<GlesRenderer>)`) to keep the enum small.
 - `render_elements_from_surface_tree` walks the whole surface tree (subsurfaces yes, **popups no**); popups come from the static `PopupManager::popups_for_surface(&WlSurface)` yielding `(PopupKind, Point)` and are collected separately.
 - `adesk-render`'s `Scene` is bottom-to-top; `OutputDamageTracker::render_output` wants front-to-back — the render crate handles the ordering, so this crate only builds `Scene` nodes.
-- The window/output paths render through `adesk_render::{create_target, render_scene}`; the Phase-1 `OutputDamageTracker` sketch is superseded.
+- The window/output paths render through `adesk_render::{create_target, render_scene}`; this crate never uses Smithay's `OutputDamageTracker`.
 - `HeadlessRenderer::render_output(output_size, windows, overlays, region, max_dimension)` — an empty window list is a valid clear frame (this is why `output_size` is passed explicitly).
 
 Event loop:
