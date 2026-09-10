@@ -8,7 +8,7 @@ Everything a test needs to pretend an application is installed and launch it: `.
 
 - `FixtureDir` — `new`, `path`, `search_dir` (the share root), `applications_dir`, `write_entry`, `write_raw`, `remove_entry`, `write_app`.
 - `DesktopEntryFixture` — field-per-key model, builders, `to_desktop_file()`.
-- `TestAppSpec` — `new`, builders, `cli_args()` (single source of the helper CLI grammar), `desktop_entry()`.
+- `TestAppSpec` — `new`, builders (`with_title`, `with_size`, `with_fill`, `with_exit_after`, `with_arg`, `with_exec`), `app_id`, `title`, `exec`, `cli_args()` (single source of the helper CLI grammar), `desktop_entry()`.
 - `TestApp` — `spawn`, `app_id`, `pid`, `is_running`, `wait_for_exit`, `exit`, `kill`.
 - `helper_bin_path(name)` — resolves a helper binary next to the running test executable.
 
