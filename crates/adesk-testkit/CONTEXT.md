@@ -84,7 +84,8 @@ Status: complete — `src/` and `tests/` contain no `todo!()`/`unimplemented!()`
 - `cargo check` does not link, so it runs outside the Nix dev shell; building/running tests needs `./scripts/dev.sh`.
 
 ## Known Issues
-
+- Dead public items with no call site anywhere in the workspace (not exercised by any test, not pinned by the frozen specs, so removable): `FillPattern::gradient_v` (`src/fill.rs:75`), `EventAssert::wait_ordered` (`src/assert/event.rs:356`), `TestEnv::wayland_socket_path` (`src/env.rs:125`), `wait_until_async` (`src/wait.rs:42`) and `poll_until` (`src/wait.rs:69`, both still re-exported from `src/lib.rs:92`), and `WaylandTestClient::pump_until` (`src/wayland/mod.rs:631`; tests use `pump_for`/`roundtrip` instead). The `FillPattern::GradientV` variant itself is *not* dead — `from_cli_arg`/`at` still use it.
+- `TestkitError::AlreadyShutdown` (`src/error.rs:30`) and `TestkitError::ImageMismatch` (`src/error.rs:65`) are never constructed anywhere (shutdown is idempotent and returns `Ok`; pixel comparisons panic while PNG writes return `TestkitError::Io`).
 - `tests/fixtures.rs` prints `Io error: Broken pipe (os error 32)` on stdout while still passing — log noise from the helper-process path, not a failure.
 
 ## Notes for Agents
