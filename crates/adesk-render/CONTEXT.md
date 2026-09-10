@@ -7,6 +7,7 @@ It implements `docs/architecture.md` §5 and serves `docs/protocol.md` §5.4 (`c
 The concrete renderer (`GlesRenderer` over surfaceless EGL, or `PixmanRenderer`) is **created and owned by `adesk-compositor`**; this crate is generic over Smithay 0.7's renderer traits and must never depend on `adesk-compositor`.
 Rendering is on demand only: no frame loop, no continuous composition, no periodic readback.
 A configured `crop` reads back only the requested sub-rectangle, so a small crop never pays for a full-frame readback plus a post-hoc image copy.
+Offscreen targets are reused through a small bounded `TargetPool` keyed by exact size, so repeated captures of the same window/output do not reallocate the ~4 MiB target buffer.
 The crate contains no unsafe code, never panics on a renderer/import/encoding failure, and its pure half (image ops, damage math) works fully headless.
 
 ## API Surface
