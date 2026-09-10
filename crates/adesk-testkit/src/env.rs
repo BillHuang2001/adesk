@@ -26,7 +26,7 @@
 //!
 //! An env-scoped runtime holds the lock for its whole lifetime, so a second env-scoped
 //! runtime started *inside the same test* cannot make progress; the bounded acquire fails
-//! with [`TestkitError::Timeout`](crate::TestkitError::Timeout) instead of hanging the test
+//! with [`TestkitError::Timeout`] instead of hanging the test
 //! binary. Code that mutates the process env itself should hold the same lock (or run in
 //! its own test binary).
 //!
@@ -208,7 +208,7 @@ static PROCESS_ENV_LOCK: Mutex<()> = Mutex::const_new(());
 /// Generous on purpose: an env-scoped runtime holds the lock for its whole lifetime, so
 /// parallel tests in one binary queue behind each other. The bound exists so that a harness
 /// mistake — a second env-scoped runtime inside one test — fails with a
-/// [`TestkitError::Timeout`](crate::TestkitError::Timeout) instead of hanging the test
+/// [`TestkitError::Timeout`] instead of hanging the test
 /// binary forever.
 pub(crate) const PROCESS_ENV_LOCK_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -230,7 +230,7 @@ impl std::fmt::Debug for ProcessEnvLock {
 ///
 /// # Errors
 ///
-/// Returns [`TestkitError::Timeout`](crate::TestkitError::Timeout) if another runtime in
+/// Returns [`TestkitError::Timeout`] if another runtime in
 /// this process holds the lock for longer than the bound.
 pub(crate) async fn lock_process_env() -> Result<ProcessEnvLock> {
     match tokio::time::timeout(PROCESS_ENV_LOCK_TIMEOUT, PROCESS_ENV_LOCK.lock()).await {

@@ -4,7 +4,7 @@
 //! connects to the runtime's socket, binds
 //! `wl_compositor`/`wl_shm`/`xdg_wm_base`/`wl_seat`/`wl_data_device_manager`, creates
 //! `xdg_toplevel`/`xdg_popup` surfaces and commits SHM buffers filled with a
-//! [`FillPattern`](crate::FillPattern). It never reaches into compositor state, so a test that drives this
+//! [`FillPattern`]. It never reaches into compositor state, so a test that drives this
 //! client exercises exactly what an application would.
 //!
 //! ## Seat input recording
@@ -26,7 +26,7 @@
 //! - The **calling thread** owns [`WaylandTestClient`]. It only *sends* requests
 //!   (creating surfaces, attaching buffers, committing) through the [`Connection`]; it
 //!   never reads the socket.
-//! - The **reader thread** owns the [`EventQueue`](wayland_client::EventQueue) created by
+//! - The **reader thread** owns the [`EventQueue`] created by
 //!   `registry_queue_init`. It loops `prepare_read()` → `ReadEventsGuard::read()`
 //!   (blocking on the socket) → `dispatch_pending(&mut *state.lock())`, and after every
 //!   cycle it sends one `PumpEvent` on an unbounded `tokio::sync::mpsc` channel. A read
@@ -57,7 +57,7 @@
 //! ## Deadlines
 //!
 //! Every public wait/pump takes an explicit [`Duration`]: `pump_until`/`roundtrip` return
-//! [`TestkitError::Timeout`](crate::TestkitError::Timeout) when it expires and [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) when
+//! [`TestkitError::Timeout`] when it expires and [`TestkitError::ConnectionClosed`] when
 //! the reader reported EOF; `pump_for` is a "run for this long" pump and returns the
 //! counters it accumulated (with `closed` set if EOF happened meanwhile). There is no
 //! unbounded wait in this module.
@@ -141,11 +141,11 @@ pub(crate) enum PumpEvent {
     },
     /// The reader observed EOF or an unrecoverable read error and has exited; the
     /// connection is dead. Pumps translate this into `PumpStats::closed` and public waits
-    /// into [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed).
+    /// into [`TestkitError::ConnectionClosed`].
     Closed,
     /// The reader hit a dispatch/protocol error and has exited; the payload is the
     /// `Display` rendering of the underlying `DispatchError`. Pumps translate this into
-    /// [`TestkitError::Wayland`](crate::TestkitError::Wayland).
+    /// [`TestkitError::Wayland`].
     Error(String),
 }
 
@@ -197,7 +197,7 @@ impl WaylandTestClient {
     /// Connects to `display_name` inside `$XDG_RUNTIME_DIR`.
     ///
     /// Reads `$XDG_RUNTIME_DIR` (missing or non-absolute is
-    /// [`TestkitError::WaylandConnect`](crate::TestkitError::WaylandConnect)) and delegates to
+    /// [`TestkitError::WaylandConnect`]) and delegates to
     /// [`connect_in`](WaylandTestClient::connect_in). Tests that own their runtime should
     /// prefer `connect_in`, which never consults the environment.
     pub fn connect(display_name: &str) -> Result<WaylandTestClient> {
@@ -222,7 +222,7 @@ impl WaylandTestClient {
     ///
     /// 1. `UnixStream::connect(runtime_dir.join(display_name))` — an absolute path, so the
     ///    client never depends on process environment; failures become
-    ///    [`TestkitError::WaylandConnect`](crate::TestkitError::WaylandConnect).
+    ///    [`TestkitError::WaylandConnect`].
     /// 2. Keep `stream.try_clone()?` for teardown (see the module docs) and hand the
     ///    original to `Connection::from_socket`.
     /// 3. `wayland_client::globals::registry_queue_init::<ClientState>(&conn)` →
@@ -232,7 +232,7 @@ impl WaylandTestClient {
     /// 4. `protocol::bind_globals` binds `wl_compositor` (v4+), `wl_shm` (v1+),
     ///    `xdg_wm_base` (v1+), `wl_seat` (v1+) and `wl_data_device_manager` (v1+) at
     ///    `min(server, interface_max)`; a missing global is
-    ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported).
+    ///    [`TestkitError::Unsupported`].
     /// 5. `data_device_manager.get_data_device(seat, qhandle, ())` creates the client's
     ///    `wl_data_device` (the clipboard object, see [`clipboard`]) and it is handed to
     ///    `ClientState::new` *before* the reader thread starts, so no offer/selection event
@@ -241,7 +241,7 @@ impl WaylandTestClient {
     ///    the event queue and an `UnboundedSender<PumpEvent>`, then wait (bounded by
     ///    [`ROUNDTRIP_TIMEOUT`]) for the real `wl_shm.format` events to arrive. A runtime
     ///    that never advertises `ARGB8888` is
-    ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported): every buffer the
+    ///    [`TestkitError::Unsupported`]: every buffer the
     ///    harness commits is `Argb8888`, so a silent downgrade would corrupt every pixel
     ///    assertion.
     pub fn connect_in(runtime_dir: &Path, display_name: &str) -> Result<WaylandTestClient> {
@@ -582,7 +582,7 @@ impl WaylandTestClient {
     /// `tokio::time::timeout(duration, pump_rx.recv())` in a loop, accumulating
     /// [`PumpStats`]. `PumpEvent::Dispatched` adds one dispatch and `events` events;
     /// `PumpEvent::Closed` sets `closed` and returns immediately; `PumpEvent::Error`
-    /// returns [`TestkitError::Wayland`](crate::TestkitError::Wayland). Expiry is *not* an error: the accumulated stats
+    /// returns [`TestkitError::Wayland`]. Expiry is *not* an error: the accumulated stats
     /// are returned, which is what makes this a "pump for a while" primitive. Already
     /// buffered notifications are drained even when `duration` is zero.
     pub async fn pump_for(&mut self, duration: Duration) -> Result<PumpStats> {
@@ -621,8 +621,8 @@ impl WaylandTestClient {
     /// Like [`pump_for`](WaylandTestClient::pump_for) but the loop ends as soon as
     /// `pred(&stats)` is `true`; the predicate is checked after every notification and once
     /// before the first receive (so an already-satisfied condition returns immediately).
-    /// Expiry returns [`TestkitError::Timeout`](crate::TestkitError::Timeout) with `what` and `timeout`; EOF returns
-    /// [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) *before* the deadline (a closed connection can
+    /// Expiry returns [`TestkitError::Timeout`] with `what` and `timeout`; EOF returns
+    /// [`TestkitError::ConnectionClosed`] *before* the deadline (a closed connection can
     /// never satisfy a predicate, so waiting for the timeout would be a lie).
     pub async fn pump_until(
         &mut self,
@@ -661,8 +661,8 @@ impl WaylandTestClient {
     /// Flushes pending requests and waits for one full reader cycle.
     ///
     /// `conn.flush()` then the next [`PumpEvent`] with an internal
-    /// [`ROUNDTRIP_TIMEOUT`] bound; [`TestkitError::Timeout`](crate::TestkitError::Timeout) with `what = "wayland
-    /// roundtrip"` on expiry and [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) on EOF. The read
+    /// [`ROUNDTRIP_TIMEOUT`] bound; [`TestkitError::Timeout`] with `what = "wayland
+    /// roundtrip"` on expiry and [`TestkitError::ConnectionClosed`] on EOF. The read
     /// happens on the reader thread, never here, so this can be called from async tests
     /// without blocking the executor.
     pub async fn roundtrip(&mut self) -> Result<()> {
@@ -685,8 +685,8 @@ impl WaylandTestClient {
     /// Flushes pending requests to the compositor.
     ///
     /// `self.conn.flush()`, mapping `WaylandError::Io` to
-    /// [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) when the socket is gone and to
-    /// [`TestkitError::Wayland`](crate::TestkitError::Wayland) otherwise. Requests are buffered by `wayland-client`, so
+    /// [`TestkitError::ConnectionClosed`] when the socket is gone and to
+    /// [`TestkitError::Wayland`] otherwise. Requests are buffered by `wayland-client`, so
     /// callers that do not pump may need this to make a request visible to the runtime.
     pub fn flush(&mut self) -> Result<()> {
         self.conn.flush().map_err(|err| map_wayland_error(&err))
@@ -698,7 +698,7 @@ impl WaylandTestClient {
     /// fails with EOF and the thread sends [`PumpEvent::Closed`] and exits), takes the
     /// reader handle and joins it inside
     /// `tokio::time::timeout(CLOSE_TIMEOUT, tokio::task::spawn_blocking(...))`;
-    /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) with `what = "wayland reader thread"` if it does not exit.
+    /// [`TestkitError::Timeout`] with `what = "wayland reader thread"` if it does not exit.
     /// Idempotent and safe to call after the reader already died. Dropping the client
     /// without calling this detaches the reader instead of waiting (see the module docs).
     pub async fn close(mut self) -> Result<()> {

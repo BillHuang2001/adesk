@@ -2,7 +2,7 @@
 //!
 //! `#![forbid(unsafe_code)]` rules out `memfd_create`/`mmap`, so the pool is backed by an
 //! anonymous `tempfile::tempfile()` whose size is set with [`File::set_len`]. Pixels are
-//! written with [`FileExt::write_all_at`](std::os::unix::fs::FileExt::write_all_at) (positioned writes, no `unsafe`), and the file
+//! written with [`FileExt::write_all_at`] (positioned writes, no `unsafe`), and the file
 //! descriptor is handed to `wl_shm.create_pool` through `AsFd::as_fd`.
 //!
 //! ## Pixel format and byte order

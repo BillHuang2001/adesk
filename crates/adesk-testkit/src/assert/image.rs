@@ -1,4 +1,4 @@
-//! Pixel assertions over [`ImageBuffer`](adesk_core::ImageBuffer).
+//! Pixel assertions over [`ImageBuffer`].
 //!
 //! [`ImageAssert`] is a *view* over a borrowed image: it never copies pixels and never owns
 //! the buffer, so it is cheap to construct inside a test body. Comparison methods panic on

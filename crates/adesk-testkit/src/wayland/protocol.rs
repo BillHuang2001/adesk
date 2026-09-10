@@ -8,7 +8,7 @@
 //! 4 for wayland-client 0.31; the pinned bindings are generated from the protocol XML at
 //! compile time, so the bounds here are version-negotiated with the runtime like any other
 //! global). A missing global, or a `wl_shm` that never advertised `ARGB8888`, is a hard
-//! [`TestkitError::Unsupported`](crate::TestkitError::Unsupported) rather than a silent downgrade: the harness must fail
+//! [`TestkitError::Unsupported`] rather than a silent downgrade: the harness must fail
 //! loudly when the runtime cannot do what the tests need.
 //!
 //! `wl_seat` is what makes input observable over the real protocol path: the client creates
@@ -143,7 +143,7 @@ impl Globals {
     ///
     /// The test client commits every buffer as `Argb8888`, so
     /// [`WaylandTestClient::connect_in`](super::WaylandTestClient::connect_in) fails with
-    /// [`TestkitError::Unsupported`](crate::TestkitError::Unsupported) when this is `false`.
+    /// [`TestkitError::Unsupported`] when this is `false`.
     pub fn supports_argb8888(&self) -> bool {
         self.shm_formats.contains(&wl_shm::Format::Argb8888)
     }
@@ -189,10 +189,10 @@ impl Globals {
 ///    (`1..=4`). `GlobalList::bind`
 ///    returns the lower of the advertised version and the requested maximum, which is the
 ///    negotiation rule.
-/// 2. `BindError::NotPresent` maps to
-///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported)("compositor does not advertise `<interface>`") and
-///    `BindError::UnsupportedVersion` to `Unsupported`("`<interface>` vN is too old;
-///    need vM"), so a misconfigured runtime fails with a named capability, never a panic.
+/// 2. `BindError::NotPresent` maps to [`TestkitError::Unsupported`] ("compositor does not
+///    advertise `<interface>`") and `BindError::UnsupportedVersion` to
+///    `Unsupported`("`<interface>` vN is too old; need vM"), so a misconfigured runtime
+///    fails with a named capability, never a panic.
 /// 3. The returned [`Globals`] seeds its formats from [`supported_formats`], because
 ///    `wl_shm.format` events only arrive on the event queue: the caller must complete a
 ///    reader cycle before `supports_argb8888()` means anything, then re-read the real

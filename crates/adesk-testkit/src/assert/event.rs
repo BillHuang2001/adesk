@@ -8,7 +8,7 @@
 //!   failure can be diagnosed from the full causal history instead of the single event that
 //!   did not arrive.
 //! - **Every wait is bounded.** Waits take an explicit [`Duration`] and fail with
-//!   [`TestkitError::Timeout`](crate::TestkitError::Timeout); there is no unbounded
+//!   [`TestkitError::Timeout`]; there is no unbounded
 //!   `recv()` in the harness. Negative assertions
 //!   ([`EventAssert::expect_none`]) intentionally consume their whole timeout.
 //! - **Ordering is explicit.** [`EventAssert::wait_ordered`] waits for a sequence under a
@@ -244,11 +244,11 @@ impl EventAssert {
     ///
     /// Errors:
     ///
-    /// - [`TestkitError::Lagged`](crate::TestkitError::Lagged)` { skipped }` when the
+    /// - [`TestkitError::Lagged`]` { skipped }` when the
     ///   broadcast channel dropped events because the tap fell behind. The dropped events
     ///   are **not** recorded, so tests must treat a lagged tap as a harness failure instead
     ///   of reasoning about an incomplete history.
-    /// - [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) when the
+    /// - [`TestkitError::ConnectionClosed`] when the
     ///   runtime shut down and the sender was dropped; this is the normal end of the stream.
     pub fn try_recv(&mut self) -> Result<Option<RuntimeEvent>> {
         match self.rx.try_recv() {
@@ -266,8 +266,8 @@ impl EventAssert {
     ///
     /// Repeatedly calls [`EventAssert::try_recv`] until it returns `Ok(None)` and returns
     /// the events received by *this* call in order (events already in [`EventAssert::seen`]
-    /// are not repeated). A [`TestkitError::Lagged`](crate::TestkitError::Lagged) or
-    /// [`TestkitError::ConnectionClosed`](crate::TestkitError::ConnectionClosed) aborts the
+    /// are not repeated). A [`TestkitError::Lagged`] or
+    /// [`TestkitError::ConnectionClosed`] aborts the
     /// drain and is returned, so a test never silently loses history.
     pub fn drain(&mut self) -> Result<Vec<RuntimeEvent>> {
         let mut drained = Vec::new();
@@ -292,7 +292,7 @@ impl EventAssert {
     /// are kept in `seen`. Errors from `try_recv` abort the wait and are returned unchanged.
     /// When the queue is empty the wait suspends on `broadcast::Receiver::recv()` rather than
     /// polling. At the deadline it returns [`crate::wait::timeout_error`]`(what, timeout)`,
-    /// i.e. [`TestkitError::Timeout`](crate::TestkitError::Timeout); `what` must name the
+    /// i.e. [`TestkitError::Timeout`]; `what` must name the
     /// awaited condition (for example `"window_created for org.example.demo"`). The whole
     /// wait is bounded by the single deadline; it never restarts.
     pub async fn wait_for(
@@ -325,7 +325,7 @@ impl EventAssert {
     ///
     /// The timeout error's `what` is `&'static str`, so the deadline path leaks
     /// `expected.describe()` (`Box::leak` on a small string) to produce a precise
-    /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) message. The leak is bounded
+    /// [`TestkitError::Timeout`] message. The leak is bounded
     /// by the number of waits that actually time out — a test that reaches it has already
     /// failed — and keeps a single timeout shape across the harness
     /// ([`crate::wait::timeout_error`]).
@@ -349,7 +349,7 @@ impl EventAssert {
     /// whole sequence is satisfied, returns the matched events in order. The *whole* sequence
     /// shares one deadline — it does not restart per element, so
     /// `wait_ordered(&[a, b], 5s)` can never take 10 s. On expiry, returns
-    /// [`TestkitError::Timeout`](crate::TestkitError::Timeout) for the element that never
+    /// [`TestkitError::Timeout`] for the element that never
     /// arrived, with `what` built from its [`Expected::describe`] exactly as in
     /// [`EventAssert::wait_for_expected`]. An empty `expected` returns `Ok(vec![])`
     /// immediately.
@@ -389,7 +389,7 @@ impl EventAssert {
     /// Waits for the **full** `timeout` (unrelated events do not end the wait early) and
     /// records every received event in [`EventAssert::seen`]. Returns `Ok(())` when the
     /// deadline passes with no match. Returns
-    /// [`TestkitError::Unexpected`](crate::TestkitError::Unexpected)` { message }` as soon
+    /// [`TestkitError::Unexpected`]` { message }` as soon
     /// as a match arrives, with the offending event's `seq`, `ts_ms` and kind in `message`.
     /// Errors from `try_recv` abort the wait and are returned unchanged.
     ///
