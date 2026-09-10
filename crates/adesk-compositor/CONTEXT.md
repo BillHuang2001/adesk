@@ -86,7 +86,7 @@ Code rules:
 | Protocol handler impls + delegate macros | `src/protocols/` |
 | Input injection internals (keycode, keymap, injector) | `src/input/` |
 | Headless renderer + element collection | `src/render/` |
-| Smoke tests (public API only) + integration test plan | `tests/` |
+| `compositor_smoke.rs` (public API only) + `window_lifecycle.rs`/`input_delivery.rs`/`popups.rs`/`clipboard.rs` integration suites + `integration_plan.md` scenario/suite map | `tests/` |
 
 `src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
 `src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions + keyboard/pointer handle getters).
@@ -96,7 +96,7 @@ Sibling cross-references (read-only from this node; escalate writes to the paren
 - `../adesk-core/` — domain types and `RuntimeEvent` (implemented).
 - `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (implemented; consumed by `WmBridge`).
 - `../adesk-render/` — crop/downscale/readback/encoding and the `Scene` pipeline used by both render paths (implemented).
-- `../adesk-testkit/` — integration harness the test plan depends on (Phase 4).
+- `../adesk-testkit/` — implemented integration harness the suites consume: in-process runtime, temp `XDG_RUNTIME_DIR`, Wayland test client (input and clipboard recorders), image assertions, event tap.
 
 ## Design Decisions
 
@@ -137,7 +137,7 @@ Rendering:
 - There is **no unified offscreen abstraction** (GL uses `Offscreen<GlesTexture>`, pixman `Offscreen<Image>`), which is why `HeadlessRenderer` is an enum with per-backend render paths; the GL variant is boxed (`Gl(Box<GlesRenderer>)`) to keep the enum small.
 - `render_elements_from_surface_tree` walks the whole surface tree (subsurfaces yes, **popups no**); popups come from the static `PopupManager::popups_for_surface(&WlSurface)` yielding `(PopupKind, Point)` and are collected separately.
 - `adesk-render`'s `Scene` is bottom-to-top; `OutputDamageTracker::render_output` wants front-to-back — the render crate handles the ordering, so this crate only builds `Scene` nodes.
-- The window/output paths render through `adesk_render::{create_target, render_scene}`; the Phase-1 `OutputDamageTracker` sketch is superseded.
+- The window/output paths render through `adesk_render::{create_target, render_scene}`; this crate never uses Smithay's `OutputDamageTracker`.
 - `HeadlessRenderer::render_output(output_size, windows, overlays, region, max_dimension)` — an empty window list is a valid clear frame (this is why `output_size` is passed explicitly).
 
 Event loop:
@@ -158,6 +158,8 @@ Event loop:
 - `WmBridge` owns the surface registry: toplevels, subsurfaces and popups resolve to a `WindowId`; commit counters and damage are per-window and window-relative.
 - Popups are tracked manually (`PopupAppeared`/`PopupDisappeared` with owner `window_id` + `popup_id`) because Smithay's element walker skips them.
 - `new_popup` confirms the positioner geometry (`PositionerState::get_geometry`) with the initial `PopupSurface::send_configure` *before* registering the popup, so the recorded window-relative origin equals the configured placement; a positioner without a size confirms `(0, 0)` at `0x0` and the popup picks its own size. v1 applies no popup constraint adjustment.
+- PopupManager wiring: `State::popup_manager` (Smithay `desktop::PopupManager`) is initialized in `State::new`; `new_popup` registers each popup via `track_popup(PopupKind::Xdg)` (a rejection is logged at debug, never fatal) and the compositor `commit` handler forwards to `popup_manager.commit` before the ADesk-side `on_surface_commit`; this is what makes `PopupManager::popups_for_surface` find popups for element collection, so popup pixels compose into the owner's `RenderWindow`/`RenderOutput`.
+- Data-device focus invariant: `apply_activate` in `src/state.rs` is the single keyboard-focus choke point; it calls Smithay's `set_data_device_focus(&display, &seat, surface.client())` on every focus change so the data-device focus always equals keyboard focus (v1: one seat, focus == active window; the destroyed-target fallback passes `None` and clears it). Without this call Smithay's `send_selection` skips every `wl_data_device` client and no `data_offer`/`selection` is ever delivered.
 - Launch correlation: `WmBridge::note_launch` records a launch for compositor-local correlation; `RuntimeCommand::NoteLaunch` (sent by the server's `launch_app` right after a successful spawn) feeds it, so the compositor's own `WindowCreated` broadcast carries `launch_id`. The server-side `adesk_app_registry::Correlator` additionally stamps the events the server projects.
 - `src/dispatch.rs` is declared from `src/run.rs` with `#[path = "dispatch.rs"] pub(crate) mod dispatch;` (module path `crate::run::dispatch`).
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
@@ -181,7 +183,7 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 85 tests pass today):
+Unit tests (colocated `#[cfg(test)]`; 85 tests pass):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
@@ -189,7 +191,7 @@ Unit tests (colocated `#[cfg(test)]`; 85 tests pass today):
 - `input::keycode`: named keys, aliases (case-insensitive), F1–F24, printable chars, chord order/display, chord release rejection, unknown/empty → `invalid_request`.
 - `input::keymap`: letters unshifted, shifted chars at level 1, unknown keysyms, uncompilable settings → keyboard error (needs `XKB_CONFIG_ROOT`).
 - `input::injector`: logical buttons → evdev codes.
-- `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level; pixel proof with a real tracked-but-inactive window (and the composed window's popups) arrives with the queued `tests/integration_plan.md` scenarios.
+- `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level; pixel proof in the suites covers `RenderWindow` only (`window_lifecycle.rs` matches the committed pattern, `popups.rs` asserts the popup's own fill inside the owner's frame), so the residual gap is pixel proof that a tracked-but-inactive window is excluded from a `RenderOutput` frame — no test covers it, and the exclusion rests on the selection/scene-level `visible_index` tests.
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
@@ -203,12 +205,17 @@ Smoke tests (`tests/compositor_smoke.rs`; 3 tests, public API only, no `adesk-te
 - They bind a real Wayland socket, so each test installs a private `0700` temp `XDG_RUNTIME_DIR` (restored on drop) and holds a process-wide mutex for its whole body, because the env var is process-global and the tests share one binary.
 - This is required in this sandbox: `/run/user/1000` is a **read-only filesystem**, so the ambient `XDG_RUNTIME_DIR` cannot host a socket.
 
-Integration tests: defined, not yet implemented — `tests/integration_plan.md` (5 scenarios) needs `adesk-testkit` helpers; ground rules are a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap assertions instead of sleeps, GL-only tests behind `ADESK_TEST_GL=1`.
+Integration tests (implemented; driven through the `adesk-testkit` dev-dependency on a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap ordering with explicit deadlines and no sleeps): 15 tests in four files, and `tests/integration_plan.md` maps each scenario to its suite — the plan holds the §1–§5 specs and names the file per scenario group, while each suite's module doc names the scenario it implements.
+- `tests/window_lifecycle.rs` (2): §1 a window appears with a tiling configure (event order, `QueryState`, `RenderWindow` pixels matching the committed pattern) and §2 focus follows activation (activation/focus event order with the reply after both events, no re-configure on activation, unknown `WindowId` → `unknown_window`).
+- `tests/input_delivery.rs` (6): §3 the real seat path — a normalized `PointerMove` lands on the window model's point, press/release are two ordered `wl_pointer.button` events, `wl_pointer.axis` is negative-vertical and framed, `ctrl+c` is delivered as an ordered chord press with a reverse release, and a released chord or an injection with no focused window is `invalid_request` without panicking.
+- `tests/popups.rs` (2): §4 popup lifecycle — `popup_appeared`/`popup_disappeared` name the owner, the popup's pixels compose into the owner's `RenderWindow` under the window's one commit counter, and destroying the owner with a popup open reports the popup's disappearance first.
+- `tests/clipboard.rs` (5): §5 two real connections exchanging `wl_data_device` selections — exact bytes read back, a second `set_selection` supersedes the first offer, an unrequested mime is not delivered, activation moves the selection target, and no runtime event carries clipboard payload.
+- All four suites are pixman-only; the crate's GL-only path stays behind `ADESK_TEST_GL=1` (the lib `render::headless` clear-frame test).
 
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (85 lib + 3 smoke + doctests)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (85 lib + 15 integration + 3 smoke + 1 doc-test pass, 1 ignored doc-fence)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
@@ -218,12 +225,11 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
-- The `adesk-render` API vs. the element-walker assumptions is verified only through the crate's own tests and the GL clear-frame path; end-to-end pixel assertions arrive with `adesk-testkit` (Phase 4).
 - A late `xdg_toplevel.app_id` (set after the first buffer commit) is not written back into the window model: `WmBridge::app_id_changed` (src/wm.rs:805) updates only its own change-detection map and the launch ledger, and `adesk-wm` has no app-id setter, so `WindowInfo.app_id`/`list_windows` keep the map-time value. Clients that set `app_id` before their first commit are unaffected.
 
 ## Dependencies
 
-- Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`create_target`/`render_scene`/readback/image conversion).
+- Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`create_target`/`render_scene`/readback/image conversion`); dev-dependency `adesk-testkit` (in-process runtime, Wayland test client, image assertions — used only by the crate-local integration suites).
 - External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `wayland-server 0.31`; `calloop 0.14`; `tokio 1` (sync/rt/time/net); `thiserror 2`; `tracing 0.1`; `libc 0.2`.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.

@@ -31,4 +31,5 @@ tracing.workspace = true
 wayland-server.workspace = true
 
 [dev-dependencies]
+adesk-testkit.workspace = true
 tokio.workspace = true

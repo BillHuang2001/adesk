@@ -43,6 +43,10 @@ impl CompositorHandler for State {
         // commit observable as runtime state, and only then can the surface be
         // rendered. Damage reporting happens after that.
         on_commit_buffer_handler::<State>(surface);
+        // Smithay's popup tree ingests a popup that had no parent yet only once that
+        // popup commits, and the render path reads the tree: keep the manager current
+        // for every surface commit.
+        self.popup_manager.commit(surface);
         self.on_surface_commit(surface);
     }
 }

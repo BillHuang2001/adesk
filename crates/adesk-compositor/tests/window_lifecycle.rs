@@ -1,0 +1,645 @@
+//! Integration scenarios 1 and 2 of `tests/integration_plan.md`: window lifecycle and
+//! focus-follows-activation.
+//!
+//! Both tests start their own real runtime in-process (pixman renderer, one compositor
+//! thread, one virtual output) and drive it the way an ordinary application does: a
+//! `wayland-client` toplevel over the real protocol path, `RuntimeCommand`s on the command
+//! channel, and the compositor's own `RuntimeEvent` broadcast as the assertion surface.
+//!
+//! Rules this file follows (plan §"Ground rules"):
+//!
+//! - **No display, GPU, network or installed application.** `apply_env(false)` keeps the
+//!   process env scoped to the runtime's startup only (nothing is launched here), so both
+//!   tests run in parallel; the Wayland client connects by absolute socket path.
+//! - **Events are the assertion surface, not sleeps.** Every wait is bounded by [`DEADLINE`]
+//!   and positive assertions wait for the event that proves them. Negative assertions are
+//!   bounded by [`QUIET_BOUND`] and say so; nothing in this file sleeps or polls in a loop.
+//! - **Tiling geometry comes from the window model**, never from a hard-coded `1280x800`:
+//!   expectations are built from [`TestRuntime::output_size`], [`TestRuntime::tiled_rect`]
+//!   and [`expected_window_geometry`].
+//! - **`RenderWindow` only where pixels are the assertion.**
+//!
+//! # Deviation from the plan (scenario 2, tiling configures)
+//!
+//! The plan expects "`A` receives a new tiling configure for the full output; `B` receives
+//! none" when `A` is activated. The implemented policy does **not** re-configure on
+//! activation: `adesk-wm`'s `activate` returns exactly `[WmAction::Activate { id }]`
+//! (`crates/adesk-wm/src/policy.rs`, "Activates a window (`activate_window`, and the
+//! auto-focus on map)"), and `ConfigureWindow` — the only action that sends
+//! `xdg_toplevel.configure` (`crates/adesk-compositor/src/state.rs`, `apply_decision` →
+//! `send_tiling_configure`) — is returned by `on_map` and `on_output_size` only. Activation
+//! is therefore a pure focus/state change: it re-tiles nothing, because every tracked
+//! window already has the tiled geometry (both windows are tiled to the full output at map
+//! time, and `QueryState` proves they still are afterwards).
+//!
+//! `focus_follows_activation` proves that faithfully instead of weakening silently: A's and
+//! B's configure state is *unchanged* by the activation (the plan's "`B` receives none"
+//! plus the symmetric "neither does A"), while the tiling state that the configure would
+//! have carried is asserted positively — `geometry == tiled_rect()` for both windows and
+//! A's last configure being the full-output tiling configure with the `activated` state.
+
+use std::time::Duration;
+
+use adesk_compositor::{RenderedFrame, RuntimeCommand, StateSnapshot};
+use adesk_core::{ErrorCode, WindowId, WindowState};
+use adesk_testkit::{
+    expected_window_geometry, wait_until, AppId, ConfiguredSize, EventAssert, Expected,
+    FillPattern, ImageAssert, ImageBuffer, KeyboardEvent, Rect, Result, RuntimeEvent, Size,
+    TestRuntime, TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient,
+};
+use tokio::sync::oneshot;
+
+/// Every bounded wait in this file uses this deadline (10 s, the harness bound).
+const DEADLINE: Duration = Duration::from_secs(10);
+
+/// Bound for the bounded negative assertions ("no event", "no configure").
+///
+/// A negative claim can only be proven by waiting, and this is deliberately *not*
+/// [`DEADLINE`]: the compositor serves a command (and emits whatever it emits) within
+/// microseconds of receiving it — the positive waits above observe the same path in
+/// single-digit milliseconds — so a quarter second is orders of magnitude longer than the
+/// latency of the event being ruled out, while a failing test still reports fast.
+const QUIET_BOUND: Duration = Duration::from_millis(250);
+
+/// `xdg_toplevel.state.activated`, the `xdg-shell` protocol value of the enum entry.
+const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
+
+/// App id and title of scenario 1's toplevel (echoed back by `window_created`).
+const APP_ID: &str = "org.example.lifecycle";
+const TITLE: &str = "Lifecycle";
+
+/// App ids of scenario 2's two toplevels (the ids the runtime reports back).
+const APP_A: &str = "org.example.focus.a";
+const APP_B: &str = "org.example.focus.b";
+
+/// A runtime whose Wayland socket a client can connect to.
+///
+/// `apply_env(false)`: no application is launched in this file, so the runtime scopes the
+/// process env across startup only and releases the env lock as soon as the compositor's
+/// socket is bound in its own temp dir. The Wayland client connects by absolute socket
+/// path, so both tests stay independent and parallel.
+fn test_config() -> TestRuntimeConfig {
+    TestRuntimeConfig::new().with_apply_env(false)
+}
+
+/// Whether a configure carries the `activated` toplevel state.
+///
+/// [`ConfiguredSize::states`] keeps the array exactly as the wire carried it: native-endian
+/// `u32` state codes as raw bytes (the harness documents this on the field, and decodes
+/// `wl_keyboard.enter.keys` the same way), so the codes are read back with
+/// [`u32::from_ne_bytes`] in 4-byte chunks. A trailing partial word is dropped rather than
+/// panicking, exactly like the harness does it.
+fn configure_is_activated(configure: &ConfiguredSize) -> bool {
+    configure
+        .states
+        .chunks_exact(4)
+        .map(|chunk| u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        .any(|state| state == XDG_TOPLEVEL_STATE_ACTIVATED)
+}
+
+/// Reads the compositor's current state through `QueryState`.
+///
+/// The reply arrives on the oneshot the command carries; the compositor drops it only when
+/// the thread is gone, which is a harness failure and is reported as such.
+async fn query_state(runtime: &TestRuntime) -> adesk_core::Result<StateSnapshot> {
+    let (reply, answer) = oneshot::channel();
+    runtime
+        .compositor()
+        .send(RuntimeCommand::QueryState { reply })
+        .map_err(adesk_core::Error::from)?;
+    answer
+        .await
+        .map_err(|_| adesk_core::Error::internal("compositor dropped the query_state reply"))
+}
+
+/// Sends `ActivateWindow` and returns its reply.
+///
+/// Not `?`-unwrapped on purpose: scenario 2 asserts on the reply itself (a successful
+/// activation and, separately, the `unknown_window` failure).
+async fn activate_window(runtime: &TestRuntime, window_id: WindowId) -> adesk_core::Result<()> {
+    let (reply, answer) = oneshot::channel();
+    runtime
+        .compositor()
+        .send(RuntimeCommand::ActivateWindow { window_id, reply })
+        .map_err(adesk_core::Error::from)?;
+    answer
+        .await
+        .map_err(|_| adesk_core::Error::internal("compositor dropped the activate_window reply"))?
+}
+
+/// Renders one window at its natural size (`region`/`max_dimension` `None`).
+async fn render_window(
+    runtime: &TestRuntime,
+    window_id: WindowId,
+) -> adesk_core::Result<RenderedFrame> {
+    let (reply, answer) = oneshot::channel();
+    runtime
+        .compositor()
+        .send(RuntimeCommand::RenderWindow {
+            window_id,
+            region: None,
+            max_dimension: None,
+            reply,
+        })
+        .map_err(adesk_core::Error::from)?;
+    answer
+        .await
+        .map_err(|_| adesk_core::Error::internal("compositor dropped the render_window reply"))?
+}
+
+/// Maps one toplevel on `client` and returns it with the runtime's window id.
+///
+/// Awaits the map-time `window_created` and `window_activated` (the broadcast does not
+/// replay, and the id only exists in the event) and the client's `wl_keyboard.keymap`. The
+/// keymap is the seat-readiness barrier the harness's input tests use: the client creates
+/// its `wl_pointer`/`wl_keyboard` from the same `wl_seat.capabilities` event, so once the
+/// keymap has been delivered, an activation has seat objects to reach.
+async fn map_toplevel(
+    runtime: &TestRuntime,
+    client: &WaylandTestClient,
+    events: &mut EventAssert,
+    app_id: &str,
+    title: &str,
+) -> Result<(TestWindow, WindowId)> {
+    let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;
+    let configure = window.wait_for_configure(DEADLINE)?;
+    assert_eq!(
+        configure.size(),
+        runtime.tiled_rect().size(),
+        "the tiling policy configures the toplevel, not the size the client asked for"
+    );
+    window.apply_configure()?;
+    window.commit_frame(FillPattern::default())?;
+
+    let created = events
+        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(app_id)), DEADLINE)
+        .await?;
+    let window_id = created
+        .window_id()
+        .expect("window_created carries a window id");
+    // A mapped toplevel takes the visible slot and the keyboard focus; injection before
+    // this point would have no focus target.
+    events
+        .wait_for_expected(&Expected::WindowActivated(window_id), DEADLINE)
+        .await?;
+    client.wait_for_keyboard_event(
+        DEADLINE,
+        "wl_keyboard.keymap",
+        |event| matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0),
+    )?;
+    Ok((window, window_id))
+}
+
+/// Index of the newest recorded keyboard event satisfying `predicate`.
+fn last_keyboard_index(
+    client: &WaylandTestClient,
+    predicate: impl Fn(&KeyboardEvent) -> bool,
+) -> Option<usize> {
+    client.keyboard_events().iter().rposition(predicate)
+}
+
+/// Asserts the recorded history is strictly increasing in `seq`.
+///
+/// `seq` is allocated by the compositor's single `EventSink` counter and a broadcast tap
+/// that never lagged receives it in allocation order, so this is scenario 1's "`seq`
+/// strictly greater than the previous event" applied to the whole history.
+fn assert_seqs_increase(seen: &[RuntimeEvent]) {
+    for pair in seen.windows(2) {
+        assert!(
+            pair[0].seq() < pair[1].seq(),
+            "seq must increase, got {:?} (seq {}) before {:?} (seq {})",
+            pair[0].kind(),
+            pair[0].seq(),
+            pair[1].kind(),
+            pair[1].seq()
+        );
+    }
+}
+
+/// Scenario 1: a window appears with a tiling configure.
+///
+/// One client, one toplevel, one full-output commit. Proves the configure the compositor
+/// sends before the first commit (tiled size, `activated`), the `window_created` event and
+/// the window model behind it (`QueryState`), the `surface_commit` event with its damage,
+/// and finally the committed pixels through `RenderWindow` — in that causal order, with no
+/// screenshot loop and no sleep.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn window_appears_with_tiling_configure() -> Result<()> {
+    let runtime = TestRuntime::start_with(test_config()).await?;
+    // The event broadcast never replays: tap before the commit that maps the surface.
+    let mut events = EventAssert::tap(&runtime);
+
+    let output = runtime.output_size();
+    let tiled = runtime.tiled_rect();
+    // A checker fill is the pixel ground truth below and is not a single color, so a blank
+    // or uniform frame can never satisfy the pattern assertion.
+    let fill = FillPattern::checker(16, [255, 0, 0, 255], [0, 0, 255, 255]);
+
+    let wayland = runtime.wayland_client()?;
+    // The client asks for exactly the output size; the tiling policy decides the geometry.
+    let window =
+        wayland.create_toplevel(ToplevelSpec::new(APP_ID, TITLE, output).with_fill(fill))?;
+
+    // --- the configure the compositor sends on registration -------------------------
+    let configure = window.wait_for_configure(DEADLINE)?;
+    assert_eq!(
+        configure.size(),
+        output,
+        "the initial tiling configure is the whole output, got {configure:?}"
+    );
+    assert_eq!(
+        tiled,
+        expected_window_geometry(output),
+        "tiling comes from the wm policy, not from this test"
+    );
+    assert_eq!(configure.size(), tiled.size());
+    assert!(
+        configure.serial > 0,
+        "a configure carries the serial the client acks"
+    );
+    assert!(
+        configure_is_activated(&configure),
+        "the visible toplevel is configured with the activated state, states = {:?}",
+        configure.states
+    );
+
+    window.apply_configure()?;
+    // The committed SHM buffer is exactly the configured (output) size and damages all of
+    // it — the damage the compositor reports below must come from this commit.
+    window.commit_frame(fill)?;
+    assert_eq!(window.size(), output);
+    assert_eq!(window.damage_hint(), Some(Rect::from_size(output)));
+
+    // --- window_created -------------------------------------------------------------
+    let created = events
+        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
+        .await?;
+    let RuntimeEvent::WindowCreated {
+        window_id,
+        app_id,
+        title,
+        seq: created_seq,
+        ..
+    } = &created
+    else {
+        panic!("wait_for_expected(WindowCreatedFor({APP_ID})) returned {created:?}");
+    };
+    let id = *window_id;
+    assert!(id.0 >= 1, "window ids are allocated from 1, got {id}");
+    assert_eq!(
+        created.window_id(),
+        Some(id),
+        "the accessor and the payload must agree"
+    );
+    assert_eq!(app_id.as_ref().map(AppId::as_str), Some(APP_ID));
+    assert_eq!(title.as_deref(), Some(TITLE));
+    // Mapping also takes the visible slot (scenario 2 exercises the focus move itself).
+    events
+        .wait_for_expected(&Expected::WindowActivated(id), DEADLINE)
+        .await?;
+
+    // --- the window model behind the events -----------------------------------------
+    let snapshot = query_state(&runtime).await?;
+    assert_eq!(
+        snapshot.len(),
+        1,
+        "exactly one window is tracked, got {:?}",
+        snapshot.windows
+    );
+    let info = snapshot
+        .window(id)
+        .expect("the created window is listed by QueryState");
+    assert_eq!(info.id, id);
+    assert_eq!(info.app_id.as_ref().map(AppId::as_str), Some(APP_ID));
+    assert_eq!(info.title.as_deref(), Some(TITLE));
+    assert!(info.mapped, "a committed toplevel is mapped");
+    assert_eq!(info.state, WindowState::Active);
+    assert_eq!(
+        info.geometry, tiled,
+        "the window is tiled to the whole virtual output"
+    );
+    assert_eq!(info.geometry, expected_window_geometry(output));
+    assert!(
+        info.last_commit_seq >= 1,
+        "the model counted the mapping commit, got {}",
+        info.last_commit_seq
+    );
+    assert_eq!(snapshot.active_window_id, Some(id));
+    assert_eq!(snapshot.keyboard_focus, Some(id));
+    assert!(
+        snapshot.seq >= *created_seq,
+        "the snapshot watermark ({}) covers the creation event ({created_seq})",
+        snapshot.seq
+    );
+
+    // --- surface_commit: the first commit of the window's surface tree ---------------
+    let commit = events
+        .wait_for_expected(&Expected::SurfaceCommit(id), DEADLINE)
+        .await?;
+    let RuntimeEvent::SurfaceCommit {
+        window_id: committed_window,
+        commit_seq,
+        damage,
+        ..
+    } = &commit
+    else {
+        panic!("wait_for_expected(SurfaceCommit({id})) returned {commit:?}");
+    };
+    assert_eq!(Some(*committed_window), commit.window_id());
+    assert_eq!(*committed_window, id);
+    assert!(
+        *commit_seq >= 1,
+        "the first commit of a surface tree is 1, got {commit_seq}"
+    );
+    assert!(!damage.is_empty(), "a full-buffer commit damages something");
+    // The damage is window-relative: it must intersect the committed (whole-window) area.
+    let committed_area = Rect::from_size(output);
+    let touched = damage.clip(&committed_area);
+    assert_eq!(
+        touched.bounds(),
+        Some(committed_area),
+        "damage {damage:?} must cover the committed area {committed_area:?}"
+    );
+
+    // --- the pixels ----------------------------------------------------------------
+    let frame = render_window(&runtime, id).await?;
+    assert_eq!(
+        frame.size(),
+        tiled.size(),
+        "RenderWindow without a region renders the window at its natural (tiled) size"
+    );
+    assert_eq!(
+        frame.commit_seq, info.last_commit_seq,
+        "the frame carries the commit sequence it reflects"
+    );
+    ImageAssert::new(&frame.image).matches_pattern(fill);
+    // Non-vacuity: the assertion above must not be satisfiable by an empty frame.
+    let blank = ImageBuffer::new_rgba(frame.image.width, frame.image.height);
+    ImageAssert::new(&frame.image).differs_from(&blank);
+
+    assert_seqs_increase(events.seen());
+
+    wayland.close().await?;
+    runtime.shutdown().await
+}
+
+/// Scenario 2: focus follows activation.
+///
+/// Two clients with one toplevel each: `A` maps first, `B` second, so the
+/// single-visible-toplevel policy has already auto-activated `B` and left `A` mapped but
+/// `Inactive`. `ActivateWindow { window_id: A }` then has to move the visible slot and the
+/// keyboard focus back to `A` in one causal step — through compositor state, never through
+/// synthesized input — while `B` stays mapped.
+///
+/// See the module docs for the one deliberate deviation: activation re-tiles nothing, so
+/// the plan's "A receives a new tiling configure" is proven as "the tiling state is already
+/// correct and the activation changes no configure on either connection".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn focus_follows_activation() -> Result<()> {
+    let runtime = TestRuntime::start_with(test_config()).await?;
+    let mut events = EventAssert::tap(&runtime);
+    let mut client_a = runtime.wayland_client()?;
+    let mut client_b = runtime.wayland_client()?;
+
+    let (a_window, a_id) = map_toplevel(&runtime, &client_a, &mut events, APP_A, "A").await?;
+    let (b_window, b_id) = map_toplevel(&runtime, &client_b, &mut events, APP_B, "B").await?;
+    assert_ne!(a_id, b_id, "each mapped toplevel gets its own window id");
+
+    // B's map took the seat focus away from A; the leave is the state the re-activation
+    // below has to undo (A has exactly one surface on this connection, so the transition is
+    // unambiguous).
+    client_a.wait_for_keyboard_event(
+        DEADLINE,
+        "wl_keyboard.leave when B took the slot",
+        |event| matches!(event, KeyboardEvent::Leave { .. }),
+    )?;
+    let a_enter_before = last_keyboard_index(&client_a, |event| {
+        matches!(event, KeyboardEvent::Enter { .. })
+    })
+    .expect("A was focused when it mapped");
+    let a_leave_before = last_keyboard_index(&client_a, |event| {
+        matches!(event, KeyboardEvent::Leave { .. })
+    })
+    .expect("the wait above proved the leave was recorded");
+    assert!(
+        a_leave_before > a_enter_before,
+        "A lost the keyboard focus when B mapped: {a_enter_before} < {a_leave_before}, history {:?}",
+        client_a.keyboard_events()
+    );
+
+    // The policy has already auto-activated B on map.
+    let before = query_state(&runtime).await?;
+    assert_eq!(before.active_window_id, Some(b_id));
+    assert_eq!(before.keyboard_focus, Some(b_id));
+    assert_eq!(
+        before
+            .windows
+            .iter()
+            .map(|window| window.id)
+            .collect::<Vec<_>>(),
+        vec![a_id, b_id],
+        "windows are listed in creation order"
+    );
+    let a_before = before.window(a_id).expect("A is tracked");
+    assert!(
+        a_before.mapped,
+        "A stays mapped, it only leaves the visible slot"
+    );
+    assert_eq!(a_before.state, WindowState::Inactive);
+    assert_eq!(
+        a_before.geometry,
+        runtime.tiled_rect(),
+        "an inactive window keeps the tiled geometry it must have when it becomes visible"
+    );
+    let a_configure_before = a_window
+        .last_configure()
+        .expect("A acked its initial tiling configure");
+    assert_eq!(
+        a_configure_before.size(),
+        runtime.tiled_rect().size(),
+        "A's configure is the full-output tiling configure"
+    );
+    let b_configure_before = b_window
+        .last_configure()
+        .expect("B acked its initial tiling configure");
+
+    // Barrier before the activation: the tap has received every event the compositor had
+    // emitted when it answered `QueryState` (the reply is served after them, in FIFO order).
+    events.drain()?;
+    let activation_marker = events.seen().len();
+
+    // --- activate A ------------------------------------------------------------------
+    activate_window(&runtime, a_id)
+        .await
+        .expect("activate_window(A) must be accepted");
+
+    // The reply is sent from inside the callback that produced it, after the state change,
+    // so both events are already queued when it resolves: awaiting the reply and only then
+    // reading the tap is exactly the plan's ordering proof. Queued events are appended by
+    // this drain, with no `await` in between.
+    events.drain()?;
+
+    // The filter the plan asks for: everything recorded after the activation marker is
+    // attributable to the activation itself. It must be exactly one `window_activated`
+    // (A, previous B) followed by one `focus_changed` (Some(A)), with no `SurfaceCommit`,
+    // no creation/destruction and nothing else in between.
+    let tail = &events.seen()[activation_marker..];
+    assert_eq!(
+        tail.len(),
+        2,
+        "the activation emits exactly window_activated + focus_changed, got {tail:?}"
+    );
+    let RuntimeEvent::WindowActivated {
+        window_id: activated,
+        previous,
+        seq: activated_seq,
+        ..
+    } = &tail[0]
+    else {
+        panic!(
+            "the activation must start with window_activated, got {:?}",
+            tail[0]
+        );
+    };
+    assert_eq!(*activated, a_id, "the activated window is A");
+    assert_eq!(*previous, Some(b_id), "the previously active window is B");
+    let RuntimeEvent::FocusChanged {
+        window_id: focused,
+        seq: focus_seq,
+        ..
+    } = &tail[1]
+    else {
+        panic!(
+            "the activation must end with focus_changed, got {:?}",
+            tail[1]
+        );
+    };
+    assert_eq!(*focused, Some(a_id), "focus followed the activation to A");
+    assert!(
+        activated_seq < focus_seq,
+        "seq must increase across the pair: {activated_seq} then {focus_seq}"
+    );
+    assert_seqs_increase(events.seen());
+
+    // --- the state the events describe ------------------------------------------------
+    let after = query_state(&runtime).await?;
+    assert_eq!(after.windows.len(), 2, "both windows are still tracked");
+    let a_after = after.window(a_id).expect("A is still tracked");
+    let b_after = after.window(b_id).expect("B is still tracked");
+    assert_eq!(
+        a_after.state,
+        WindowState::Active,
+        "A is the visible window"
+    );
+    assert_eq!(
+        b_after.state,
+        WindowState::Inactive,
+        "B lost the visible slot"
+    );
+    assert!(a_after.mapped, "A is mapped");
+    assert!(b_after.mapped, "B stays mapped: inactive is not destroyed");
+    assert_eq!(a_after.geometry, runtime.tiled_rect());
+    assert_eq!(b_after.geometry, runtime.tiled_rect());
+    assert_eq!(after.active_window_id, Some(a_id));
+    assert_eq!(after.keyboard_focus, Some(a_id));
+
+    // --- tiling configures (deviation, see the module docs) ---------------------------
+    // The round trips flush the protocol on both connections, so a configure the runtime
+    // sent for the activation would be recorded in the client's configure state by now.
+    client_a.roundtrip().await?;
+    client_b.roundtrip().await?;
+    assert!(
+        a_window.pending_configure().is_none(),
+        "activation re-tiles nothing, so A has no un-acked configure, got {:?}",
+        a_window.pending_configure()
+    );
+    assert!(
+        b_window.pending_configure().is_none(),
+        "B receives no configure from the activation, got {:?}",
+        b_window.pending_configure()
+    );
+    assert_eq!(
+        a_window.last_configure(),
+        Some(a_configure_before),
+        "A's configure is unchanged by the activation (its tiling configure already applies)"
+    );
+    assert_eq!(
+        b_window.last_configure(),
+        Some(b_configure_before),
+        "B's configure is unchanged by the activation"
+    );
+
+    // --- focus on the seat path -------------------------------------------------------
+    // Complementing the compositor's `focus_changed`: the keyboard focus really left B and
+    // came back to A. B's *only* leave in this test is the activation's, so this cannot be
+    // satisfied by an earlier transition.
+    client_b.wait_for_keyboard_event(
+        DEADLINE,
+        "wl_keyboard.leave when A was activated",
+        |event| matches!(event, KeyboardEvent::Leave { .. }),
+    )?;
+    wait_until(DEADLINE, "wl_keyboard focus back on A's surface", || {
+        let enter = last_keyboard_index(&client_a, |event| {
+            matches!(event, KeyboardEvent::Enter { .. })
+        });
+        let leave = last_keyboard_index(&client_a, |event| {
+            matches!(event, KeyboardEvent::Leave { .. })
+        });
+        matches!((enter, leave), (Some(enter), Some(leave)) if enter > leave)
+    })
+    .await?;
+
+    // --- an unknown window id is rejected ---------------------------------------------
+    let unknown = WindowId(9_999);
+    assert!(
+        after.window(unknown).is_none(),
+        "the probe id must not exist in this runtime"
+    );
+    let error = activate_window(&runtime, unknown)
+        .await
+        .expect_err("activating an unknown window must fail");
+    assert_eq!(
+        error.code,
+        ErrorCode::UnknownWindow,
+        "the rejection must carry the AGP unknown_window code, got {error}"
+    );
+    // `Expected::Any` is the strongest form of the plan's "emits no events": any event at
+    // all fails the check. Bounded by QUIET_BOUND (see its docs).
+    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
+    let untouched = query_state(&runtime).await?;
+    assert_eq!(
+        untouched.windows, after.windows,
+        "a rejected activation must not touch any window"
+    );
+    assert_eq!(untouched.active_window_id, Some(a_id));
+    assert_eq!(untouched.keyboard_focus, Some(a_id));
+    assert_eq!(
+        untouched.seq, after.seq,
+        "no event was emitted, so the sequence watermark did not move"
+    );
+
+    // --- activation is never synthesized input ----------------------------------------
+    // The pointer is untouched by an activation (nothing moves it), so neither connection
+    // may have seen a single `wl_pointer` event — recorded from the real seat — and the
+    // keyboard may only carry the focus transition (`enter`/`leave`), never a key event.
+    for (name, client) in [("A", &client_a), ("B", &client_b)] {
+        let pointer = client.pointer_events();
+        assert!(
+            pointer.is_empty(),
+            "activation synthesized pointer input for {name}: {pointer:?}"
+        );
+        let keys: Vec<KeyboardEvent> = client
+            .keyboard_events()
+            .into_iter()
+            .filter(|event| matches!(event, KeyboardEvent::Key { .. }))
+            .collect();
+        assert!(
+            keys.is_empty(),
+            "activation synthesized key input for {name}: {keys:?}"
+        );
+    }
+
+    client_a.close().await?;
+    client_b.close().await?;
+    runtime.shutdown().await
+}
