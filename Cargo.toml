@@ -35,7 +35,6 @@ adesk-machine = { path = "crates/adesk-machine" }
 
 # --- wayland / smithay stack ---
 smithay = { version = "0.7.0", default-features = false }
-wayland-server = "0.31"
 wayland-client = "0.31"
 wayland-protocols = { version = "0.32", features = ["server", "client", "staging", "unstable"] }
 calloop = "0.14"
@@ -61,7 +60,6 @@ clap = { version = "4", features = ["derive", "env"] }
 # --- imaging / misc ---
 image = { version = "0.25", default-features = false, features = ["png"] }
 tempfile = "3"
-libc = "0.2"
 bitflags = "2"
 # Safe pipe creation (OwnedFd pairs) for the testkit data-device helpers; keeps
 # `adesk-testkit`'s `#![forbid(unsafe_code)]` intact without raising the MSRV.

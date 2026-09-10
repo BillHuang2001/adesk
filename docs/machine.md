@@ -41,7 +41,6 @@ the host control plane speak only this trait.
 ```rust
 #[async_trait]
 pub trait ContainerRuntime: Send + Sync + 'static {
-    fn kind(&self) -> RuntimeKind;                       // Podman | Mock | ...
     async fn create(&self, spec: &MachineSpec) -> Result<MachineId>;
     async fn start(&self, id: &MachineId) -> Result<()>;
     async fn stop(&self, id: &MachineId, timeout_ms: u64) -> Result<()>;
