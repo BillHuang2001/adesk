@@ -100,14 +100,6 @@ pub fn spawn(config: CompositorConfig) -> Result<CompositorHandle> {
 }
 
 impl CompositorHandle {
-    /// The command channel to the compositor thread.
-    ///
-    /// Commands are served in FIFO order. The sender is `Clone + Send + Sync`; the
-    /// compositor stops when every sender is dropped.
-    pub fn command(&self) -> calloop::channel::Sender<RuntimeCommand> {
-        self.inner.commands.clone()
-    }
-
     /// Send a command, mapping a closed channel to [`CompositorError::Stopped`].
     pub fn send(&self, command: RuntimeCommand) -> Result<()> {
         self.inner

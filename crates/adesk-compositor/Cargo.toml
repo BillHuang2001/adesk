@@ -28,7 +28,6 @@ smithay = { workspace = true, features = [
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-wayland-server.workspace = true
 
 [dev-dependencies]
 adesk-testkit.workspace = true
