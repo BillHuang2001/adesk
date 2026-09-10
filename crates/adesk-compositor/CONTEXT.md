@@ -195,6 +195,7 @@ Unit tests (colocated `#[cfg(test)]`; 87 tests pass):
 - `input::injector`: logical buttons → evdev codes.
 - `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level, and pixel proof covers both render paths: `RenderWindow` (`window_lifecycle.rs` matches the committed pattern, `popups.rs` asserts the popup's own fill inside the owner's frame) and `RenderOutput` (`output_composition.rs` proves a tracked-but-inactive window is excluded from the composed frame).
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
+- Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
