@@ -150,16 +150,22 @@ input.
 
 Semantics:
 
-- Filters: only events with `seq > after_action` (if given) or `commit_seq > since_commit`
-  (if given) and belonging to `window_id` (if given) count.
+- Filters: `window_id` (if given) and `seq > after_action` (if given) always apply;
+  `since_commit` (if given) additionally restricts counted *commits* to
+  `commit_seq > since_commit` — lifecycle, title, focus and popup events are not
+  commit-numbered and always count.
 - `quiet(ms)`: returns once `ms` have elapsed with no counted surface commit for the
   window. `timeout_ms` still bounds the wait.
 - `change`: returns on the first counted surface commit (or window lifecycle event).
 - `timeout`: waits the full `timeout_ms` and reports what accumulated (useful for
   sampling animations).
-- A return always reports whether the condition was met (`quiet`) or the wait
-  expired (`timed_out`). Surface quietness is evidence, not proof of semantic
-  completion; the agent must treat it as such.
+- `quiet` is evidence, not proof of semantic completion: it reports whether the wait's
+  scope has been quiet for the threshold at resolution time — the condition's `quiet_ms`
+  for a quiet wait, otherwise the runtime default — so a timed-out `change` wait can
+  legitimately carry `quiet: true`.
+- `timed_out` reports that the wait expired before its condition was met, except
+  `{"type": "timeout"}`, which reaches its horizon by design and therefore always
+  reports `timed_out: false`.
 
 ### 5.5 Input (application input, delivered through the Wayland seat)
 
