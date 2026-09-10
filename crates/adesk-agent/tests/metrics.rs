@@ -7,24 +7,13 @@
 //! documented estimate, latency is min/mean/p95, and the rates are ratios over
 //! steps and failures respectively.
 
+mod common;
+
 use adesk_agent::{
     estimate_visual_tokens, latency_stats, ActionKind, Error, LatencyStats, LoopConfig, Metrics,
     ProviderError, StopReason,
 };
 use adesk_core::WindowId;
-use adesk_proto::{ImageFormat, ImagePayload};
-
-/// A payload carrying only dimensions: the recorder never inspects pixels.
-fn image(width: u32, height: u32) -> ImagePayload {
-    ImagePayload {
-        width,
-        height,
-        format: ImageFormat::Png,
-        stride: None,
-        data: String::new(),
-        scale: 1.0,
-    }
-}
 
 /// A cheap, deterministic failure for the failure/recovery specs.
 fn transport_error() -> Error {
@@ -111,7 +100,7 @@ fn readbacks_count_only_pixel_returning_calls() {
 
     // `capture` returns pixels; `observe` only does when the context embedded
     // the image it returned.
-    metrics.record_action(ActionKind::Capture, true, Some(&image(64, 64)));
+    metrics.record_action(ActionKind::Capture, true, Some(&common::image(64, 64)));
     metrics.record_action(ActionKind::Observe, true, None);
     metrics.record_action(ActionKind::Observe, false, None);
 
@@ -128,8 +117,8 @@ fn readbacks_count_only_pixel_returning_calls() {
 #[test]
 fn visual_tokens_track_embedded_images() {
     let mut metrics = Metrics::new();
-    let current = image(1280, 800);
-    let keyframe = image(640, 480);
+    let current = common::image(1280, 800);
+    let keyframe = common::image(640, 480);
     metrics.record_image_sent(&current);
     metrics.record_image_sent(&keyframe);
 
