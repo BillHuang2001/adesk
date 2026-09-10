@@ -22,69 +22,20 @@
 //! - **No display, GPU, network or installed application.** `apply_env(false)` keeps the
 //!   process env scoped to the runtime's startup only; nothing is launched here.
 //! - **Events are the assertion surface, not sleeps.** Every positive wait is bounded by
-//!   [`DEADLINE`]; the one negative claim ("reserving emits nothing") is bounded by
-//!   [`QUIET_BOUND`] and says so, exactly like `window_lifecycle.rs` does it.
+//!   [`DEADLINE`]. The one negative claim ("reserving emits nothing") is a *positive* barrier:
+//!   a `QueryState` reply served after both reservations reports the exact reserved watermark,
+//!   which proves no emitter consumed a number, and the drained tap is then asserted empty —
+//!   there is no quiet-window sleep anywhere in this file.
 
-use std::time::Duration;
+mod common;
 
-use adesk_compositor::{RuntimeCommand, StateSnapshot};
-use adesk_testkit::{
-    AppId, EventAssert, Expected, FillPattern, Result, Size, TestRuntime, TestRuntimeConfig,
-    ToplevelSpec,
-};
-use tokio::sync::oneshot;
+use adesk_testkit::{EventAssert, FillPattern, Result, TestRuntime};
 
-/// Every bounded wait in this file uses this deadline (10 s, the harness bound).
-const DEADLINE: Duration = Duration::from_secs(10);
-
-/// Bound for the bounded negative assertion ("reserving a seq emits no event").
-///
-/// A negative claim can only be proven by waiting, and this is deliberately *not*
-/// [`DEADLINE`]: the compositor serves a `ReserveSeq` (and emits whatever it emits — here
-/// nothing) within microseconds of receiving it, so a quarter second is orders of magnitude
-/// longer than the latency of the event being ruled out, while a failing test still reports
-/// fast.
-const QUIET_BOUND: Duration = Duration::from_millis(250);
+use common::{map_toplevel, query_state, reserve_seq, test_config};
 
 /// App id and title of the toplevel the second test maps (echoed back by `window_created`).
 const APP_ID: &str = "org.example.reserve";
 const TITLE: &str = "Reserve";
-
-/// A runtime whose Wayland socket a client can connect to.
-///
-/// `apply_env(false)`: no application is launched in this file, so the runtime scopes the
-/// process env across startup only and releases the env lock as soon as the compositor's
-/// socket is bound in its own temp dir. The Wayland client connects by absolute socket path.
-fn test_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
-
-/// Reads the compositor's current state through `QueryState`.
-///
-/// The reply arrives on the oneshot the command carries; the compositor drops it only when
-/// the thread is gone, which is a harness failure and is reported as such.
-async fn query_state(runtime: &TestRuntime) -> adesk_core::Result<StateSnapshot> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::QueryState { reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the query_state reply"))
-}
-
-/// Reserves the next event sequence number through `ReserveSeq` and returns it.
-async fn reserve_seq(runtime: &TestRuntime) -> adesk_core::Result<u64> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::ReserveSeq { reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the reserve_seq reply"))
-}
 
 /// `ReserveSeq` allocates from the single counter and publishes nothing.
 ///
@@ -96,7 +47,7 @@ async fn reserve_seq(runtime: &TestRuntime) -> adesk_core::Result<u64> {
 async fn reserving_is_strictly_increasing_and_silent() -> Result<()> {
     let runtime = TestRuntime::start_with(test_config()).await?;
     // The broadcast never replays: subscribe before reserving, then drain whatever startup
-    // left queued so the negative assertion below can only fail on a reservation's event.
+    // left queued so the barrier below can only observe a reservation's event.
     let mut events = EventAssert::tap(&runtime);
     events.drain()?;
 
@@ -124,10 +75,15 @@ async fn reserving_is_strictly_increasing_and_silent() -> Result<()> {
          allocation must be contiguous; a gap would mean something else consumed a number"
     );
 
+    // --- reserving emits nothing -------------------------------------------------------
+    // Positive barrier: this `QueryState` is served after both reservations, and its
+    // watermark is exactly `second` — had any emitter allocated a seq, the watermark would
+    // be higher. Draining the tap when the reply resolves therefore observes every event a
+    // reservation could have produced: there must be none.
     let after_second = query_state(&runtime).await?;
     assert_eq!(
         after_second.seq, second,
-        "the watermark advanced with the second reservation"
+        "the watermark advanced with the second reservation and nothing else allocated a seq"
     );
     assert_eq!(
         after_second.windows, after_first.windows,
@@ -138,11 +94,7 @@ async fn reserving_is_strictly_increasing_and_silent() -> Result<()> {
         "no client connected in this test, got {:?}",
         after_second.windows
     );
-
-    // --- reserving emits nothing -------------------------------------------------------
-    // `Expected::Any` is the strongest form: any event at all within QUIET_BOUND fails.
-    // Bounded by QUIET_BOUND (see its docs).
-    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
+    events.drain()?;
     assert!(
         events.seen().is_empty(),
         "no event may have been delivered across the reservations, got {:?}",
@@ -174,34 +126,27 @@ async fn later_events_do_not_reuse_reserved_seqs() -> Result<()> {
 
     // --- map a real toplevel -----------------------------------------------------------
     let wayland = runtime.wayland_client()?;
-    let window = wayland.create_toplevel(ToplevelSpec::new(APP_ID, TITLE, Size::new(320, 200)))?;
-    let configure = window.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        runtime.tiled_rect().size(),
-        "the tiling policy configures the toplevel, not the size the client asked for"
-    );
-    window.apply_configure()?;
-    window.commit_frame(FillPattern::default())?;
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
-        .await?;
-    let window_id = created
-        .window_id()
-        .expect("window_created carries a window id");
-    assert!(
-        created.seq() > second,
-        "a compositor event emitted after the reservations must use a higher seq than the \
-         reserved {second}, got {} — a reused seq would break protocol §1",
-        created.seq()
-    );
+    let (_window, window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
 
     // --- the counter, not a bypass -----------------------------------------------------
     let tail = &events.seen()[marker..];
     assert!(
         !tail.is_empty(),
         "mapping a toplevel emits window lifecycle events"
+    );
+    assert!(
+        tail[0].seq() > second,
+        "a compositor event emitted after the reservations must use a higher seq than the \
+         reserved {second}, got {} — a reused seq would break protocol §1",
+        tail[0].seq()
     );
     assert_eq!(
         tail[0].seq(),
@@ -220,14 +165,14 @@ async fn later_events_do_not_reuse_reserved_seqs() -> Result<()> {
 
     // --- one watermark for both domains ------------------------------------------------
     let snapshot = query_state(&runtime).await?;
-    assert_eq!(snapshot.len(), 1, "the mapped toplevel is tracked");
+    assert_eq!(snapshot.windows.len(), 1, "the mapped toplevel is tracked");
     assert_eq!(snapshot.windows[0].id, window_id);
     assert!(
-        snapshot.seq >= created.seq() && snapshot.seq > second,
+        snapshot.seq >= tail[0].seq() && snapshot.seq > second,
         "the snapshot watermark ({}) covers both the reservations ({second}) and the event \
          above them ({})",
         snapshot.seq,
-        created.seq()
+        tail[0].seq()
     );
 
     wayland.close().await?;

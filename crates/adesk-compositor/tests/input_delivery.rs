@@ -2,12 +2,13 @@
 //! real seat path.
 //!
 //! Each test starts a real in-process runtime (pixman, private temp `XDG_RUNTIME_DIR`),
-//! connects one `WaylandTestClient` and maps one toplevel, which the tiling policy makes
-//! visible and focused. Input is injected **directly** through `RuntimeCommand` on the
-//! compositor handle — no AGP client — so what is asserted is the compositor's own seat
-//! path rather than the server's request plumbing. The client records every `wl_pointer` /
-//! `wl_keyboard` event it receives (`adesk_testkit`'s recorder, `wayland/input.rs`), and
-//! the tests assert on that recorded history: no sleeps, every wait deadline-bounded.
+//! connects one `WaylandTestClient` and maps one toplevel with the shared
+//! [`common::map_toplevel`], which the tiling policy makes visible and focused. Input is
+//! injected **directly** through `RuntimeCommand` on the compositor handle — no AGP client
+//! — so what is asserted is the compositor's own seat path rather than the server's request
+//! plumbing. The client records every `wl_pointer` / `wl_keyboard` event it receives
+//! (`adesk_testkit`'s recorder, `wayland/input.rs`), and the tests assert on that recorded
+//! history: no sleeps, every wait deadline-bounded.
 //!
 //! | Test | What it proves |
 //! |---|---|
@@ -59,24 +60,22 @@
 //! environment is never held for its lifetime (`TestRuntime::wayland_client` connects by
 //! absolute socket path).
 
-use std::time::Duration;
-
-use adesk_compositor::{CompositorHandle, KeyCode, RuntimeCommand, StateSnapshot};
-use adesk_core::{
-    AppId, Button, ButtonState, ErrorCode, KeyState, Position, Rect, WindowId, WindowState,
-};
+use adesk_compositor::{CompositorHandle, KeyCode, RuntimeCommand};
+use adesk_core::{Button, ButtonState, ErrorCode, KeyState, Position, Rect, WindowId, WindowState};
 use adesk_testkit::{
-    AxisKind, ButtonState as RecordedButtonState, EventAssert, Expected, FillPattern,
-    KeyState as RecordedKeyState, KeyboardEvent, PointerEvent, Result, Size, TestRuntime,
-    TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient, BTN_LEFT, KEY_C, KEY_LEFTCTRL,
+    AxisKind, ButtonState as RecordedButtonState, EventAssert, FillPattern,
+    KeyState as RecordedKeyState, KeyboardEvent, PointerEvent, Result, TestRuntime,
+    WaylandTestClient, BTN_LEFT, KEY_C, KEY_LEFTCTRL,
 };
-use tokio::sync::oneshot;
 
-/// Every bounded wait and deadline in this file.
-const DEADLINE: Duration = Duration::from_secs(10);
+mod common;
+use common::{map_toplevel, query_state_of, reply, test_config, DEADLINE};
 
 /// App id of the toplevel every test maps.
 const APP_ID: &str = "org.example.compositor.input";
+
+/// Title of the toplevel every test maps.
+const TITLE: &str = "Input";
 
 /// Tolerance when comparing an injected position with a recorded surface-local coordinate,
 /// in pixels.
@@ -115,80 +114,16 @@ const CHORD_SEQUENCE: [(u32, RecordedKeyState); 4] = [
     (KEY_LEFTCTRL, RecordedKeyState::Released),
 ];
 
-/// A runtime whose Wayland socket the protocol-path client can reach, with no application
-/// launching and no process-env scoping.
-fn wayland_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
-
 /// Starts a runtime and connects one client to its Wayland socket.
 async fn start_runtime() -> Result<(TestRuntime, WaylandTestClient)> {
-    let runtime = TestRuntime::start_with(wayland_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     let wayland = runtime.wayland_client()?;
     Ok((runtime, wayland))
 }
 
-/// Maps one toplevel, acknowledges its tiling configure and commits a frame.
-///
-/// The returned window comes back mapped, tiled and focused — the runtime's own
-/// `window_created` / `window_activated` events say so (awaited here, never assumed) — and
-/// the `wl_keyboard.keymap` wait is the seat-readiness barrier: the client creates its
-/// `wl_pointer` and `wl_keyboard` from the same `wl_seat.capabilities` event, so once the
-/// keymap has been delivered there are seat objects for an injection to reach.
-async fn map_toplevel(
-    runtime: &TestRuntime,
-    wayland: &WaylandTestClient,
-) -> Result<(TestWindow, WindowId)> {
-    // The event broadcast does not replay: tap before the first commit maps the surface.
-    let mut events = EventAssert::tap(runtime);
-    let window =
-        wayland.create_toplevel(ToplevelSpec::new(APP_ID, "Input", Size::new(320, 200)))?;
-    let configure = window.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        runtime.tiled_rect().size(),
-        "the tiling policy configures the toplevel, not the 320x200 the client asked for"
-    );
-    window.apply_configure()?;
-    window.commit_frame(FillPattern::default())?;
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
-        .await?;
-    let window_id = created
-        .window_id()
-        .expect("window_created carries the new window id");
-    events
-        .wait_for_expected(&Expected::WindowActivated(window_id), DEADLINE)
-        .await?;
-
-    wayland.wait_for_keyboard_event(
-        DEADLINE,
-        "wl_keyboard.keymap",
-        |event| matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0),
-    )?;
-    Ok((window, window_id))
-}
-
-/// Sends one result-bearing command and awaits its reply.
-///
-/// Every input command is answered from inside the callback that produced it, *after* the
-/// state change, so awaiting the reply is what lets the command channel's FIFO order stand
-/// in for "the seat saw these in this order".
-async fn reply_of(
-    handle: &CompositorHandle,
-    build: impl FnOnce(oneshot::Sender<adesk_core::Result<()>>) -> RuntimeCommand,
-) -> adesk_core::Result<()> {
-    let (reply, answer) = oneshot::channel();
-    handle
-        .send(build(reply))
-        .expect("the compositor accepts the command");
-    answer.await.expect("every input command is answered")
-}
-
 /// `PointerMove` to a window-relative position (the focused window is the target).
 async fn move_pointer(handle: &CompositorHandle, position: Position) -> adesk_core::Result<()> {
-    reply_of(handle, |reply| RuntimeCommand::PointerMove {
+    reply(handle, move |reply| RuntimeCommand::PointerMove {
         position,
         reply,
     })
@@ -201,7 +136,7 @@ async fn press_button(
     button: Button,
     state: ButtonState,
 ) -> adesk_core::Result<()> {
-    reply_of(handle, |reply| RuntimeCommand::PointerButton {
+    reply(handle, move |reply| RuntimeCommand::PointerButton {
         button,
         state,
         reply,
@@ -211,7 +146,7 @@ async fn press_button(
 
 /// `PointerAxis` at the current pointer location.
 async fn scroll(handle: &CompositorHandle, dx: f64, dy: f64) -> adesk_core::Result<()> {
-    reply_of(handle, |reply| RuntimeCommand::PointerAxis {
+    reply(handle, move |reply| RuntimeCommand::PointerAxis {
         dx,
         dy,
         reply,
@@ -225,21 +160,12 @@ async fn key_event(
     key: KeyCode,
     state: KeyState,
 ) -> adesk_core::Result<()> {
-    reply_of(handle, |reply| RuntimeCommand::KeyEvent {
+    reply(handle, move |reply| RuntimeCommand::KeyEvent {
         key,
         state,
         reply,
     })
     .await
-}
-
-/// `QueryState`: always answered, so a bug shows up as a missing reply, never as a value.
-async fn query_state(handle: &CompositorHandle) -> StateSnapshot {
-    let (reply, answer) = oneshot::channel();
-    handle
-        .send(RuntimeCommand::QueryState { reply })
-        .expect("the compositor accepts query_state");
-    answer.await.expect("query_state is always answered")
 }
 
 /// Moves the pointer onto the toplevel and waits until the seat reports the focus.
@@ -269,7 +195,7 @@ async fn focus_pointer(
 /// seat focuses; both are compared with the tiling policy's own rect
 /// ([`TestRuntime::tiled_rect`]) so no expectation comes from a hard-coded output size.
 async fn focused_window_geometry(runtime: &TestRuntime, window_id: WindowId) -> Rect {
-    let snapshot = query_state(runtime.compositor()).await;
+    let snapshot = query_state_of(runtime.compositor()).await;
     let window = snapshot
         .window(window_id)
         .unwrap_or_else(|| panic!("the mapped toplevel is tracked: {snapshot:?}"));
@@ -357,7 +283,17 @@ fn key_events(wayland: &WaylandTestClient) -> Vec<(u32, RecordedKeyState)> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pointer_move_delivers_the_window_model_point() -> Result<()> {
     let (runtime, wayland) = start_runtime().await?;
-    let (_window, window_id) = map_toplevel(&runtime, &wayland).await?;
+    // The event broadcast never replays: tap before the commit that maps the surface.
+    let mut events = EventAssert::tap(&runtime);
+    let (_window, window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
     let handle = runtime.compositor();
 
     let geometry = focused_window_geometry(&runtime, window_id).await;
@@ -436,7 +372,16 @@ async fn pointer_move_delivers_the_window_model_point() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pointer_button_press_and_release_are_two_ordered_events() -> Result<()> {
     let (runtime, wayland) = start_runtime().await?;
-    let (_window, _window_id) = map_toplevel(&runtime, &wayland).await?;
+    let mut events = EventAssert::tap(&runtime);
+    let (_window, _window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
     let handle = runtime.compositor();
 
     // Buttons are delivered at the current pointer location and only to a focused
@@ -474,7 +419,16 @@ async fn pointer_button_press_and_release_are_two_ordered_events() -> Result<()>
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pointer_axis_is_negative_vertical_and_framed() -> Result<()> {
     let (runtime, wayland) = start_runtime().await?;
-    let (_window, _window_id) = map_toplevel(&runtime, &wayland).await?;
+    let mut events = EventAssert::tap(&runtime);
+    let (_window, _window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
     let handle = runtime.compositor();
 
     // An axis event shares the button rule: it needs a focused surface, established by a
@@ -557,7 +511,16 @@ async fn pointer_axis_is_negative_vertical_and_framed() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ctrl_c_chord_is_a_press_in_order_and_a_reverse_release() -> Result<()> {
     let (runtime, wayland) = start_runtime().await?;
-    let (_window, window_id) = map_toplevel(&runtime, &wayland).await?;
+    let mut events = EventAssert::tap(&runtime);
+    let (_window, window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
     let handle = runtime.compositor();
 
     // The keyboard needs a focus target and a client that holds a keyboard object: both
@@ -568,7 +531,7 @@ async fn ctrl_c_chord_is_a_press_in_order_and_a_reverse_release() -> Result<()> 
         |event| matches!(event, KeyboardEvent::Enter { .. }),
     )?;
     assert_eq!(
-        query_state(handle).await.keyboard_focus,
+        query_state_of(handle).await.keyboard_focus,
         Some(window_id),
         "the chord is typed at the focused toplevel"
     );
@@ -636,7 +599,16 @@ async fn ctrl_c_chord_is_a_press_in_order_and_a_reverse_release() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_released_chord_is_rejected_and_delivers_nothing() -> Result<()> {
     let (runtime, wayland) = start_runtime().await?;
-    let (_window, _window_id) = map_toplevel(&runtime, &wayland).await?;
+    let mut events = EventAssert::tap(&runtime);
+    let (_window, _window_id) = map_toplevel(
+        &runtime,
+        &wayland,
+        &mut events,
+        APP_ID,
+        TITLE,
+        FillPattern::default(),
+    )
+    .await?;
     let handle = runtime.compositor();
 
     wayland.wait_for_keyboard_event(
@@ -687,10 +659,10 @@ async fn injection_without_a_focused_window_fails_without_panicking() -> Result<
     // (`CompositorError::InvalidRequest("no window has keyboard focus")`). With zero
     // windows `unknown_window` is unreachable on this path, so `invalid_request` is the
     // code the implementation answers — asserted as such.
-    let runtime = TestRuntime::start_with(wayland_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     let handle = runtime.compositor();
 
-    let before = query_state(handle).await;
+    let before = query_state_of(handle).await;
     assert!(
         before.is_empty(),
         "no client mapped a window in this runtime: {before:?}"
@@ -738,7 +710,7 @@ async fn injection_without_a_focused_window_fails_without_panicking() -> Result<
 
     // The rejections were replies, not panics: the thread still serves commands and the
     // window state was never touched.
-    let after = query_state(handle).await;
+    let after = query_state_of(handle).await;
     assert_eq!(after.active_window_id, None);
     assert_eq!(after.keyboard_focus, None);
     assert!(

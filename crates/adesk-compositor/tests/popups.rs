@@ -61,34 +61,18 @@
 //! `window_destroyed` by dropping its per-window state can never be handed a popup event for
 //! the window it has already forgotten.
 
-use std::time::Duration;
+mod common;
 
-use adesk_compositor::{RenderedFrame, RuntimeCommand, StateSnapshot};
-use adesk_core::{Point, Rect, Size, WindowId, WindowInfo, WindowState};
+use adesk_core::{Point, Rect, Size, WindowId, WindowState};
 use adesk_testkit::{
-    AppId, EventAssert, Expected, FillPattern, ImageAssert, PopupSpec, Result, RuntimeEvent,
-    TestRuntime, TestRuntimeConfig, ToplevelSpec,
+    EventAssert, Expected, FillPattern, ImageAssert, PopupSpec, Result, RuntimeEvent, TestRuntime,
 };
-use tokio::sync::oneshot;
 
-/// Every bounded wait in this file uses this deadline (10 s, the harness bound).
-const DEADLINE: Duration = Duration::from_secs(10);
-
-/// Bound for the bounded negative assertion ("no further event for the destroyed owner").
-///
-/// A negative claim can only be proven by waiting, and this is deliberately *not*
-/// [`DEADLINE`]: the destruction is served in one compositor callback whose positive
-/// counterpart is observed in single-digit milliseconds, so a quarter second is orders of
-/// magnitude longer than the latency of the events being ruled out, while a failing test
-/// still reports fast.
-const QUIET_BOUND: Duration = Duration::from_millis(250);
+use common::{map_toplevel, query_state, render_window, test_config, window_info, DEADLINE};
 
 /// App id and title of the owning toplevel (echoed back by `window_created`).
 const APP_ID: &str = "org.example.popup.lifecycle";
 const TITLE: &str = "Popup lifecycle";
-
-/// Size the owner asks for; the tiling policy ignores it and fills the output instead.
-const PARENT_SIZE: Size = Size::new(320, 240);
 
 /// Size the popup's positioner requests and the initial configure confirms.
 const POPUP_SIZE: Size = Size::new(120, 80);
@@ -107,59 +91,9 @@ const POPUP_FILL: FillPattern = FillPattern::solid_rgb(200, 30, 30);
 /// `POPUP_OFFSET + SAMPLE` in the owner's (and therefore the frame's) coordinates.
 const SAMPLE: Point = Point::new(10, 10);
 
-/// A runtime whose Wayland socket a client can connect to.
-///
-/// `apply_env(false)`: no application is launched, so the runtime releases the process-env
-/// lock as soon as the compositor's socket is bound in its own temp dir.
-fn test_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
-
 /// The popup's rectangle in the owner's coordinate space (window-relative pixels).
 const fn popup_rect() -> Rect {
     Rect::new(POPUP_OFFSET.x, POPUP_OFFSET.y, POPUP_SIZE.w, POPUP_SIZE.h)
-}
-
-/// Reads the compositor's current state through `QueryState`.
-///
-/// The reply arrives on the oneshot the command carries; the compositor drops it only when the
-/// thread is gone, which is a harness failure and is reported as such.
-async fn query_state(runtime: &TestRuntime) -> adesk_core::Result<StateSnapshot> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::QueryState { reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the query_state reply"))
-}
-
-/// The window record for `id`, or a failure naming what `QueryState` did report.
-fn window_info(snapshot: &StateSnapshot, id: WindowId) -> &WindowInfo {
-    snapshot
-        .window(id)
-        .unwrap_or_else(|| panic!("window {id} is tracked, got {:?}", snapshot.windows))
-}
-
-/// Renders one window at its natural size (`region`/`max_dimension` `None`).
-async fn render_window(
-    runtime: &TestRuntime,
-    window_id: WindowId,
-) -> adesk_core::Result<RenderedFrame> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::RenderWindow {
-            window_id,
-            region: None,
-            max_dimension: None,
-            reply,
-        })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the render_window reply"))?
 }
 
 /// Matches the popup's buffer commit as the compositor must report it: a `surface_commit`
@@ -229,25 +163,8 @@ async fn popup_lifecycle_renders_into_the_owner_and_destroy_keeps_the_window() -
     // --- the owner toplevel -----------------------------------------------------------
     // A plain fill, so the popup's pixels below cannot be confused with the parent's.
     let parent_fill = FillPattern::default();
-    let parent = wayland.create_toplevel(ToplevelSpec::new(APP_ID, TITLE, PARENT_SIZE))?;
-    let configure = parent.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        runtime.tiled_rect().size(),
-        "the tiling policy fills the output with the one visible toplevel, not {PARENT_SIZE:?}"
-    );
-    parent.apply_configure()?;
-    parent.commit_frame(parent_fill)?;
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
-        .await?;
-    let owner = created
-        .window_id()
-        .expect("window_created carries the owner window id");
-    events
-        .wait_for_expected(&Expected::WindowActivated(owner), DEADLINE)
-        .await?;
+    let (parent, owner) =
+        map_toplevel(&runtime, &wayland, &mut events, APP_ID, TITLE, parent_fill).await?;
     // The frame the popup has to be composited into is the window's tiled rect.
     let tiled = runtime.tiled_rect();
 
@@ -296,7 +213,7 @@ async fn popup_lifecycle_renders_into_the_owner_and_destroy_keeps_the_window() -
         "QueryState counts the popup under its owner: {owner_info:?}"
     );
     assert_eq!(
-        with_popup.len(),
+        with_popup.windows.len(),
         1,
         "a popup never becomes a window of its own, got {:?}",
         with_popup.windows
@@ -465,25 +382,8 @@ async fn owner_destroyed_with_open_popup_reports_popup_disappeared_first() -> Re
 
     // --- the owner toplevel -----------------------------------------------------------
     let parent_fill = FillPattern::default();
-    let owner_window = wayland.create_toplevel(ToplevelSpec::new(APP_ID, TITLE, PARENT_SIZE))?;
-    let configure = owner_window.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        runtime.tiled_rect().size(),
-        "the tiling policy fills the output with the one visible toplevel, not {PARENT_SIZE:?}"
-    );
-    owner_window.apply_configure()?;
-    owner_window.commit_frame(parent_fill)?;
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
-        .await?;
-    let owner = created
-        .window_id()
-        .expect("window_created carries the owner window id");
-    events
-        .wait_for_expected(&Expected::WindowActivated(owner), DEADLINE)
-        .await?;
+    let (owner_window, owner) =
+        map_toplevel(&runtime, &wayland, &mut events, APP_ID, TITLE, parent_fill).await?;
 
     // --- the popup, open when its owner dies ------------------------------------------
     let popup = wayland.create_popup(
@@ -583,11 +483,23 @@ async fn owner_destroyed_with_open_popup_reports_popup_disappeared_first() -> Re
     // again: no second disappearance when the client's still-open popup object is torn
     // down with the surface, no popup re-appearing, no second destruction. `focus_changed`
     // for the now-empty session is expected and deliberately does not match.
-    events
-        .expect_none(&further_lifecycle_events_for(owner), QUIET_BOUND)
-        .await?;
-
+    //
+    // Barrier instead of a quiet window: the destruction was already dispatched (both
+    // notifications above were received), and `QueryState` is served FIFO on the command
+    // channel, so every event that dispatch emitted is in the broadcast by the time the
+    // snapshot reply resolves. Draining the tap then observes them all.
+    let marker = events.seen().len();
     let after = query_state(&runtime).await?;
+    events.drain()?;
+    let further_expected = further_lifecycle_events_for(owner);
+    let further: Vec<&RuntimeEvent> = events.seen()[marker..]
+        .iter()
+        .filter(|event| further_expected.matches(event))
+        .collect();
+    assert!(
+        further.is_empty(),
+        "no lifecycle event may name the destroyed owner after its destruction, got {further:?}"
+    );
     assert!(
         after.window(owner).is_none(),
         "the destroyed owner is gone from the model, got {:?}",

@@ -4,7 +4,9 @@
 //! Both tests start their own real runtime in-process (pixman renderer, one compositor
 //! thread, one virtual output) and drive it the way an ordinary application does: a
 //! `wayland-client` toplevel over the real protocol path, `RuntimeCommand`s on the command
-//! channel, and the compositor's own `RuntimeEvent` broadcast as the assertion surface.
+//! channel, and the compositor's own `RuntimeEvent` broadcast as the assertion surface. The
+//! command-side helpers and the one [`map_toplevel`] come from the shared `tests/common`
+//! module.
 //!
 //! Rules this file follows (plan §"Ground rules"):
 //!
@@ -12,8 +14,11 @@
 //!   process env scoped to the runtime's startup only (nothing is launched here), so both
 //!   tests run in parallel; the Wayland client connects by absolute socket path.
 //! - **Events are the assertion surface, not sleeps.** Every wait is bounded by [`DEADLINE`]
-//!   and positive assertions wait for the event that proves them. Negative assertions are
-//!   bounded by [`QUIET_BOUND`] and say so; nothing in this file sleeps or polls in a loop.
+//!   and positive assertions wait for the event that proves them. Every "emits nothing" claim
+//!   is a positive ordering barrier instead of a fixed quiet window: a `QueryState` reply is
+//!   served FIFO after the action under test, so draining the tap when the reply resolves
+//!   observes every event that action emitted — and the drained tail is asserted empty.
+//!   Nothing in this file sleeps or polls in a loop.
 //! - **Tiling geometry comes from the window model**, never from a hard-coded `1280x800`:
 //!   expectations are built from [`TestRuntime::output_size`], [`TestRuntime::tiled_rect`]
 //!   and [`expected_window_geometry`].
@@ -38,28 +43,18 @@
 //! have carried is asserted positively — `geometry == tiled_rect()` for both windows and
 //! A's last configure being the full-output tiling configure with the `activated` state.
 
-use std::time::Duration;
-
-use adesk_compositor::{RenderedFrame, RuntimeCommand, StateSnapshot};
 use adesk_core::{ErrorCode, WindowId, WindowState};
 use adesk_testkit::{
     expected_window_geometry, wait_until, AppId, ConfiguredSize, EventAssert, Expected,
-    FillPattern, ImageAssert, ImageBuffer, KeyboardEvent, Rect, Result, RuntimeEvent, Size,
-    TestRuntime, TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient,
+    FillPattern, ImageAssert, ImageBuffer, KeyboardEvent, Rect, Result, RuntimeEvent, TestRuntime,
+    ToplevelSpec, WaylandTestClient,
 };
-use tokio::sync::oneshot;
 
-/// Every bounded wait in this file uses this deadline (10 s, the harness bound).
-const DEADLINE: Duration = Duration::from_secs(10);
-
-/// Bound for the bounded negative assertions ("no event", "no configure").
-///
-/// A negative claim can only be proven by waiting, and this is deliberately *not*
-/// [`DEADLINE`]: the compositor serves a command (and emits whatever it emits) within
-/// microseconds of receiving it — the positive waits above observe the same path in
-/// single-digit milliseconds — so a quarter second is orders of magnitude longer than the
-/// latency of the event being ruled out, while a failing test still reports fast.
-const QUIET_BOUND: Duration = Duration::from_millis(250);
+mod common;
+use common::{
+    activate_window, assert_seqs_increase, map_toplevel, query_state, render_window, test_config,
+    DEADLINE,
+};
 
 /// `xdg_toplevel.state.activated`, the `xdg-shell` protocol value of the enum entry.
 const XDG_TOPLEVEL_STATE_ACTIVATED: u32 = 4;
@@ -79,16 +74,6 @@ const APP_ID_MAP_TIME: &str = "org.example.appid.map";
 /// App id the same client sets *after* the map — the late `set_app_id` under test.
 const APP_ID_LATE: &str = "org.example.appid.late";
 
-/// A runtime whose Wayland socket a client can connect to.
-///
-/// `apply_env(false)`: no application is launched in this file, so the runtime scopes the
-/// process env across startup only and releases the env lock as soon as the compositor's
-/// socket is bound in its own temp dir. The Wayland client connects by absolute socket
-/// path, so both tests stay independent and parallel.
-fn test_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
-
 /// Whether a configure carries the `activated` toplevel state.
 ///
 /// [`ConfiguredSize::states`] keeps the array exactly as the wire carried it: native-endian
@@ -104,126 +89,12 @@ fn configure_is_activated(configure: &ConfiguredSize) -> bool {
         .any(|state| state == XDG_TOPLEVEL_STATE_ACTIVATED)
 }
 
-/// Reads the compositor's current state through `QueryState`.
-///
-/// The reply arrives on the oneshot the command carries; the compositor drops it only when
-/// the thread is gone, which is a harness failure and is reported as such.
-async fn query_state(runtime: &TestRuntime) -> adesk_core::Result<StateSnapshot> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::QueryState { reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the query_state reply"))
-}
-
-/// Sends `ActivateWindow` and returns its reply.
-///
-/// Not `?`-unwrapped on purpose: scenario 2 asserts on the reply itself (a successful
-/// activation and, separately, the `unknown_window` failure).
-async fn activate_window(runtime: &TestRuntime, window_id: WindowId) -> adesk_core::Result<()> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::ActivateWindow { window_id, reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the activate_window reply"))?
-}
-
-/// Renders one window at its natural size (`region`/`max_dimension` `None`).
-async fn render_window(
-    runtime: &TestRuntime,
-    window_id: WindowId,
-) -> adesk_core::Result<RenderedFrame> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::RenderWindow {
-            window_id,
-            region: None,
-            max_dimension: None,
-            reply,
-        })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the render_window reply"))?
-}
-
-/// Maps one toplevel on `client` and returns it with the runtime's window id.
-///
-/// The toplevel requests the size the tiling policy must override and commits `fill`.
-/// Awaits the map-time `window_created` and `window_activated` (the broadcast does not
-/// replay, and the id only exists in the event) and the client's `wl_keyboard.keymap`. The
-/// keymap is the seat-readiness barrier the harness's input tests use: the client creates
-/// its `wl_pointer`/`wl_keyboard` from the same `wl_seat.capabilities` event, so once the
-/// keymap has been delivered, an activation has seat objects to reach.
-async fn map_toplevel(
-    runtime: &TestRuntime,
-    client: &WaylandTestClient,
-    events: &mut EventAssert,
-    app_id: &str,
-    title: &str,
-    fill: FillPattern,
-) -> Result<(TestWindow, WindowId)> {
-    let window = client
-        .create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)).with_fill(fill))?;
-    let configure = window.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        runtime.tiled_rect().size(),
-        "the tiling policy configures the toplevel, not the size the client asked for"
-    );
-    window.apply_configure()?;
-    window.commit_frame(fill)?;
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(app_id)), DEADLINE)
-        .await?;
-    let window_id = created
-        .window_id()
-        .expect("window_created carries a window id");
-    // A mapped toplevel takes the visible slot and the keyboard focus; injection before
-    // this point would have no focus target.
-    events
-        .wait_for_expected(&Expected::WindowActivated(window_id), DEADLINE)
-        .await?;
-    client.wait_for_keyboard_event(
-        DEADLINE,
-        "wl_keyboard.keymap",
-        |event| matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0),
-    )?;
-    Ok((window, window_id))
-}
-
 /// Index of the newest recorded keyboard event satisfying `predicate`.
 fn last_keyboard_index(
     client: &WaylandTestClient,
     predicate: impl Fn(&KeyboardEvent) -> bool,
 ) -> Option<usize> {
     client.keyboard_events().iter().rposition(predicate)
-}
-
-/// Asserts the recorded history is strictly increasing in `seq`.
-///
-/// `seq` is allocated by the compositor's single `EventSink` counter and a broadcast tap
-/// that never lagged receives it in allocation order, so this is scenario 1's "`seq`
-/// strictly greater than the previous event" applied to the whole history.
-fn assert_seqs_increase(seen: &[RuntimeEvent]) {
-    for pair in seen.windows(2) {
-        assert!(
-            pair[0].seq() < pair[1].seq(),
-            "seq must increase, got {:?} (seq {}) before {:?} (seq {})",
-            pair[0].kind(),
-            pair[0].seq(),
-            pair[1].kind(),
-            pair[1].seq()
-        );
-    }
 }
 
 /// Scenario 1: a window appears with a tiling configure.
@@ -311,7 +182,7 @@ async fn window_appears_with_tiling_configure() -> Result<()> {
     // --- the window model behind the events -----------------------------------------
     let snapshot = query_state(&runtime).await?;
     assert_eq!(
-        snapshot.len(),
+        snapshot.windows.len(),
         1,
         "exactly one window is tracked, got {:?}",
         snapshot.windows
@@ -621,6 +492,11 @@ async fn focus_follows_activation() -> Result<()> {
         after.window(unknown).is_none(),
         "the probe id must not exist in this runtime"
     );
+    // `Expected::Any` used to be the strongest form of "emits no events", but it can only be
+    // proven by waiting. The positive barrier is stronger: the `QueryState` reply below is
+    // served FIFO after the rejected activation, so a drain on its completion observes every
+    // event the runtime emitted for it, and any event at all would leave the tail non-empty.
+    let rejection_marker = events.seen().len();
     let error = activate_window(&runtime, unknown)
         .await
         .expect_err("activating an unknown window must fail");
@@ -629,10 +505,14 @@ async fn focus_follows_activation() -> Result<()> {
         ErrorCode::UnknownWindow,
         "the rejection must carry the AGP unknown_window code, got {error}"
     );
-    // `Expected::Any` is the strongest form of the plan's "emits no events": any event at
-    // all fails the check. Bounded by QUIET_BOUND (see its docs).
-    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
     let untouched = query_state(&runtime).await?;
+    events.drain()?;
+    assert_eq!(
+        events.seen().len(),
+        rejection_marker,
+        "a rejected activation emits no event, got {:?}",
+        &events.seen()[rejection_marker..]
+    );
     assert_eq!(
         untouched.windows, after.windows,
         "a rejected activation must not touch any window"
@@ -771,10 +651,17 @@ async fn late_app_id_reaches_the_window_model() -> Result<()> {
     );
 
     // --- and, beyond the barrier commit, it changed nothing else -------------------------
-    // The write-back is metadata-only: AGP v1 has no app-id event, so `Expected::Any` — the
-    // strongest form of "emits no event" — must not match anything after the barrier commit.
-    // Bounded by QUIET_BOUND.
-    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
+    // The write-back is metadata-only: AGP v1 has no app-id event. The `QueryState` reply is
+    // served FIFO after whatever the write-back emitted, so draining the tap on its
+    // completion observes it; the history must still end at the barrier commit — same length,
+    // and the watermark equality below.
+    events.drain()?;
+    assert_eq!(
+        events.seen().len(),
+        seen_before_barrier + 1,
+        "the app-id write-back emits no event, got {:?}",
+        &events.seen()[seen_before_barrier + 1..]
+    );
     assert_eq!(
         late.seq,
         barrier.seq(),
@@ -807,7 +694,7 @@ async fn late_app_id_reaches_the_window_model() -> Result<()> {
         "the app id moves no keyboard focus"
     );
     assert_eq!(
-        late.len(),
+        late.windows.len(),
         1,
         "the late app id does not add or remove a window, got {:?}",
         late.windows

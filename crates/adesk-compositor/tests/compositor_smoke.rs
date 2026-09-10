@@ -164,7 +164,7 @@ async fn query_state_on_a_fresh_runtime_has_no_windows() {
         "no client has mapped a window yet"
     );
     assert!(snapshot.is_empty());
-    assert_eq!(snapshot.len(), 0);
+    assert_eq!(snapshot.windows.len(), 0);
     assert_eq!(snapshot.active_window_id, None);
     assert_eq!(snapshot.keyboard_focus, None);
     assert!(

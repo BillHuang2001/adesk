@@ -27,8 +27,10 @@
 //!   launched, so `apply_env(false)` releases the harness's process-env lock right after
 //!   startup and both tests stay independent and parallel.
 //! - **Events are the assertion surface, not sleeps.** Every wait is bounded by [`DEADLINE`];
-//!   the file's only negative claim ("a render is not an action") is bounded by
-//!   [`QUIET_BOUND`] and says so. Nothing here sleeps or polls in a loop.
+//!   the file's only negative claim ("a render is not an action") is a positive ordering
+//!   barrier instead of a quiet window: the `QueryState` replies that bracket the render are
+//!   served FIFO, so draining the tap between them proves the render emitted nothing. Nothing
+//!   here sleeps or polls in a loop.
 //! - **Geometry comes from the window model**, never a hard-coded `1280x800`:
 //!   [`TestRuntime::output_size`] and [`TestRuntime::tiled_rect`].
 //! - **`RenderOutput` is this suite's capture mechanism.** It is a command, not a frame loop:
@@ -39,34 +41,23 @@
 //!
 //! # Deviation from the plan
 //!
-//! `tests/integration_plan.md` is not edited by this change (the file is out of scope), so its
-//! ground rule "`RenderOutput` is not used by these suites" now holds for the four suites it
-//! names, not for the crate. This suite is the exception the pixel proof needs: it drives
+//! `tests/integration_plan.md` states a ground rule that `RenderOutput` is not used by the
+//! other suites. This suite is the exception the pixel proof needs: it drives
 //! `RuntimeCommand::RenderOutput` with `overlays: vec![]`, `region: None` and
 //! `max_dimension: None`.
 
-use std::time::Duration;
-
-use adesk_compositor::{RenderedFrame, RuntimeCommand, StateSnapshot};
-use adesk_core::{Rect, Size, WindowId, WindowInfo, WindowState};
+use adesk_core::{Rect, WindowId, WindowState};
 use adesk_render::DEFAULT_CLEAR_COLOR;
 use adesk_testkit::{
-    wait_until, AppId, EventAssert, Expected, FillPattern, ImageAssert, Result, RuntimeEvent,
-    TestRuntime, TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient,
+    wait_until, EventAssert, Expected, FillPattern, ImageAssert, Result, RuntimeEvent, TestRuntime,
+    TestWindow,
 };
-use tokio::sync::oneshot;
 
-/// Every bounded wait in this file uses this deadline (10 s, the harness bound).
-const DEADLINE: Duration = Duration::from_secs(10);
-
-/// Bound for the bounded negative claim ("a render is not an action").
-///
-/// A negative claim can only be proven by waiting, and this is deliberately *not* [`DEADLINE`]:
-/// `QueryState`/`RenderWindow`/`RenderOutput` are each served in one compositor callback whose
-/// positive counterpart is observed in single-digit milliseconds, so a quarter second is
-/// orders of magnitude longer than the latency of the events being ruled out, while a failing
-/// test still reports fast.
-const QUIET_BOUND: Duration = Duration::from_millis(250);
+mod common;
+use common::{
+    activate_window, assert_seqs_increase, close_window, map_toplevel, query_state, render_output,
+    render_window, test_config, window_info, DEADLINE,
+};
 
 /// App ids of the two toplevels of [`composition_renders_only_the_active_window`].
 const APP_A: &str = "org.example.composition.a";
@@ -74,9 +65,6 @@ const APP_B: &str = "org.example.composition.b";
 
 /// App id of the single toplevel of [`output_without_active_window_is_a_clear_frame`].
 const APP_ONLY: &str = "org.example.composition.only";
-
-/// Size both connections ask for; the tiling policy ignores it and fills the output instead.
-const REQUESTED: Size = Size::new(320, 200);
 
 /// A's fill: a strongly saturated red, fully opaque.
 ///
@@ -95,151 +83,6 @@ const FILL_B_RGBA: [u8; 4] = [40, 80, 200, 255];
 
 /// B's fill pattern (see [`FILL_A`]).
 const FILL_B: FillPattern = FillPattern::solid_rgb(FILL_B_RGBA[0], FILL_B_RGBA[1], FILL_B_RGBA[2]);
-
-/// A runtime whose Wayland socket a client can connect to.
-///
-/// `apply_env(false)`: no application is launched in this file, so the runtime scopes the
-/// process env across startup only and releases the env lock as soon as the compositor's socket
-/// is bound in its own temp dir. The Wayland clients connect by absolute socket path, so both
-/// tests stay independent and parallel.
-fn test_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
-
-/// Reads the compositor's current state through `QueryState`.
-///
-/// The reply arrives on the oneshot the command carries; the compositor drops it only when the
-/// thread is gone, which is a harness failure and is reported as such.
-async fn query_state(runtime: &TestRuntime) -> adesk_core::Result<StateSnapshot> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::QueryState { reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the query_state reply"))
-}
-
-/// The window record for `id`, or a failure naming what `QueryState` did report.
-fn window_info(snapshot: &StateSnapshot, id: WindowId) -> &WindowInfo {
-    snapshot
-        .window(id)
-        .unwrap_or_else(|| panic!("window {id} is tracked, got {:?}", snapshot.windows))
-}
-
-/// Sends `ActivateWindow` and returns its reply.
-async fn activate_window(runtime: &TestRuntime, window_id: WindowId) -> adesk_core::Result<()> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::ActivateWindow { window_id, reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the activate_window reply"))?
-}
-
-/// Sends `CloseWindow` (the runtime-native close request) and returns its reply.
-async fn close_window(runtime: &TestRuntime, window_id: WindowId) -> adesk_core::Result<()> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::CloseWindow { window_id, reply })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the close_window reply"))?
-}
-
-/// Renders one window at its natural size (`region`/`max_dimension` `None`).
-async fn render_window(
-    runtime: &TestRuntime,
-    window_id: WindowId,
-) -> adesk_core::Result<RenderedFrame> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::RenderWindow {
-            window_id,
-            region: None,
-            max_dimension: None,
-            reply,
-        })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the render_window reply"))?
-}
-
-/// Composes the whole virtual output without debug overlays (`region`/`max_dimension` `None`).
-///
-/// The reply is the composed frame: the same readback the server's `inspect_capture` returns,
-/// with none of its encoding — which is what makes the whole-output pixel assertions below
-/// possible without decoding anything.
-async fn render_output(runtime: &TestRuntime) -> adesk_core::Result<RenderedFrame> {
-    let (reply, answer) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::RenderOutput {
-            overlays: Vec::new(),
-            region: None,
-            max_dimension: None,
-            reply,
-        })
-        .map_err(adesk_core::Error::from)?;
-    answer
-        .await
-        .map_err(|_| adesk_core::Error::internal("compositor dropped the render_output reply"))?
-}
-
-/// Maps one toplevel on `client`, committed with `fill`, and returns it with the runtime's
-/// window id.
-///
-/// Awaits the map-time `window_created` and `window_activated` (the broadcast does not replay,
-/// and the id only exists in the event) and asserts the premise this suite depends on: the
-/// tiling policy configures the toplevel to the whole output, and the commit covers it whole.
-/// Whether A or B is active afterwards is the caller's business — the newest mapped toplevel
-/// takes the visible slot, so the order of the two calls decides it.
-async fn map_toplevel(
-    runtime: &TestRuntime,
-    client: &WaylandTestClient,
-    events: &mut EventAssert,
-    app_id: &str,
-    title: &str,
-    fill: FillPattern,
-) -> Result<(TestWindow, WindowId)> {
-    let tiled = runtime.tiled_rect();
-    let window = client.create_toplevel(ToplevelSpec::new(app_id, title, REQUESTED))?;
-    let configure = window.wait_for_configure(DEADLINE)?;
-    assert_eq!(
-        configure.size(),
-        tiled.size(),
-        "the tiling policy configures the toplevel, not the size the client asked for"
-    );
-    window.apply_configure()?;
-    window.commit_frame(fill)?;
-    assert_eq!(
-        window.size(),
-        tiled.size(),
-        "the committed buffer is the whole tiled window, so a window-composition assertion \
-         below really covers the output"
-    );
-
-    let created = events
-        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(app_id)), DEADLINE)
-        .await?;
-    let window_id = created
-        .window_id()
-        .expect("window_created carries a window id");
-    // The visible slot is taken by the mapping toplevel itself (the focus move is scenario 2's
-    // subject in `window_lifecycle.rs`); waiting here is the barrier that makes the enable
-    // below unambiguous.
-    events
-        .wait_for_expected(&Expected::WindowActivated(window_id), DEADLINE)
-        .await?;
-    Ok((window, window_id))
-}
 
 /// Activates `window_id` and asserts the activation's own two events.
 ///
@@ -373,24 +216,6 @@ async fn commit_and_sync(
     Ok(*commit_seq)
 }
 
-/// Asserts the recorded history is strictly increasing in `seq`.
-///
-/// `seq` is allocated by the compositor's single `EventSink` counter and a broadcast tap that
-/// never lagged receives it in allocation order (a lag is reported as an error by the tap, not
-/// silently tolerated).
-fn assert_seqs_increase(seen: &[RuntimeEvent]) {
-    for pair in seen.windows(2) {
-        assert!(
-            pair[0].seq() < pair[1].seq(),
-            "seq must increase, got {:?} (seq {}) before {:?} (seq {})",
-            pair[0].kind(),
-            pair[0].seq(),
-            pair[1].kind(),
-            pair[1].seq()
-        );
-    }
-}
-
 /// Two tracked windows, one visible slot: the composition is the active window's pixels only.
 ///
 /// The exclusion is proven with pixels, not with the selection: both toplevels are tiled to the
@@ -445,7 +270,7 @@ async fn composition_renders_only_the_active_window() -> Result<()> {
 
     let both = query_state(&runtime).await?;
     assert_eq!(
-        both.len(),
+        both.windows.len(),
         2,
         "both toplevels are tracked, got {:?}",
         both.windows
@@ -500,6 +325,7 @@ async fn composition_renders_only_the_active_window() -> Result<()> {
     // visible slot — a "renders it, therefore shows it" implementation fails right here.
     events.drain()?;
     let before_render = query_state(&runtime).await?;
+    let render_marker = events.seen().len();
     let b_frame = render_window(&runtime, b_id).await?;
     assert_eq!(
         b_frame.size(),
@@ -507,10 +333,17 @@ async fn composition_renders_only_the_active_window() -> Result<()> {
         "RenderWindow renders B at its natural (tiled) size"
     );
     ImageAssert::new(&b_frame.image).matches_solid(FILL_B_RGBA, 0);
-    // `Expected::Any` is the strongest form of "a render is not an action": any event at all
-    // fails the check. Bounded by QUIET_BOUND (see its docs).
-    events.expect_none(&Expected::Any, QUIET_BOUND).await?;
+    // Positive barrier instead of a quiet window: the `QueryState` reply below is served FIFO
+    // after the render, so draining the tap on its completion observes every event the render
+    // emitted — and it must have emitted none.
     let after_render = query_state(&runtime).await?;
+    events.drain()?;
+    assert_eq!(
+        events.seen().len(),
+        render_marker,
+        "a render emits an event, got {:?}",
+        &events.seen()[render_marker..]
+    );
     assert_eq!(
         after_render.active_window_id,
         Some(a_id),

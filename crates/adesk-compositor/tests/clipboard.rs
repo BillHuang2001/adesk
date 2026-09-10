@@ -57,22 +57,17 @@
 //! and asserts it anyway, so a future change that starts carrying payloads through events
 //! fails here.
 
-use std::time::Duration;
+mod common;
 
-use adesk_compositor::{RuntimeCommand, StateSnapshot};
+use adesk_compositor::RuntimeCommand;
 use adesk_core::Position;
 use adesk_testkit::{
     AppId, EventAssert, EventKind, FillPattern, PointerEvent, Result, RuntimeEvent, Size,
-    TestRuntime, TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient, WindowId,
+    TestRuntime, TestWindow, ToplevelSpec, WaylandTestClient, WindowId,
 };
 use tokio::sync::oneshot;
 
-/// Deadline for every bounded wait in this file.
-///
-/// Orders of magnitude above one protocol round trip (microseconds on the test machine) and
-/// short enough that a broken runtime fails the suite instead of hanging it. A wait that
-/// expires is a test **failure**: it is the proof that the clipboard did not work.
-const DEADLINE: Duration = Duration::from_secs(10);
+use common::{activate_window, query_state, test_config, DEADLINE};
 
 /// The one mime type the publishing peer advertises, and the one the reader reads back.
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -95,16 +90,6 @@ const OWNER_APP_ID: &str = "org.example.compositor.clipboard.owner";
 
 /// App id of the reading peer. It maps first and is activated before it reads or publishes.
 const READER_APP_ID: &str = "org.example.compositor.clipboard.reader";
-
-/// The runtime configuration every test in this file uses.
-///
-/// `apply_env(false)`: nothing here launches an application, so the runtime does not need the
-/// process env after startup, and both clients connect by absolute path
-/// ([`TestRuntime::wayland_client`]). Releasing the harness's process-env lock immediately
-/// keeps the tests independent of each other.
-fn clipboard_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(false)
-}
 
 /// One connected protocol-path client with its mapped toplevel.
 struct Peer {
@@ -254,35 +239,6 @@ async fn two_peers(runtime: &TestRuntime, events: &mut EventAssert) -> Result<(P
     Ok((owner, reader))
 }
 
-/// Reads the compositor's window/focus state over the command channel.
-///
-/// `QueryState` is answered in FIFO order with the other commands, so a snapshot taken after
-/// a command observed is a snapshot in which that command's state change is already visible.
-async fn query_state(runtime: &TestRuntime) -> Result<StateSnapshot> {
-    let (reply, rx) = oneshot::channel();
-    runtime
-        .compositor()
-        .send(RuntimeCommand::QueryState { reply })?;
-    Ok(rx
-        .await
-        .expect("the compositor services every queued command"))
-}
-
-/// Makes `id` the active window: a runtime-native focus change, never synthesized input.
-///
-/// Activating the window that is already active is a documented no-op, so every call site in
-/// this file activates the *other* peer (a real keyboard/data-device focus change).
-async fn activate(runtime: &TestRuntime, id: WindowId) -> Result<()> {
-    let (reply, rx) = oneshot::channel();
-    runtime.compositor().send(RuntimeCommand::ActivateWindow {
-        window_id: id,
-        reply,
-    })?;
-    rx.await
-        .expect("the compositor services every queued command")?;
-    Ok(())
-}
-
 /// Moves the pointer to a window-relative position inside the focused window.
 async fn move_pointer(runtime: &TestRuntime, position: Position) -> Result<()> {
     let (reply, rx) = oneshot::channel();
@@ -370,7 +326,7 @@ async fn teardown(peers: Vec<Peer>, runtime: TestRuntime) -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
-    let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     // Tap before the maps: both barriers (each `map_peer`'s mapping commit and `publish`'s
     // publication commit) await their own `SurfaceCommit` event, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
@@ -397,7 +353,7 @@ async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
 
     // The reader becomes the data-device-focus client — the focus change, not synthesized
     // input, is what makes the compositor announce the selection to it.
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
 
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
     let read = reader.client.read_selection(TEXT_MIME)?;
@@ -412,7 +368,7 @@ async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
-    let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     // Tap before the maps: the mapping barrier and the publication barrier both await
     // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
@@ -420,7 +376,7 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
 
     // First publication, as seen by the reader: offered and readable, byte for byte.
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
@@ -432,10 +388,10 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
 
     // Supersede. The owner takes the keyboard focus back first — Smithay accepts a selection
     // only from the focused client — and publishes a different payload.
-    activate(&runtime, owner.id).await?;
+    activate_window(&runtime, owner.id).await?;
     publish(&owner, &mut events, TEXT_MIME, SECOND_PAYLOAD, 3).await?;
     // Then the reader is focused again, where the *new* selection must surface as a new offer.
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
 
     reader.client.wait_for_selection_offer(2, DEADLINE)?;
     assert_eq!(
@@ -460,7 +416,7 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
-    let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     // Tap before the maps: the mapping barrier and the publication barrier both await
     // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
@@ -468,7 +424,7 @@ async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
 
     // The offer advertises exactly one mime type: asking for another one is neither an error
@@ -493,7 +449,7 @@ async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
-    let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     // Tap before the maps: the mapping barrier and the publication barrier both await
     // `SurfaceCommit` events, and the broadcast never replays.
     let mut events = EventAssert::tap(&runtime);
@@ -501,7 +457,7 @@ async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
 
     // The reader is now the selection target: it holds the keyboard focus (activation) and a
     // selection offer to read through.
@@ -520,7 +476,7 @@ async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
     // Focus back to the owner: the reader's selection is announced to it, and the direction
     // of the transfer is reversed.
     let offers_before = owner.client.selection_offer_count();
-    activate(&runtime, owner.id).await?;
+    activate_window(&runtime, owner.id).await?;
     owner
         .client
         .wait_for_selection_offer(offers_before + 1, DEADLINE)?;
@@ -539,7 +495,7 @@ async fn no_runtime_event_carries_clipboard_payload() -> Result<()> {
     // this string would be found by the scan below.
     const SECRET: &str = "adesk-clipboard-secret-8c41f2";
 
-    let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let runtime = TestRuntime::start_with(test_config()).await?;
     // Tap before anything happens: neither the mapping barrier's nor the publication barrier's
     // `surface_commit` event is replayed by the broadcast.
     let mut events = EventAssert::tap(&runtime);
@@ -547,7 +503,7 @@ async fn no_runtime_event_carries_clipboard_payload() -> Result<()> {
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
     publish(&owner, &mut events, TEXT_MIME, SECRET.as_bytes(), 2).await?;
-    activate(&runtime, reader.id).await?;
+    activate_window(&runtime, reader.id).await?;
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
     assert_eq!(
         reader.client.read_selection(TEXT_MIME)?.as_deref(),
