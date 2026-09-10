@@ -1,8 +1,9 @@
 //! The Wayland test client: the real protocol path, known SHM fills, bounded pumps.
 //!
 //! [`WaylandTestClient`] is an ordinary Wayland client built on `wayland-client` 0.31: it
-//! connects to the runtime's socket, binds `wl_compositor`/`wl_shm`/`xdg_wm_base`/`wl_seat`,
-//! creates `xdg_toplevel`/`xdg_popup` surfaces and commits SHM buffers filled with a
+//! connects to the runtime's socket, binds
+//! `wl_compositor`/`wl_shm`/`xdg_wm_base`/`wl_seat`/`wl_data_device_manager`, creates
+//! `xdg_toplevel`/`xdg_popup` surfaces and commits SHM buffers filled with a
 //! [`FillPattern`](crate::FillPattern). It never reaches into compositor state, so a test that drives this
 //! client exercises exactly what an application would.
 //!
@@ -87,12 +88,14 @@ use crate::block_until;
 use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
 
+mod clipboard;
 mod input;
 mod protocol;
 mod shm;
 mod state;
 mod window;
 
+pub use clipboard::DEFAULT_SELECTION_TIMEOUT;
 pub use input::{
     AxisKind, ButtonState, KeyboardEvent, KeyState, ModifiersState, PointerEvent, BTN_LEFT, KEY_C,
     KEY_LEFTCTRL,
@@ -226,10 +229,15 @@ impl WaylandTestClient {
     ///    `(GlobalList, EventQueue<ClientState>)`; snapshot
     ///    `globals_list.contents().clone_list()` into `ClientState::globals` (a
     ///    `GlobalListContents` cannot be owned — it lives inside the registry object data).
-    /// 4. `protocol::bind_globals` binds `wl_compositor` (v4+), `wl_shm` (v1+) and
-    ///    `xdg_wm_base` (v1+) at `min(server, interface_max)`; a missing global is
+    /// 4. `protocol::bind_globals` binds `wl_compositor` (v4+), `wl_shm` (v1+),
+    ///    `xdg_wm_base` (v1+), `wl_seat` (v1+) and `wl_data_device_manager` (v1+) at
+    ///    `min(server, interface_max)`; a missing global is
     ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported).
-    /// 5. Spawn the reader thread described in the module docs with a clone of `state`,
+    /// 5. `data_device_manager.get_data_device(seat, qhandle, ())` creates the client's
+    ///    `wl_data_device` (the clipboard object, see [`clipboard`]) and it is handed to
+    ///    `ClientState::new` *before* the reader thread starts, so no offer/selection event
+    ///    can arrive before there is state to record it in.
+    /// 6. Spawn the reader thread described in the module docs with a clone of `state`,
     ///    the event queue and an `UnboundedSender<PumpEvent>`, then wait (bounded by
     ///    [`ROUNDTRIP_TIMEOUT`]) for the real `wl_shm.format` events to arrive. A runtime
     ///    that never advertises `ARGB8888` is
@@ -269,6 +277,11 @@ impl WaylandTestClient {
             &qhandle,
             SHM_POOL_CAPACITY,
         )?));
+        // The clipboard device is created before the reader thread exists, so it is already
+        // in `ClientState` when its first `data_offer`/`selection` event is dispatched.
+        let data_device = globals
+            .data_device_manager()
+            .get_data_device(globals.seat(), &qhandle, ());
 
         // The advertised formats start empty: `wait_for_shm_formats` must observe the
         // real `wl_shm.format` events before `supports_argb8888` means anything (a
@@ -277,6 +290,7 @@ impl WaylandTestClient {
             globals_snapshot,
             HashSet::new(),
             globals.seat().clone(),
+            data_device,
         )));
         let (pump_tx, mut pump_rx) = unbounded_channel();
         let reader_state = Arc::clone(&state);

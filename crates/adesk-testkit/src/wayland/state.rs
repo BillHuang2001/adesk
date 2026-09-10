@@ -19,6 +19,17 @@
 //! in the dispatch bodies (the reader thread already holds the `ClientState` lock), so it
 //! never blocks, never touches I/O and is complete even if a test never pumps.
 //!
+//! ## Clipboard state
+//!
+//! `wl_data_device` is the object the clipboard runs on: its `data_offer` event creates a
+//! `wl_data_offer` ([`ClientState::offers`], keyed by object id) and its `selection` event
+//! names the offer that is currently the selection ([`ClientState::current_offer`], with
+//! [`ClientState::selection_offer_count`] counting how many offers were announced). The
+//! source side is the mirror image: [`ClientState::selection_source`] holds the
+//! `wl_data_source` the client last published, so a `wl_data_source.send` can be answered
+//! with the stored bytes. See [`super::clipboard`] for the lifecycle rules around all of
+//! this (supersede, fd handling, deadlines).
+//!
 //! ## Configure sequencing
 //!
 //! An xdg configure is two events: the role event (`xdg_toplevel.configure` with
@@ -38,8 +49,8 @@ use adesk_core::{Point, Rect, Size};
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::{Global, GlobalListContents};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_keyboard, wl_output, wl_pointer, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_offer, wl_data_source,
+    wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{
@@ -54,6 +65,28 @@ use super::window::ConfiguredSize;
 
 /// A window's state, shared between its handle and the dispatch impls.
 pub(crate) type WindowSlot = Arc<Mutex<WindowState>>;
+
+/// The `wl_data_source` the client last published as the clipboard selection.
+///
+/// Holding the proxy is what keeps the object alive while the compositor may still answer
+/// with `wl_data_source.send`; `mime`/`bytes` are the payload that request is answered with
+/// (see [`super::clipboard`]).
+pub(crate) struct SelectionSource {
+    /// The live `wl_data_source` proxy.
+    pub(crate) source: wl_data_source::WlDataSource,
+    /// The single mime type this source offered.
+    pub(crate) mime: String,
+    /// The exact bytes written to a `wl_data_source.send` file descriptor.
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// A `wl_data_offer` the compositor created, with the mime types it advertised.
+pub(crate) struct OfferRecord {
+    /// The offer proxy, used to issue `wl_data_offer.receive`.
+    pub(crate) offer: wl_data_offer::WlDataOffer,
+    /// Every `wl_data_offer.offer` mime type, in delivery order.
+    pub(crate) mime_types: Vec<String>,
+}
 
 /// Event-queue state shared by the client and the reader thread.
 pub(crate) struct ClientState {
@@ -72,6 +105,22 @@ pub(crate) struct ClientState {
     pub(crate) seat: wl_seat::WlSeat,
     /// The `wl_seat.name` the compositor reported (v2+), when it sent one.
     pub(crate) seat_name: Option<String>,
+    /// The `wl_data_device` this client holds for the bound seat.
+    ///
+    /// Created from the `wl_data_device_manager` at connect time, before the reader thread
+    /// starts, so no `data_offer`/`selection` event can arrive before there is state to
+    /// record it in.
+    pub(crate) data_device: wl_data_device::WlDataDevice,
+    /// The `wl_data_source` the client last published, with its payload.
+    pub(crate) selection_source: Option<SelectionSource>,
+    /// Every offer the compositor created, keyed by the `wl_data_offer` object id.
+    pub(crate) offers: HashMap<ObjectId, OfferRecord>,
+    /// The offer `wl_data_device.selection` most recently announced.
+    pub(crate) current_offer: Option<ObjectId>,
+    /// How many `wl_data_device.selection` events carried an offer (`Some`).
+    ///
+    /// A `selection` with no offer clears the selection and deliberately does *not* count.
+    pub(crate) selection_offer_count: u64,
     /// The live `wl_pointer`, while the seat advertises the pointer capability.
     pub(crate) pointer: Option<wl_pointer::WlPointer>,
     /// The live `wl_keyboard`, while the seat advertises the keyboard capability.
@@ -103,11 +152,17 @@ impl ClientState {
         globals: Vec<Global>,
         shm_formats: HashSet<wl_shm::Format>,
         seat: wl_seat::WlSeat,
+        data_device: wl_data_device::WlDataDevice,
     ) -> ClientState {
         ClientState {
             globals,
             seat,
             seat_name: None,
+            data_device,
+            selection_source: None,
+            offers: HashMap::new(),
+            current_offer: None,
+            selection_offer_count: 0,
             pointer: None,
             keyboard: None,
             pointer_events: Vec::new(),
@@ -124,22 +179,19 @@ impl ClientState {
     ///
     /// Exactly three events update it — `wl_pointer.enter`, `wl_pointer.button` and
     /// `wl_keyboard.enter` — because those are the events a client may legally answer with
-    /// a request that needs a serial (`wl_data_source.set_selection` in the later clipboard
-    /// support). Other serial-carrying events (`wl_pointer.leave`, `wl_keyboard.leave`,
+    /// a request that needs a serial (`wl_data_source.set_selection`). Other
+    /// serial-carrying events (`wl_pointer.leave`, `wl_keyboard.leave`,
     /// `wl_keyboard.key`, `wl_keyboard.modifiers`) deliberately do *not*: a serial from an
     /// event the compositor sent only to notify is not a grant of input, and the pinned
     /// contract names exactly these three sources.
     ///
-    /// Internal plumbing: no public API exposes it yet, and
+    /// Internal plumbing: no public API exposes it, and
     /// [`clear_input_events`](super::WaylandTestClient::clear_input_events) keeps it,
     /// because a serial belongs to the seat's input stream rather than to the recorded
     /// event history.
     ///
-    /// Its consumer is the later clipboard pass (`wl_data_source.set_selection` must quote
-    /// a serial a real input event carried); until that lands, only this module's own
-    /// self-validation test reads it, so a plain (non-test) lib build would report it as
-    /// dead code. The `allow` is deliberately scoped to this one item — never the crate.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// Its consumer is [`clipboard`](super::clipboard): `wl_data_source.set_selection`
+    /// must quote a serial a real input event carried.
     pub(crate) fn latest_input_serial(&self) -> Option<u32> {
         self.latest_input_serial
     }
