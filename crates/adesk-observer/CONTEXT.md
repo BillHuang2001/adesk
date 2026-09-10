@@ -115,6 +115,17 @@ No module-level `allow(dead_code)` remains: only `tests/common/mod.rs` keeps one
 - `Observation::quiet` is the evidence flag above, *not* "condition met": it reports quiet for the applicable threshold (`Condition::Quiet`'s own `quiet_ms`, otherwise `ObserverConfig::default_quiet_ms`) at resolution time, as `docs/protocol.md` §5.4 defines.
   A timed-out `wait_for_change` can legitimately carry `quiet: true` (default 250 ms evidence threshold, `ObserverConfig::default_quiet_ms`).
   A timed-out `Condition::Quiet`/`wait_for_quiet` always reports `quiet: false` + `timed_out: true` (its evidence threshold is the condition's own `quiet_ms`), and `Condition::Timeout` resolves with `timed_out: false` by definition.
+## Performance notes (hot-path cost model)
+Per-event path — `handle_event` runs once per compositor event, in a single pump task (`adesk-server/src/event_pump.rs`):
+- Every `SurfaceCommit` clones its damage `Region` twice: once into the journal `CountedEvent` (`src/journal.rs:133`) and once into `WindowTemporalState::last_damage` (`src/service.rs:301`); `last_damage` is read only by the inspection path (`adesk-server/src/inspection.rs`).
+- Three lock acquisitions per event: clock mutex (`observe_ts`), state mutex, and the `watch` internal lock in `send_modify` (`src/service.rs:273`, `276`, `341`).
+- The `watch<u64>` generation is global: every event wakes *every* active waiter, regardless of its window filter.
+Per-wakeup waiter path — `run_wait` (`src/service.rs:680-741`):
+- Each wakeup re-scans the whole journal through `journal.since(cursor)` (`src/service.rs:686`, `src/journal.rs:238`), i.e. O(capacity)=4096 filter steps even when no new event arrived, once per event per active waiter.
+- `Accumulator::absorb` allocates a temporary `Region` per commit via `damage.clip(&geometry)` (`src/waiter.rs:208`) whenever geometry is known (post-resync); `Accumulator::damage` never dedups/coalesces during the wait, and `resolve` runs `Region::simplified()` → `coalesce()`, an O(n²) pairwise merge over that union (`src/waiter.rs:237`).
+Journal ordering gotcha: the buffer is NOT seq-monotonic after `resync` — `prune_through(snapshot.seq)` keeps only `seq > snapshot.seq` (`src/service.rs:402`) and the synthetic events are then pushed at the *tail* with `seq == snapshot.seq` (`src/service.rs:482-484`), so binary search or backward scans over the buffer are unsafe.
+`ObserverService::window_state()` clones the whole `WindowTemporalState` (incl. `last_damage`) — `src/service.rs:798`; `adesk-server`'s event pump calls it once per `SurfaceCommit` just to read `geometry`.
+
 ## Dependencies
 - `adesk-core` (landed): `RuntimeEvent`, `Observation`, `WindowId`, `ActionId`, `Position`, `Rect`, `Region`, `Error`/`ErrorCode`.
 - `tokio`: `sync` (`watch`), `time` (`Instant`, `sleep_until`); dev-only `test-util` for paused time.
