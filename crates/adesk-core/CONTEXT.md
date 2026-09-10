@@ -89,7 +89,8 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `ImageBuffer` data is row-major top-down, RGBA8 with straight (non-premultiplied) alpha; `stride` is a **public field**, not an accessor, and is only guaranteed `>= width * 4` (rows may be padded), so readers must not assume `stride == width * 4`.
 - `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says all four ids are `Copy`, which is impossible for a `String` payload — the three numeric ids are `Copy`.
 - `Observation` lives in `event.rs` (the task's module layout has no observation module); it is the temporal summary of the event vocabulary.
-- `Observation.quiet` means the wait condition was met without timing out; `Observation.timed_out` means the wait expired before the condition was met — both are plain always-serialized `bool`s whose semantics belong to `adesk-observer` (core carries no wait logic).
+- `Observation.quiet` is an evidence flag, not proof the condition was met: it reports whether the wait's scope had been quiet for the applicable threshold at resolution time — the condition's `quiet_ms` for a quiet wait, otherwise the runtime default (`ObserverConfig::default_quiet_ms`) — so a timed-out `change` wait can legitimately carry `quiet: true`.
+- `Observation.timed_out` reports that the wait expired before its condition was met, except `Condition::Timeout`, which reaches its horizon by design and therefore reports `false`; both flags are plain always-serialized `bool`s whose semantics belong to `adesk-observer` (core carries no wait logic).
 - `Button`/`WindowState` derive `Default` via `#[default]` (`Left`/`Inactive`) so protocol defaults (`button = "left"`) are expressible with `#[serde(default)]` downstream.
 - `Error` uses `thiserror` for `Display`/`std::error::Error` and serde for the AGP error object shape (`{"code","message"}`).
 

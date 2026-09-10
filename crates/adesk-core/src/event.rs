@@ -251,7 +251,10 @@ pub struct Observation {
     pub popups_disappeared: Vec<u64>,
     /// Wall-clock-free elapsed time of the wait, in milliseconds.
     pub elapsed_ms: u64,
-    /// Whether the condition was met without timing out.
+    /// Evidence flag, not proof the condition was met: whether the wait's scope
+    /// had been quiet for the applicable threshold at resolution time — the
+    /// condition's `quiet_ms` for a quiet wait, otherwise the runtime default —
+    /// so a timed-out `change` wait can legitimately carry `quiet: true`.
     pub quiet: bool,
     /// Whether the wait expired before the condition was met.
     pub timed_out: bool,
