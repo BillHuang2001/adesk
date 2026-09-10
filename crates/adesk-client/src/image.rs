@@ -1,9 +1,9 @@
 //! Image payload decoding.
 //!
 //! `capture_*`, `observe` and `inspect_capture` return the wire type
-//! [`ImagePayload`](crate::ImagePayload) (base64 data + metadata, protocol §4).
+//! [`ImagePayload`] (base64 data + metadata, protocol §4).
 //! Agent code wants pixels, so this module decodes a payload into an
-//! [`ImageBuffer`](adesk_core::ImageBuffer) — the shared, non-wire pixel type.
+//! [`ImageBuffer`] — the shared, non-wire pixel type.
 //!
 //! Supported formats (protocol §5.4 `format`):
 //!
@@ -45,7 +45,7 @@ pub enum ImageFormat {
 
 /// Decode an [`ImagePayload`] into an [`ImageBuffer`].
 ///
-/// Errors are [`ClientError::Image`](crate::ClientError::Image) for bad base64,
+/// Errors are [`ClientError::Image`] for bad base64,
 /// an unsupported/unknown format, a PNG decoder failure, or pixel data whose
 /// length does not match `width * height * 4`.
 pub fn decode_image(payload: &ImagePayload) -> Result<ImageBuffer> {

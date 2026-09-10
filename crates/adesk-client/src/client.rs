@@ -132,7 +132,7 @@ impl Client {
     ///
     /// When `options.verify_version` is set (the default), a `ping` is
     /// performed immediately and a `protocol_version` mismatch fails the
-    /// connect with [`ClientError::VersionMismatch`].
+    /// connect with [`ClientError::VersionMismatch`](crate::ClientError::VersionMismatch).
     pub async fn connect_with(options: ConnectOptions) -> Result<Client> {
         let verify_version = options.verify_version;
         let inner = Connection::connect(options).await?;
@@ -156,7 +156,8 @@ impl Client {
     /// Close the shared connection (all clones become unusable) and wait for
     /// the background tasks to finish.
     ///
-    /// In-flight requests fail with [`ClientError::Closed`]; event streams end.
+    /// In-flight requests fail with [`ClientError::Closed`](crate::ClientError::Closed);
+    /// event streams end.
     pub async fn close(self) -> Result<()> {
         self.inner.close().await
     }
