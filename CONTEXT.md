@@ -167,7 +167,9 @@ Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `ade
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
 There is no GUI viewer: `adesk-viewer` is headless — it connects over VAP, writes received frames as PNG and drives input from a script — so an interactive human still needs a display-capable front-end that speaks VAP.
 Inspector debug overlays (`inspect_capture` / `inspect_subscribe`) remain AGP-only: the VAP viewer streams plain desktop frames (overlays are negotiated on the wire but not composited into v1 frames), so overlay inspection still requires an AGP client (`crates/adesk-server/src/dispatch/inspect.rs`).
-Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and an `adesk-testkit` exec-path override (downstream crates currently ship their own fixture binary, e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
+Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, and multi-window visibility.
+`adesk-testkit` now provides a fixture exec-path override (`TestAppSpec::with_exec`), so a downstream crate can point a fixture at its own program and reuse `TestAppSpec::desktop_entry`;
+downstream crates still ship their own fixture binary because testkit's `adesk-test-app` helper is not built during their test runs (e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
 
 ## Routing Table
 
