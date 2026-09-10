@@ -165,6 +165,8 @@ Cost centers on the per-request and per-event paths (identified by inspection; t
 - `cargo check --all-targets` does not compile doctests; `cargo test -p adesk-client` runs the `lib.rs` example (1 doctest).
 - `tests/common/mod.rs` is a shared module (`mod common;` in each test file), not a test target; it keeps `#![allow(dead_code)]` because each test target uses only a subset of the harness helpers.
 - Transport invariants: the reader task never `await`s while holding the `pending` lock and never `unwrap()`s a peer-controlled frame; `EVENT_CHANNEL_CAPACITY` (4096) is mirrored by the events lag test, so raising it means raising that test's emission count.
+- `EventFanout::send` clones the event for every live subscriber except the last, which takes it by move (0 clones with 0–1 subscribers); keep that property when touching the fan-out — `EventReceiver`/`Subscription` in `src/events.rs` carry the receive side.
+- `read_line` (`src/transport.rs`) reuses a reader-task-owned scratch buffer across lines (no per-line allocation) and returns a borrowed slice; keep the buffer cleared per line.
 
 ## Status
 
