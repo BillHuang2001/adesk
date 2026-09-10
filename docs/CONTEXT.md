@@ -27,6 +27,10 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
   No other file in `docs/` classifies errors; only incidental mentions exist (`render_failed` architecture.md:152, `not_supported` architecture.md:210, `shutting_down` architecture.md:268).
   The per-code *meanings* are derivable from the mapping tables in `crates/adesk-server/src/error.rs`; a retryable-vs-fatal taxonomy is an **open design question**, not an unstated behaviour — no crate implements (or needs) one.
 - No method-to-error table exists: `unknown_window` for a nonexistent `window_id` is implied only by the §6 example and the code name.
+- `protocol.md` §4 (lines 126-128) states an observation's `image` is `null` "when no window is renderable at that moment"; the implementation has no such path.
+  `image: null` occurs only when there is no candidate window at all (no scoped `window_id`, no active window, no keyboard focus).
+  A render attempt that fails returns an AGP error (`render_failed` / `unknown_window` / `invalid_request`), and a tracked window with no committed buffer renders a clear frame (a non-null image).
+  See `crates/adesk-server/CONTEXT.md` Known Issues for the implementation side.
 
 ## Routing Table
 
