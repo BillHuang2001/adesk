@@ -65,6 +65,17 @@ pub(crate) const EVENT_CHANNEL_CAPACITY: usize = 4096;
 /// Capacity of the outbound request queue.
 pub(crate) const OUTBOUND_QUEUE_CAPACITY: usize = 64;
 
+/// `unsubscribe_events` params (AGP §5.6), serialising to
+/// `{"subscription_id": <u64>}`.
+///
+/// Shared by the two call sites: `Client::unsubscribe_events` (a normal request)
+/// and `Connection::unsubscribe_fire_and_forget` (the `Drop` path of the event
+/// streams).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub(crate) struct UnsubscribeParams {
+    pub(crate) subscription_id: u64,
+}
+
 /// One in-flight request: where to deliver its result.
 type PendingSender = oneshot::Sender<Result<Value, ServerError>>;
 
@@ -168,22 +179,55 @@ impl EventFanout {
 
     /// Deliver one event to every live subscriber.
     ///
-    /// A full queue drops the event and counts it; a dropped receiver retires
-    /// the subscriber.
+    /// The event is cloned only for subscribers that are *not* the last live
+    /// one; the last live subscriber takes it by move. With zero or one live
+    /// subscriber the event is therefore never cloned, which matters because an
+    /// `inspect_frame` can be several megabytes. A full queue drops the event
+    /// for that subscriber and counts it; a dropped receiver retires the
+    /// subscriber.
     fn send(&mut self, event: AgpEvent) {
         if self.closed {
             return;
         }
-        self.subscribers.retain_mut(
-            |subscriber| match subscriber.sender.try_send(event.clone()) {
-                Ok(()) => true,
+
+        // The last subscriber whose receiver is still alive is the one that can
+        // take the event by move. Receivers after it are already gone and are
+        // retired below.
+        let Some(last_live) = self
+            .subscribers
+            .iter()
+            .rposition(|subscriber| !subscriber.sender.is_closed())
+        else {
+            self.subscribers.clear();
+            return;
+        };
+
+        // Every live subscriber before the last one gets its own clone.
+        for subscriber in &mut self.subscribers[..last_live] {
+            match subscriber.sender.try_send(event.clone()) {
+                Ok(()) => {}
                 Err(TrySendError::Full(_)) => {
                     subscriber.skipped.fetch_add(1, Ordering::SeqCst);
-                    true
                 }
-                Err(TrySendError::Closed(_)) => false,
-            },
-        );
+                // A receiver that dropped meanwhile is retired by `retain`.
+                Err(TrySendError::Closed(_)) => {}
+            }
+        }
+
+        // The last live subscriber takes the event itself (no clone).
+        match self.subscribers[last_live].sender.try_send(event) {
+            Ok(()) => {}
+            Err(TrySendError::Full(_)) => {
+                self.subscribers[last_live]
+                    .skipped
+                    .fetch_add(1, Ordering::SeqCst);
+            }
+            Err(TrySendError::Closed(_)) => {}
+        }
+
+        // Retire receivers that dropped (before, during, or after the send).
+        self.subscribers
+            .retain(|subscriber| !subscriber.sender.is_closed());
     }
 
     /// End every subscription (dropping the senders wakes the streams).
@@ -346,6 +390,24 @@ impl Connection {
         }))
     }
 
+    /// Serialise `params`, allocate the next request id and encode the AGP
+    /// request line — the tail shared by [`Connection::request`] and
+    /// [`Connection::fire_and_forget`].
+    ///
+    /// Returns the request id (needed to register a pending entry) together with
+    /// the pre-encoded NDJSON line.
+    fn encode_request<P>(&self, method: &str, params: &P) -> Result<(u64, Vec<u8>)>
+    where
+        P: Serialize + ?Sized,
+    {
+        let params = serde_json::to_value(params).map_err(|error| ClientError::Protocol {
+            message: format!("failed to encode the params of `{method}`: {error}"),
+        })?;
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let line = wire::encode_request(id, method, params)?;
+        Ok((id, line))
+    }
+
     /// Send one request and await its typed result.
     ///
     /// `P` is the params object (serialised with `serde_json`); `R` is the
@@ -361,11 +423,7 @@ impl Connection {
         if self.is_closed() {
             return Err(self.close_error());
         }
-        let params = serde_json::to_value(params).map_err(|error| ClientError::Protocol {
-            message: format!("failed to encode the params of `{method}`: {error}"),
-        })?;
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let line = wire::encode_request(id, method, params)?;
+        let (id, line) = self.encode_request(method, params)?;
 
         // Register before enqueueing: the reader may answer as soon as the line
         // is on the wire, and an unregistered response would be dropped.
@@ -424,16 +482,8 @@ impl Connection {
         if self.is_closed() {
             return;
         }
-        let params = match serde_json::to_value(params) {
-            Ok(params) => params,
-            Err(error) => {
-                tracing::debug!(method, %error, "dropping fire-and-forget request");
-                return;
-            }
-        };
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let line = match wire::encode_request(id, method, params) {
-            Ok(line) => line,
+        let (_, line) = match self.encode_request(method, params) {
+            Ok(encoded) => encoded,
             Err(error) => {
                 tracing::debug!(method, %error, "dropping fire-and-forget request");
                 return;
@@ -447,10 +497,6 @@ impl Connection {
 
     /// Cancel a subscription from a `Drop` impl (best-effort).
     pub(crate) fn unsubscribe_fire_and_forget(&self, subscription_id: u64) {
-        #[derive(Serialize)]
-        struct UnsubscribeParams {
-            subscription_id: u64,
-        }
         self.fire_and_forget("unsubscribe_events", &UnsubscribeParams { subscription_id });
     }
 
@@ -520,13 +566,15 @@ async fn reader_task<R>(
 ) where
     R: AsyncBufRead + Unpin,
 {
+    // Reused across lines so the reader task does not allocate per frame.
+    let mut buf: Vec<u8> = Vec::new();
     let reason = loop {
         // `read_line` is not cancel-safe, but the only cancellation is shutdown.
         tokio::select! {
             biased;
             _ = &mut shutdown => break CloseReason::Closed,
-            line = read_line(&mut reader, max_frame_len) => match line {
-                Ok(Some(line)) => match wire::decode_line(&line) {
+            line = read_line(&mut reader, max_frame_len, &mut buf) => match line {
+                Ok(Some(line)) => match wire::decode_line(line) {
                     Ok(Inbound::Response { id, result }) => {
                         match shared.pending.lock().unwrap().remove(&id) {
                             Some(sender) => {
@@ -570,17 +618,26 @@ async fn writer_task(
     // Queue closed: the connection is going away, drop the write half.
 }
 
-/// Read one NDJSON line with a hard length cap.
+/// Read one NDJSON line into `buf` with a hard length cap.
 ///
-/// Returns `Ok(None)` on clean EOF. A line exceeding `max_frame_len` (or EOF in
-/// the middle of a line) is a [`ClientError::Protocol`] / [`ClientError::Io`]
-/// and terminates the connection. An oversized line is rejected as soon as the
-/// cap is crossed, so it is never buffered in full.
-pub(crate) async fn read_line<R>(reader: &mut R, max_frame_len: usize) -> Result<Option<Vec<u8>>>
+/// `buf` is cleared first and reused across calls, so the reader task does not
+/// allocate per inbound line. On success it holds the complete line without its
+/// `\n` terminator and is returned as a borrowed slice; a clean EOF yields
+/// `Ok(None)`. A line exceeding `max_frame_len` (or EOF in the middle of a line)
+/// is a [`ClientError::Protocol`] / [`ClientError::Io`] and terminates the
+/// connection. An oversized line is rejected as soon as the cap is crossed, so
+/// it is never buffered in full.
+pub(crate) async fn read_line<'a, R>(
+    reader: &mut R,
+    max_frame_len: usize,
+    buf: &'a mut Vec<u8>,
+) -> Result<Option<&'a [u8]>>
 where
     R: tokio::io::AsyncBufRead + Unpin,
 {
-    let mut buf: Vec<u8> = Vec::new();
+    // Reset the scratch buffer's length (its capacity is preserved) so no bytes
+    // from a previous line can leak into this one.
+    buf.clear();
     loop {
         // Chunk length and the offset of the terminator, so the borrow of
         // `reader` ends before `consume`.
@@ -605,7 +662,7 @@ where
         match step {
             Step::Line(consumed) => {
                 reader.consume(consumed);
-                return Ok(Some(buf));
+                return Ok(Some(&buf[..]));
             }
             Step::More(consumed) => reader.consume(consumed),
             Step::Eof => {
