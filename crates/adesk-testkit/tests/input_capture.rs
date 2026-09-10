@@ -4,7 +4,7 @@
 //! `WaylandTestClient` binds `wl_seat` and keeps a `wl_pointer` + `wl_keyboard` alive, so
 //! every AGP input action can be checked against the *seat's own* report instead of the
 //! runtime's word: the client records each delivered event, in delivery order, with
-//! coordinates exactly as the protocol carried them (`crate::wayland::input`'s recording
+//! coordinates exactly as the protocol carried them (the harness's `wayland::input` recorder's
 //! contract — raw evdev button/keycodes, surface-local `f64` coordinates, no
 //! transformation). These tests drive input **only** through the AGP client
 //! ([`TestRuntime::client`]); the harness client is the observer, never the injector.
