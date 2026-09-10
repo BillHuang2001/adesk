@@ -216,7 +216,6 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
-- `WmBridge::note_launch` still carries a comment and `#[allow(dead_code)]` claiming no AGP command feeds it, but `RuntimeCommand::NoteLaunch` does feed it through `State::note_launch`.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 - The `adesk-render` API vs. the element-walker assumptions is verified only through the crate's own tests and the GL clear-frame path; end-to-end pixel assertions arrive with `adesk-testkit` (Phase 4).
