@@ -63,11 +63,6 @@ impl Size {
     pub const fn is_empty(&self) -> bool {
         self.w == 0 || self.h == 0
     }
-
-    /// Returns the area in pixels.
-    pub const fn area(&self) -> u64 {
-        self.w as u64 * self.h as u64
-    }
 }
 
 /// A window-relative pixel rectangle: covers `x..x+w` and `y..y+h` (half-open).
