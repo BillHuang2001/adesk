@@ -124,6 +124,13 @@ Nix dev shell. **Always** build through the wrapper:
 Bare `cargo build` fails to link outside the shell — that is expected, not a code bug.
 `nix develop -c <cmd>` is equivalent.
 
+## Packaging / deployment
+
+- There is no container/OCI/Docker packaging and no CI config in the repo (no `Dockerfile`/`Containerfile`, `.github/`, `.gitlab-ci`, Jenkins, CircleCI, Makefile or justfile).
+- The only build/dev tooling is `flake.nix` (a `devShells.default` dev shell; it exposes no `packages`/`apps` output) and `scripts/dev.sh` (an `exec nix develop <root> -c "$@"` wrapper).
+- The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`), so it is service/container friendly.
+- Socket path resolution: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; the process needs a writable `XDG_RUNTIME_DIR` (Wayland socket) at runtime.
+
 ## Known issues
 
 - The sandbox has no GPU and no system EGL on the default library path; only the dev
