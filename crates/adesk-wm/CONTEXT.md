@@ -103,7 +103,7 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 
 ## Test Strategy
 
-- 40 tests, all pure — no display, GPU, network, clock or installed application; run with `./scripts/dev.sh cargo test -p adesk-wm`.
+- 44 tests, all pure — no display, GPU, network, clock or installed application; run with `./scripts/dev.sh cargo test -p adesk-wm`.
 - Unit tests live in `./src/policy_tests.rs` (declared `#[cfg(test)] mod policy_tests;` in `lib.rs`), not inline in `policy.rs`: the full matrix pushed `policy.rs` past the ~1000-line threshold, so the module was extracted. Unit tests may construct `WindowModel` directly — that is how non-origin geometry and saturated counters are exercised.
 - Coverage: map (id assignment, record defaults, action order, previous active deactivated but mapped), duplicate-surface-key idempotence, destroy (MRU fallback / inactive / last window / unknown), activate (switch + MRU reorder, `[None]`, `[]`), id monotonicity and no reuse, popup saturation in both directions, title, commit watermark monotonicity, unknown-id tolerance on every event path, `window_info` field projection, `windows()` creation order, `window_by_surface` round-trip, `resolve_position` (documented non-origin examples, origin clamping, normalized corners/center/NaN/∞, empty window), `set_output_size` re-tiling in creation order, and an invariant sweep after every step of a mixed sequence.
 - `./tests/policy_matrix.rs` (3 tests) drives the full lifecycle through the public API only — the exact calls `adesk-compositor` makes.
