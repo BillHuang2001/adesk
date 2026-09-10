@@ -16,7 +16,8 @@
 //! [`WaylandTestClient::wait_for_pointer_event`] /
 //! [`WaylandTestClient::wait_for_keyboard_event`] (plus the `wait_for_pointer_button` /
 //! `wait_for_key` conveniences) — all deadline-bounded, so an AGP action can be proven to
-//! have travelled through the seat instead of trusting the runtime's own report.//!
+//! have travelled through the seat instead of trusting the runtime's own report.
+//!
 //! ## Threading model
 //!
 //! `wayland-client` is synchronous while tests are async, so the client is split in two:
