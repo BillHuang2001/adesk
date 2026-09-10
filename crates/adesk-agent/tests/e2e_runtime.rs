@@ -131,15 +131,24 @@ async fn scenario_launch() -> TestResult {
         .expect("window_created carries a window id");
 
     let client = connect(&runtime).await?;
-    let info = client.get_window(window_id).await?;
-    assert_eq!(info.app_id, Some(app_id.clone()));
+    let listed = client.list_windows().await?;
+    let found = listed
+        .windows
+        .iter()
+        .find(|window| window.app_id == Some(app_id.clone()))
+        .unwrap_or_else(|| panic!("the launched app has no window in {listed:?}"));
+    assert_eq!(found.id, window_id, "the event and the window list agree");
     assert_eq!(
-        info.geometry,
+        found.geometry,
         runtime.tiled_rect(),
         "the launched toplevel is tiled to the whole output"
     );
-    assert!(info.mapped, "the launched app committed a buffer");
-    assert_eq!(info.popup_count, 0);
+    assert!(found.mapped, "the launched app committed a buffer");
+    assert_eq!(found.popup_count, 0);
+
+    let info = client.get_window(window_id).await?;
+    assert_eq!(info.app_id, Some(app_id.clone()));
+    assert_eq!(info.geometry, runtime.tiled_rect());
 
     let metrics = &report.outcome.metrics;
     assert_eq!(
