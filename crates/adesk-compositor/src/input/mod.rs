@@ -17,6 +17,6 @@ mod injector;
 mod keycode;
 mod keymap;
 
-pub(crate) use injector::InputInjector;
+pub(crate) use injector::{InputInjector, LEVEL3_KEYSYM, SHIFT_KEYSYM};
 pub(crate) use keycode::chord_sequence;
 pub use keycode::{KeyCode, Keysym};

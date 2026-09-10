@@ -47,15 +47,12 @@ use crate::{
     config::CompositorConfig,
     error::CompositorError,
     events::EventSink,
-    input::{InputInjector, KeyCode},
+    input::{InputInjector, KeyCode, LEVEL3_KEYSYM, SHIFT_KEYSYM},
     render::HeadlessRenderer,
     snapshot::{RenderedFrame, StateSnapshot},
-    wm::{MapOutcome, MappedWindow, WmBridge, WmDecision},
+    wm::{MapOutcome, MappedWindow, WmBridge, WmDecision, MAX_SURFACE_TREE_DEPTH},
     Result,
 };
-
-/// Safety bound for surface-tree walks (subsurface offsets, owner lookup).
-const MAX_SURFACE_TREE_DEPTH: usize = 32;
 
 /// Everything the compositor thread owns.
 ///
@@ -91,13 +88,6 @@ pub(crate) struct State {
     pub(crate) seat: Seat<State>,
     /// `wl_shm` state.
     pub(crate) shm_state: ShmState,
-    /// The single virtual output, tiled to fill the whole surface area.
-    ///
-    /// Kept for the compositor's lifetime: the `wl_output` global stores a clone of
-    /// this handle (`WlOutputData { output }`) and it is how the output is
-    /// reconfigured or its global destroyed.
-    #[allow(dead_code)]
-    pub(crate) output: Output,
     /// `zwp_linux_dmabuf` state.
     pub(crate) dmabuf_state: DmabufState,
     /// `wl_data_device_manager` state (clipboard basics).
@@ -142,7 +132,10 @@ impl State {
             [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888],
         );
 
-        let output = create_output(config, display);
+        // The `wl_output` global keeps its own clone of the handle created here
+        // (`Output::create_global` stores `WlOutputData { output }`), so the output
+        // needs no field of its own on `State`.
+        create_output(config, display);
 
         let mut dmabuf_state = DmabufState::new();
         dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
@@ -164,7 +157,6 @@ impl State {
             seat_state,
             seat,
             shm_state,
-            output,
             dmabuf_state,
             data_device_state,
             xdg_decoration_state,
@@ -471,7 +463,13 @@ impl State {
         if let Some(offset) = self.wm.popup_window_offset(&surface.id()) {
             return offset;
         }
-        let root = self.wm.surface_of(window_id).map(|root| root.id());
+        // The window root is the origin. `root_id` is an O(1) map lookup, so the
+        // common case — the committing surface *is* the toplevel root — returns
+        // `(0, 0)` after one `ObjectId` comparison, cloning no surface handle.
+        let root = self.wm.root_id(window_id);
+        if root.as_ref() == Some(&surface.id()) {
+            return (0, 0);
+        }
         let mut offset = (0i32, 0i32);
         let mut current = surface.clone();
         for _ in 0..MAX_SURFACE_TREE_DEPTH {
@@ -504,18 +502,18 @@ impl State {
     /// and a released chord is an invalid request. Nothing reaches the seat when
     /// the request is rejected.
     pub(crate) fn inject_key(&mut self, key: &KeyCode, state: KeyState) -> Result<()> {
-        /// The xkb level modifiers for shift `level` (`0` = none).
+        /// The xkb level-modifier names for shift `level` (`0` = none), in press order.
         ///
         /// Levels follow the standard four-level layout: `1` is `Shift`, `2` is
         /// the level-three modifier (`ISO_Level3_Shift`, AltGr) and `3` is both.
         /// A keymap has at most four levels, so anything higher is treated as
         /// level `3`.
-        fn level_modifiers(level: usize) -> &'static [&'static str] {
+        fn level_modifier_names(level: usize) -> &'static [&'static str] {
             match level {
                 0 => &[],
-                1 => &["Shift_L"],
-                2 => &["ISO_Level3_Shift"],
-                _ => &["Shift_L", "ISO_Level3_Shift"],
+                1 => &[SHIFT_KEYSYM],
+                2 => &[LEVEL3_KEYSYM],
+                _ => &[SHIFT_KEYSYM, LEVEL3_KEYSYM],
             }
         }
 
@@ -524,10 +522,18 @@ impl State {
         let sequence = crate::input::chord_sequence(key, state)
             .map_err(|error| crate::error::CompositorError::InvalidRequest(error.message))?;
 
+        // The level-modifier keycodes are constant for the process lifetime: the
+        // injector resolves them once at startup, so a key event never re-parses
+        // `Shift_L`/`ISO_Level3_Shift` or re-resolves them through the keymap. A
+        // modifier the keymap cannot produce stays `None` here and is reported as
+        // the same `invalid_request` the per-event resolution used to return.
+        let shift = self.input.shift_keycode();
+        let level3 = self.input.level3_keycode();
+
         // Resolve the whole sequence first: a key the keymap cannot produce must
         // not deliver a partially applied chord.
         let keymap = self.input.keymap();
-        let mut plan: Vec<(u32, KeyState)> = Vec::new();
+        let mut plan: Vec<(u32, KeyState)> = Vec::with_capacity(sequence.len() * 3);
         for (keysym, key_state) in &sequence {
             let resolved = keymap.resolve(keysym.value()).ok_or_else(|| {
                 crate::error::CompositorError::InvalidRequest(format!(
@@ -536,18 +542,21 @@ impl State {
                 ))
             })?;
 
-            let mut modifiers = Vec::new();
-            for name in level_modifiers(resolved.level) {
-                let modifier = crate::input::Keysym::parse(name).map_err(|error| {
-                    crate::error::CompositorError::InvalidRequest(error.message)
-                })?;
-                let modifier = keymap.resolve(modifier.value()).ok_or_else(|| {
-                    crate::error::CompositorError::InvalidRequest(format!(
-                        "level modifier {name} cannot be produced by the compositor keymap"
-                    ))
-                })?;
-                modifiers.push(modifier.keycode);
+            // Up to two modifiers bracket the key; the stack array keeps the
+            // per-event path allocation-free.
+            let mut modifiers = [(SHIFT_KEYSYM, 0u32); 2];
+            let mut modifier_count = 0usize;
+            for &name in level_modifier_names(resolved.level) {
+                let keycode =
+                    if name == SHIFT_KEYSYM { shift } else { level3 }.ok_or_else(|| {
+                        crate::error::CompositorError::InvalidRequest(format!(
+                            "level modifier {name} cannot be produced by the compositor keymap"
+                        ))
+                    })?;
+                modifiers[modifier_count] = (name, keycode);
+                modifier_count += 1;
             }
+            let modifiers = &modifiers[..modifier_count];
 
             // Press modifier → press key, release key → release modifier: the
             // modifier brackets the key on both sides, so single keys and chords
@@ -557,7 +566,7 @@ impl State {
                     plan.extend(
                         modifiers
                             .iter()
-                            .map(|keycode| (*keycode, KeyState::Pressed)),
+                            .map(|(_, keycode)| (*keycode, KeyState::Pressed)),
                     );
                     plan.push((resolved.keycode, KeyState::Pressed));
                 }
@@ -567,7 +576,7 @@ impl State {
                         modifiers
                             .iter()
                             .rev()
-                            .map(|keycode| (*keycode, KeyState::Released)),
+                            .map(|(_, keycode)| (*keycode, KeyState::Released)),
                     );
                 }
             }
@@ -708,20 +717,18 @@ impl State {
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> Result<RenderedFrame> {
-        let window = self
+        let geometry = self
             .wm
-            .windows()
-            .into_iter()
-            .find(|window| window.id == window_id)
+            .window_geometry(window_id)
             .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
         let surface = self
             .wm
             .surface_of(window_id)
             .ok_or(crate::error::CompositorError::UnknownWindow(window_id))?;
 
-        let mut frame =
-            self.renderer
-                .render_window(&surface, window.geometry, region, max_dimension)?;
+        let mut frame = self
+            .renderer
+            .render_window(&surface, geometry, region, max_dimension)?;
         // The renderer reports surface-tree damage, not the window model's
         // counter; stamp the counter here so the frame travels with the causal
         // history it belongs to.
@@ -731,28 +738,28 @@ impl State {
 
     /// Compose the whole virtual output, optionally with debug overlays.
     ///
-    /// Every tracked window with a root surface becomes a candidate
-    /// [`OutputWindow`](crate::render::OutputWindow); `active` marks the window
-    /// `adesk-wm` tiles to fill the output. Composition is the
-    /// single-visible-toplevel projection: `render::elements::output_scene`
-    /// draws exactly the active candidate and nothing else, so a tracked window
-    /// is never visible. With no active window the frame is a valid clear frame,
-    /// not an error. The output composition is not tied to a single window, so
-    /// its `commit_seq` stays `0`.
+    /// Only the active window is a candidate
+    /// [`OutputWindow`](crate::render::OutputWindow): composition is the
+    /// single-visible-toplevel projection, so a tracked-but-inactive window is
+    /// never composed and the candidate list holds at most one entry (none when
+    /// no window is active, which yields a valid clear frame, not an error). The
+    /// output composition is not tied to a single window, so its `commit_seq`
+    /// stays `0`.
     pub(crate) fn render_output(
         &mut self,
         overlays: &[OverlayKind],
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> Result<RenderedFrame> {
-        let active = self.wm.active_window();
         let mut windows = Vec::new();
-        for window in self.wm.windows() {
-            if let Some(surface) = self.wm.surface_of(window.id) {
+        if let Some(active) = self.wm.active_window() {
+            if let (Some(surface), Some(geometry)) =
+                (self.wm.surface_of(active), self.wm.window_geometry(active))
+            {
                 windows.push(crate::render::OutputWindow {
-                    geometry: window.geometry,
+                    geometry,
                     surface,
-                    active: active == Some(window.id),
+                    active: true,
                 });
             }
         }

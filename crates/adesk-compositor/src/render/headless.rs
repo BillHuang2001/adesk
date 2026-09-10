@@ -154,7 +154,7 @@ impl HeadlessRenderer {
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> crate::Result<RenderedFrame> {
-        let config = window_config(geometry, region, max_dimension);
+        let config = render_config(geometry.size(), region, max_dimension);
         match self {
             HeadlessRenderer::Gl(renderer) => render_window_gl(renderer, surface, &config),
             HeadlessRenderer::Pixman(renderer) => render_window_pixman(renderer, surface, &config),
@@ -183,7 +183,7 @@ impl HeadlessRenderer {
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> crate::Result<RenderedFrame> {
-        let config = output_config(output_size, region, max_dimension);
+        let config = render_config(output_size, region, max_dimension);
         match self {
             HeadlessRenderer::Gl(renderer) => {
                 render_output_gl(renderer, windows, overlays, &config)
@@ -237,27 +237,15 @@ fn create_pixman() -> crate::Result<PixmanRenderer> {
         .map_err(|error| CompositorError::Renderer(format!("pixman renderer: {error}")))
 }
 
-/// Render configuration of one window: target sized to the window, window-relative
-/// crop and downscale.
-fn window_config(geometry: Rect, region: Option<Rect>, max_dimension: Option<u32>) -> RenderConfig {
-    let mut config = RenderConfig::new(Rect::from_size(geometry.size()));
-    if let Some(region) = region {
-        config = config.with_crop(region);
-    }
-    if let Some(max_dimension) = max_dimension {
-        config = config.with_max_dimension(max_dimension);
-    }
-    config
-}
-
-/// Render configuration of the whole output: target sized to the output,
-/// output-relative crop and downscale.
-fn output_config(
-    output_size: Size,
-    region: Option<Rect>,
-    max_dimension: Option<u32>,
-) -> RenderConfig {
-    let mut config = RenderConfig::new(Rect::from_size(output_size));
+/// Render configuration of one render source: target sized to `source`, with
+/// optional crop (`region`, relative to `source`) and optional downscale
+/// (`max_dimension`, the capped long edge).
+///
+/// Both render entry points use it: [`HeadlessRenderer::render_window`] passes the
+/// window rectangle's size (so the origin is never part of the source) and
+/// [`HeadlessRenderer::render_output`] the virtual output's size.
+fn render_config(source: Size, region: Option<Rect>, max_dimension: Option<u32>) -> RenderConfig {
+    let mut config = RenderConfig::new(Rect::from_size(source));
     if let Some(region) = region {
         config = config.with_crop(region);
     }
@@ -483,7 +471,7 @@ mod tests {
     fn invalid_window_crop_is_an_invalid_request() {
         let mut renderer = create_pixman().expect("pixman renderer");
         let scene = Scene::<OutputRenderElements<PixmanRenderer>>::new(0);
-        let config = window_config(Rect::new(0, 0, 10, 10), Some(Rect::new(50, 50, 4, 4)), None);
+        let config = render_config(Size::new(10, 10), Some(Rect::new(50, 50, 4, 4)), None);
         let error = render_scene_frame::<_, PixmanTarget, _>(&mut renderer, &scene, &config)
             .expect_err("a crop outside the window is rejected");
         assert!(matches!(error, CompositorError::InvalidRequest(_)));
@@ -491,9 +479,9 @@ mod tests {
     }
 
     #[test]
-    fn window_config_sizes_the_target_to_the_window() {
-        let config = window_config(
-            Rect::new(30, 40, 640, 480),
+    fn render_config_sizes_the_target_to_the_window_source() {
+        let config = render_config(
+            Size::new(640, 480),
             Some(Rect::new(10, 20, 100, 50)),
             Some(64),
         );
@@ -508,8 +496,8 @@ mod tests {
     }
 
     #[test]
-    fn output_config_sizes_the_target_to_the_output() {
-        let config = output_config(Size::new(1280, 800), None, None);
+    fn render_config_sizes_the_target_to_the_output_size() {
+        let config = render_config(Size::new(1280, 800), None, None);
         assert_eq!(config.source, Rect::new(0, 0, 1280, 800));
         assert_eq!(config.target_size(), Size::new(1280, 800));
         assert_eq!(config.output_size(), Size::new(1280, 800));
