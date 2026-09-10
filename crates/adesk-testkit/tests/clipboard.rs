@@ -1,4 +1,4 @@
-//! Clipboard over the real Wayland protocol path, behind a documented strict/tolerant gate.
+//! Clipboard over the real Wayland protocol path, behind a documented delivery gate.
 //!
 //! `adesk-testkit`'s [`WaylandTestClient`] speaks the clipboard protocol for real: a
 //! `wl_data_source` publishes, `wl_data_device` announces offers and `wl_data_offer` reads
@@ -8,26 +8,25 @@
 //! runtime-native state change, never synthesized input), so the selection itself always
 //! crosses the protocol.
 //!
-//! # The strict/tolerant gate
+//! # The delivery gate
 //!
-//! The compositor does not wire Smithay's `set_data_device_focus`, so today **no client is
-//! ever told about the selection**: `selection_offer_count` stays `0` and every read fails
-//! with the documented bounded `Timeout { what: "read_selection selection offer" }`. The
-//! moment a compositor change wires data-device focus, these tests must start asserting the
-//! real round trip *without being edited*.
-//!
-//! So each test decides which world it runs in. It probes for the first selection offer
-//! with a short bounded wait ([`OFFER_PROBE`]) and then:
+//! `adesk-compositor` moves the data-device focus with the keyboard focus (Smithay's
+//! `set_data_device_focus` runs on every activation), so a focused client really is told about
+//! the selection: `selection_offer_count` reaches the offer that `wl_data_device.selection`
+//! announced, and the read returns the published bytes — including the same-client echo of
+//! what that client published itself. Each test probes for the first selection offer with a
+//! short bounded wait ([`OFFER_PROBE`]) and then runs:
 //!
 //! - **strict** — an offer arrived, so the test asserts the publish/read round trip, the
 //!   supersede behaviour and the `Ok(None)` of an unadvertised mime type;
-//! - **tolerant** — no offer arrived, so the test prints the degraded mode and asserts that
-//!   the offer counter is still zero and that the read fails with the *documented* no-offer
-//!   `Timeout`, under the short [`READ_TIMEOUT`] so the suite stays fast.
+//! - **fallback** — no offer arrived, so the test asserts that the offer counter is still zero
+//!   and that the read fails with the *documented* no-offer `Timeout`, under the short
+//!   [`READ_TIMEOUT`] so the suite stays fast (see [`assert_no_offer_read`]).
 //!
 //! Either way the failure is named and bounded — never a hang, never invented bytes.
-//! [`REQUIRE_CLIPBOARD_DELIVERY`] turns the tolerant branch into a hard failure; that flag
-//! is the single place recording "offers must arrive by now".
+//! [`REQUIRE_CLIPBOARD_DELIVERY`] is `true`, so the fallback branch is a hard failure: with the
+//! compositor wiring data-device focus it can never be a passing path, and the flag stays as
+//! the single place recording "offers must arrive".
 //!
 //! # Focus is the test's job
 //!
@@ -36,8 +35,8 @@
 //! supply. The owner therefore maps *second* (the single-visible-toplevel policy gives the
 //! visible slot — and the keyboard focus — to the newest toplevel) and the test injects one
 //! pointer move so that the owner receives a real `wl_pointer.enter` serial. The reader is
-//! activated with `activate_window` before it reads: that is the focus change a compositor
-//! with data-device-focus wiring needs in order to announce the selection to it.
+//! activated with `activate_window` before it reads: that focus change is what makes the
+//! compositor announce the selection to it (data-device focus tracks keyboard focus).
 //!
 //! # What this file deliberately does not do
 //!
@@ -58,11 +57,14 @@ use adesk_testkit::{
     WindowId,
 };
 
-/// When `true`, absence of a selection offer is a hard test failure. Flip to `true`
-/// in the same change that wires Smithay's `set_data_device_focus` in adesk-compositor
-/// (today no client receives offers, so the tolerant branch asserts the documented
-/// bounded `Timeout` instead of the round trip).
-const REQUIRE_CLIPBOARD_DELIVERY: bool = false;
+/// When `true`, absence of a selection offer is a hard test failure.
+///
+/// `true` is the shipped configuration: `adesk-compositor` wires Smithay's
+/// `set_data_device_focus` on every keyboard-focus change, so the focused client — in
+/// particular the one that published — is really offered the selection. The flag is the single
+/// place recording that requirement; with it `true` the fallback branch below is unreachable as
+/// a passing path.
+const REQUIRE_CLIPBOARD_DELIVERY: bool = true;
 
 /// The mime type the owner advertises (and the reader reads back).
 const TEXT_MIME: &str = "text/plain;charset=utf-8";
@@ -95,14 +97,15 @@ const NO_OFFER_COUNT_WHAT: &str = "selection offer count";
 /// strings are part of the client's pinned contract.
 const NO_SELECTION_OFFER_WHAT: &str = "read_selection selection offer";
 
-/// How long a test waits to find out whether offers are delivered at all.
+/// How long a test waits for the selection offer the focused client must receive.
 ///
-/// Orders of magnitude above the cost of a round trip and short enough that the tolerant
-/// branch does not slow the suite down; it is also the deadline of the supersede test's
-/// "offer 2" wait.
+/// Orders of magnitude above the cost of a round trip (it is also the deadline of the supersede
+/// test's "offer 2" wait), so a runtime that fails to announce the selection fails the test
+/// instead of hanging it.
 const OFFER_PROBE: Duration = Duration::from_secs(2);
 
-/// Deadline for the tolerant reads: the documented failure must be *fast*.
+/// Deadline for reads of the selection, and for the fallback's no-offer read (which must fail
+/// *fast*).
 const READ_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Every other bounded wait (the harness bound, far above one round trip).
@@ -188,13 +191,14 @@ async fn give_input_serial(agp: &Client, peer: &Peer, tiled: Rect) -> Result<()>
     Ok(())
 }
 
-/// Probes for the first selection offer and reports which world this runtime lives in.
+/// Waits for the first selection offer and reports whether the runtime delivered it.
 ///
-/// `Ok(true)` is the strict world (an offer arrived within [`OFFER_PROBE`], so the caller
-/// asserts the real round trip); `Ok(false)` is the tolerant world, where the missing offer
-/// is printed as a degraded mode and the caller asserts the documented bounded `Timeout`
-/// instead. A probe failure that is *not* the documented no-offer timeout, or a missing
-/// offer while [`REQUIRE_CLIPBOARD_DELIVERY`] is `true`, panics here.
+/// `Ok(true)` is the shipped — strict — world: an offer arrived within [`OFFER_PROBE`], so the
+/// caller asserts the real round trip. `Ok(false)` is only reachable with
+/// [`REQUIRE_CLIPBOARD_DELIVERY`] `false` (the fallback configuration, where the caller asserts
+/// the documented bounded no-offer `Timeout`); with the flag `true` a missing offer is a hard
+/// failure and panics here. A probe failure that is *not* the documented no-offer timeout
+/// always panics: the wait broke, it did not observe a missing selection.
 fn selection_delivery(client: &WaylandTestClient, test: &str) -> Result<bool> {
     match client.wait_for_selection_offer(1, OFFER_PROBE) {
         Ok(()) => Ok(true),
@@ -202,34 +206,33 @@ fn selection_delivery(client: &WaylandTestClient, test: &str) -> Result<bool> {
             assert_timeout_named(&error, NO_OFFER_COUNT_WHAT, OFFER_PROBE);
             if REQUIRE_CLIPBOARD_DELIVERY {
                 panic!(
-                    "{test}: REQUIRE_CLIPBOARD_DELIVERY is true, but no client received a \
-                     selection offer within {OFFER_PROBE:?}; wiring Smithay's \
-                     `set_data_device_focus` in adesk-compositor is what makes offers arrive \
-                     ({error})"
+                    "{test}: no focused client received a selection offer within {OFFER_PROBE:?}, \
+                     but adesk-compositor tracks the data-device focus with the keyboard focus, \
+                     so the focused client must be offered the selection ({error})"
                 );
             }
             eprintln!(
-                "degraded clipboard mode ({test}): no selection offer within {OFFER_PROBE:?} — \
-                 adesk-compositor does not call Smithay's `set_data_device_focus`, so no client \
-                 is ever told about the selection. Asserting the documented bounded no-offer \
-                 timeout instead of the round trip; flip REQUIRE_CLIPBOARD_DELIVERY to true in \
-                 the change that wires data-device focus."
+                "clipboard delivery disabled ({test}): no selection offer within \
+                 {OFFER_PROBE:?} while REQUIRE_CLIPBOARD_DELIVERY is false — asserting the \
+                 documented bounded no-offer timeout instead of the round trip."
             );
             Ok(false)
         }
     }
 }
 
-/// Asserts the tolerant branch: no offer, so the read reports the documented bounded failure.
+/// The `REQUIRE_CLIPBOARD_DELIVERY = false` fallback: asserts the documented bounded no-offer
+/// failure.
 ///
-/// The deadline is [`READ_TIMEOUT`] (not the client's 10 s default) so the tolerant suite
-/// stays fast, and both `what` and the deadline inside the error are asserted so the failure
-/// cannot drift into a different one.
+/// Unreachable as a passing path in the shipped configuration (the flag is `true`), and the
+/// only branch that asserts less than the round trip. The deadline is [`READ_TIMEOUT`] (not the
+/// client's 10 s default) so a fallback run stays fast, and both `what` and the deadline inside
+/// the error are asserted so the failure cannot drift into a different one.
 fn assert_no_offer_read(client: &WaylandTestClient, mime: &str) {
     assert_eq!(
         client.selection_offer_count(),
         0,
-        "the tolerant branch only holds while no selection offer was announced"
+        "the fallback branch only holds while no selection offer was announced"
     );
     let error = client
         .read_selection_with_timeout(mime, READ_TIMEOUT)
@@ -280,8 +283,8 @@ async fn selection_round_trip_between_two_clients() -> Result<()> {
     give_input_serial(&agp, &owner, runtime.tiled_rect()).await?;
     owner.client.set_selection(TEXT_MIME, FIRST_PAYLOAD)?;
 
-    // The reader becomes the focused client — the one a compositor with data-device focus
-    // wiring announces the selection to.
+    // The reader becomes the focused client — the one the compositor announces the selection
+    // to (data-device focus tracks keyboard focus).
     agp.activate_window(reader.id).await?;
 
     if selection_delivery(&reader.client, "selection_round_trip_between_two_clients")? {
@@ -340,7 +343,8 @@ async fn second_set_selection_invalidates_the_first_offer() -> Result<()> {
             "the current selection must be the second payload, never the superseded first"
         );
     } else {
-        // Both publications are unannounced, so both reads report the documented timeout.
+        // The fallback world: both publications are unannounced, so both reads report the
+        // documented timeout.
         assert_no_offer_read(&reader.client, TEXT_MIME);
     }
 
@@ -378,7 +382,7 @@ async fn unadvertised_mime_fails_cleanly() -> Result<()> {
             "the advertised mime type must still be readable from that offer"
         );
     } else {
-        // The tolerant world fails earlier: with no offer at all, even the advertised mime
+        // The fallback world fails earlier: with no offer at all, even the advertised mime
         // type can only produce the documented bounded timeout.
         assert_no_offer_read(&reader.client, IMAGE_MIME);
     }
@@ -392,8 +396,8 @@ async fn read_selection_without_any_selection_times_out_bounded() -> Result<()> 
     let client = runtime.wayland_client()?;
 
     // Nothing published anything anywhere, so there is no selection to be offered to any
-    // client — not even a focused one, which could only be told `selection(None)`. This body
-    // is therefore identical in both worlds and asserts no branch.
+    // client — not even a focused one, which is only ever told `selection(None)`. This body
+    // therefore asserts no branch.
     assert_eq!(
         client.selection_offer_count(),
         0,

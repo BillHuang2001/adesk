@@ -72,17 +72,19 @@
 //! bytes"`). [`DEFAULT_SELECTION_TIMEOUT`] is what [`read_selection`] and the serial wait in
 //! `set_selection` use.
 //!
-//! ## Compositor caveat (empirically verified)
+//! ## Data-device focus (the delivery invariant)
 //!
 //! `wl_data_device` only receives `data_offer`/`selection` while the compositor has a
-//! *data-device focus* for that client. `adesk-compositor` does not call Smithay's
-//! `set_data_device_focus` yet, so today no client ever receives a selection offer — not even
-//! the client that published it (there is no same-client echo). The API here is
-//! contract-correct regardless: `set_selection`/`clear_selection` publish, and the read path
-//! waits and reports `Timeout { what: "read_selection selection offer" }` instead of inventing
-//! data. The self-tests at the bottom of this file observe which of the two behaviours is live
-//! and assert accordingly; the full read round-trip assertion must be added to the "offers
-//! arrive" branch when the compositor wires data-device focus.
+//! *data-device focus* for that client. `adesk-compositor` moves that focus with the keyboard
+//! focus — Smithay's `set_data_device_focus` runs on every activation — so the focused client
+//! (the visible window's client) is offered the current selection, **including one it
+//! published itself**: the same-client echo is part of the contract, and
+//! [`read_selection_with_timeout`](WaylandTestClient::read_selection_with_timeout) can read
+//! back exactly what [`set_selection`](WaylandTestClient::set_selection) published. A client
+//! that never received a data-device focus (nothing mapped, nothing activated) is the only one
+//! that still waits without an offer, and there the read reports
+//! `Timeout { what: "read_selection selection offer" }` instead of inventing data. The
+//! self-tests at the bottom of this file assert the full round trip strictly.
 
 use std::io::{Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
@@ -194,9 +196,10 @@ impl WaylandTestClient {
     /// Reads the current selection for `mime`, bounded by `timeout` per phase.
     ///
     /// Phase 1 waits (bounded by `timeout`) until the client holds a selection offer, i.e.
-    /// until a `wl_data_device.selection` announced one; without one the call fails with
-    /// `Timeout { what: "read_selection selection offer" }` (the compositor only sends offers to
-    /// a client it has data-device focus for — see the module docs).
+    /// until a `wl_data_device.selection` announced one; the compositor offers the selection to
+    /// the client whose data-device focus follows the keyboard focus, so a focused client is
+    /// offered it and a client that never was is the one that fails with
+    /// `Timeout { what: "read_selection selection offer" }` (see the module docs).
     ///
     /// Phase 2 then asks that offer for `mime`: if the offer does not advertise `mime` the call
     /// returns `Ok(None)` immediately (the selection exists, it just cannot be read as this mime
@@ -557,12 +560,6 @@ mod tests {
     /// Bounded wait for the self-validation tests (far above the cost of one injection).
     const DEADLINE: Duration = Duration::from_secs(10);
 
-    /// How long the tests wait to find out whether a selection offer arrives at all.
-    ///
-    /// Orders of magnitude more than the compositor needs to answer a request it accepts, and
-    /// short enough that the "no offer" case does not slow the suite down.
-    const OFFER_OBSERVATION_WINDOW: Duration = Duration::from_millis(500);
-
     /// A short deadline for the paths that must fail, so a broken implementation fails fast.
     const SHORT: Duration = Duration::from_millis(50);
 
@@ -627,16 +624,6 @@ mod tests {
             .find(|info| info.app_id.as_ref() == Some(&AppId::from(APP_ID)))
             .expect("the mapped toplevel is listed");
         (window, info.id)
-    }
-
-    /// Gives the reader thread `window` to dispatch anything the runtime sent.
-    ///
-    /// `block_until` is the harness's only sleeping primitive (no ad-hoc sleep loops), and the
-    /// condition is deliberately unsatisfiable: this is a bounded observation window for
-    /// "nothing happened", followed by an assertion on the state it left behind.
-    fn observe_for(window: Duration) {
-        let elapsed = block_until(window, "the clipboard observation window", || false);
-        assert!(elapsed.is_err(), "the observation window always elapses");
     }
 
     /// Asserts a timeout carrying exactly `what` and `timeout`.
@@ -727,11 +714,12 @@ mod tests {
     /// Capstone self-validation: a real runtime, real clipboard requests, real observations.
     ///
     /// `set_selection`/`clear_selection` are driven over the protocol path against a mapped,
-    /// focused toplevel and the *observed* offer behaviour is asserted: `adesk-compositor` does
-    /// not set a data-device focus yet, so the expected observation is "no offer ever arrives"
-    /// and the read path must name that as a timeout. Should the compositor gain data-device
-    /// focus, this test takes the other branch and asserts the same-client round trip
-    /// (`read_selection` returning exactly what `set_selection` published).
+    /// focused toplevel and the *observed* offer behaviour is asserted strictly: publishing
+    /// announces an offer to the publisher itself (data-device focus tracks keyboard focus, so
+    /// the same-client echo is delivered), `read_selection` returns exactly the published
+    /// bytes, an unadvertised mime type is `Ok(None)`, a replacement becomes the current offer
+    /// with the replacement's bytes, and `clear_selection` clears that offer without counting
+    /// one (`selection(None)` is not an announcement).
     #[test]
     fn selection_publish_and_offer_observation() {
         let (tokio_rt, runtime) = start_runtime();
@@ -778,50 +766,34 @@ mod tests {
             assert!(stored.source.is_alive(), "the source proxy is still live");
         }
 
-        // The empirical question: does the compositor announce a selection offer?
-        let announced = block_until(OFFER_OBSERVATION_WINDOW, "a selection offer", || {
-            wayland.selection_offer_count() >= 1
-        });
-        if announced.is_ok() {
-            // The compositor wired data-device focus: the same-client echo must round trip.
-            let read = wayland
-                .read_selection("text/plain")
-                .expect("the offer can be read back");
-            assert_eq!(
-                read.as_deref(),
-                Some(PAYLOAD),
-                "reading back the selection must return exactly the bytes that were published"
-            );
-            let unknown = wayland
-                .read_selection("application/x-unknown")
-                .expect("an unadvertised mime type is not an error");
-            assert_eq!(unknown, None);
-        } else {
-            // Today's behaviour: no client receives offers, so both observation helpers must
-            // report the missing offer instead of inventing data.
-            assert_eq!(
-                wayland.selection_offer_count(),
-                0,
-                "no selection offer is announced while the compositor has no data-device focus"
-            );
-            let error = wayland
-                .wait_for_selection_offer(1, SHORT)
-                .expect_err("no offer was ever announced");
-            assert_timeout(error, "selection offer count", SHORT);
-            let error = wayland
-                .read_selection_with_timeout("text/plain", SHORT)
-                .expect_err("there is no offer to read the selection from");
-            assert_timeout(error, "read_selection selection offer", SHORT);
-        }
+        // Data-device focus tracks keyboard focus, so the focused client is offered the
+        // selection it just published: the same-client echo must round trip exactly.
+        wayland
+            .wait_for_selection_offer(1, DEADLINE)
+            .expect("the compositor announces the published selection to the focused client");
+        let read = wayland
+            .read_selection("text/plain")
+            .expect("the announced offer can be read back");
+        assert_eq!(
+            read.as_deref(),
+            Some(PAYLOAD),
+            "reading back the selection must return exactly the bytes that were published"
+        );
+        let unknown = wayland
+            .read_selection("application/x-unknown")
+            .expect("an unadvertised mime type is not an error");
+        assert_eq!(unknown, None);
 
         // Publishing again replaces the selection: exactly one source is stored, and a
         // `wl_data_source.cancelled` for the superseded one (which the compositor sends after
-        // accepting the replacement) must not clear the newer record.
+        // accepting the replacement) must not clear the newer record. The replacement is a
+        // genuinely new offer, so the announcement count grows past what the first publication
+        // produced — and the bytes behind the current offer become the replacement's.
+        let announced_before = wayland.selection_offer_count();
         let replacement = b"second payload";
         wayland
             .set_selection("text/plain", &replacement[..])
             .expect("the replacement selection is on the wire");
-        observe_for(OFFER_OBSERVATION_WINDOW);
         {
             let state = lock_client(&wayland.state);
             let stored = state
@@ -829,11 +801,28 @@ mod tests {
                 .as_ref()
                 .expect("the replacement is the stored source, so a late cancelled was ignored");
             assert_eq!(stored.bytes, replacement);
-            assert!(state.offers.is_empty(), "no offer was announced");
+            assert!(
+                stored.source.is_alive(),
+                "the replacement's source proxy is still live"
+            );
         }
+        wayland
+            .wait_for_selection_offer(announced_before + 1, DEADLINE)
+            .expect("the replacement is announced as a new selection offer");
+        let current = wayland
+            .read_selection("text/plain")
+            .expect("the replacement can be read back");
+        assert_eq!(
+            current.as_deref(),
+            Some(&replacement[..]),
+            "the current selection must be the replacement, never the superseded payload"
+        );
 
         // Clearing drops the stored source (a later `wl_data_source.send` is answered with a
-        // closed descriptor) and puts `set_selection(None, serial)` on the wire.
+        // closed descriptor) and puts `set_selection(None, serial)` on the wire. The
+        // compositor answers `selection(None)`: the current offer is cleared and destroyed,
+        // and — clearing is not an announcement — the offer count stays where it was.
+        let announced = wayland.selection_offer_count();
         wayland
             .clear_selection()
             .expect("clearing the selection is on the wire");
@@ -841,12 +830,24 @@ mod tests {
             lock_client(&wayland.state).selection_source.is_none(),
             "clearing drops the published source"
         );
+        block_until(DEADLINE, "the cleared selection", || {
+            let state = lock_client(&wayland.state);
+            state.current_offer.is_none() && state.offers.is_empty()
+        })
+        .expect("clearing the selection clears and destroys the current offer");
         assert_eq!(
             wayland.selection_offer_count(),
-            0,
-            "clearing the selection is not an offer"
+            announced,
+            "`selection(None)` clears the selection; it does not announce an offer"
         );
-
+        assert!(
+            lock_client(&wayland.state).offers.is_empty(),
+            "a cleared selection leaves no offer behind"
+        );
+        let error = wayland
+            .read_selection_with_timeout("text/plain", SHORT)
+            .expect_err("with the selection cleared there is no offer left to read");
+        assert_timeout(error, "read_selection selection offer", SHORT);
         tokio_rt
             .block_on(runtime.shutdown())
             .expect("the runtime shuts down");
