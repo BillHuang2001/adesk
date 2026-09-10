@@ -10,8 +10,7 @@ The only I/O is filesystem reads during `scan()` and process spawn during `launc
 
 ## API Surface
 
-All behavior is implemented: zero `todo!()`, no skeleton-phase `allow` attributes.
-Every item is re-exported flat at the crate root; the modules are `pub` as well.
+Every item below exists in `src/` and is re-exported flat at the crate root; the modules are `pub` as well.
 
 ### Registry (`src/registry.rs`)
 - `RegistryOptions { search_dirs: Vec<PathBuf>, terminal: TerminalSpec, spawner: Arc<dyn ProcessSpawner>, clock: Arc<dyn Clock>, locale: Option<String> }` + `xdg()`, `with_search_dirs(iter)`, `with_spawner`, `with_clock`, `with_terminal`, `with_locale`.
@@ -117,7 +116,7 @@ Every item is re-exported flat at the crate root; the modules are `pub` as well.
   - `tests/registry.rs` (18) — tempdir scan/list/get, recursive subdirs, hidden/no_display filtering + `include_hidden`, precedence shadowing, query matching, launch argv/terminal/TryExec/env with the mock spawner, launch error paths (unknown app, no Exec, DBus without Exec, invalid Exec, spawn failure), monotonic launch ids, `started_at_ms` from the fake clock.
   - `tests/correlate.rs` (20) — pid → `StartupWMClass` → substring ordering, most-recent tie-break, timeout expiry, `Uncorrelated` reporting, multiple windows per launch.
 - No test spawns a real process, needs a display, GPU, network, or an installed application; fixtures are written to `tempfile::tempdir()`.
-- Validation (always through the dev shell): `./scripts/dev.sh cargo test -p adesk-app-registry` (163 lib + 112 integration + 1 doctest = 276 passing, 0 ignored), `./scripts/dev.sh cargo clippy -p adesk-app-registry --all-targets` (zero warnings), `./scripts/dev.sh cargo fmt -p adesk-app-registry -- --check`, `./scripts/dev.sh cargo check --workspace --all-targets` (green; only pre-existing `adesk-compositor` warnings).
+- Validation (always through the dev shell): `./scripts/dev.sh cargo test -p adesk-app-registry` (163 lib + 112 integration + 1 doctest = 276 passing, 0 ignored), `./scripts/dev.sh cargo clippy -p adesk-app-registry --all-targets --no-deps -- -D warnings` (clean), `./scripts/dev.sh cargo fmt --all --check` (clean workspace-wide), `./scripts/dev.sh cargo check --workspace --all-targets` (clean).
 
 ## Dependencies
 
@@ -127,18 +126,18 @@ Every item is re-exported flat at the crate root; the modules are `pub` as well.
 
 ## Notes for Agents
 
-- The desktop-file id rule is `/` → `.` (`kde/kate.desktop` → `kde.kate`), NOT `-`: `docs/architecture.md` §7 is normative and the already-implemented `crates/adesk-testkit` fixtures assert the dotted form.
+- The desktop-file id rule is `/` → `.` (`kde/kate.desktop` → `kde.kate`), NOT `-`: `docs/architecture.md` §7 is normative and the `crates/adesk-testkit` fixtures assert the dotted form.
 - `AppInfo` has no availability field, so `TryExec` failures surface at launch time (`TryExecNotFound`), not in `list_apps`; do not add fields to `adesk_core::AppInfo` — extend `docs/core-api.md` through the root instead.
 - `AppRegistry::launch` never touches the `Correlator`: the server emits `AppLaunched` and records the launch itself (see "What adesk-server must know").
-- `adesk-testkit` will provide a `.desktop` fixture writer and a helper launch binary for end-to-end tests; this crate's own tests use `tempfile` directly and never spawn real processes.
+- `adesk-testkit` provides `.desktop` fixtures (`FixtureDir`, `TestApp`) and a helper process for end-to-end tests; this crate's own tests use `tempfile` directly and never spawn real processes.
 - `RawEntry`, `DesktopEntry` and the `ProcessSpawner`/`Clock` traits are public so tests and `adesk-testkit` can build fixtures without reimplementing parsing or launch plumbing.
 - `tests/support/mod.rs` carries a module-level `#![allow(dead_code)]` because it is compiled into five test binaries and each uses a subset of its helpers.
 - `Error::Io`, `Error::InvalidEntry` and `Error::InvalidArgument` exist for API completeness but are never constructed by this crate: `scan()` reports per-file problems as `ScanIssue`s (it only returns `Ok`), and `launch()` can only fail with `UnknownApp`, `TryExecNotFound`, `NoExec`, `InvalidExec` or `Spawn`.
 
 ## Status
 
-Implementation-complete (Phase 2):
-- Zero `todo!()`; all skeleton-phase `allow` attributes removed; every file under the ~1000-line threshold.
+Every item documented above is implemented and exercised by the suites in Test Strategy:
+- No `todo!()` in the crate, no crate-level `allow` attributes, and every file under the ~1000-line threshold (largest: `src/parser.rs`, 793 lines).
 - `cargo test -p adesk-app-registry`: 163 lib + 112 integration + 1 doctest = 276 passing, 0 ignored.
-- `cargo clippy -p adesk-app-registry --all-targets` zero warnings; `cargo fmt --check` clean; `cargo check --workspace --all-targets` green.
+- `cargo clippy -p adesk-app-registry --all-targets --no-deps -- -D warnings`, `cargo fmt --all --check`, `cargo check --workspace --all-targets` and `cargo doc -p adesk-app-registry --no-deps --document-private-items` are all clean (no warnings).
 - Consumed by `adesk-server` (AGP dispatch, `AppLaunched` emission, correlation on the event pump) and `adesk-testkit` (`RunningServer::registry`).
