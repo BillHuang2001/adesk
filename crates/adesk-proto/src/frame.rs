@@ -19,7 +19,8 @@ pub enum Frame {
     Request(RequestFrame),
     /// Server → client response.
     Response(ResponseFrame),
-    /// Server → client unsolicited event (only after `subscribe_events`).
+    /// Server → client unsolicited event (only after `subscribe_events` or
+    /// `inspect_subscribe`).
     Event(EventFrame),
 }
 

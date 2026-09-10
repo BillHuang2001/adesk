@@ -1,8 +1,8 @@
 //! Golden-JSON and round-trip tests over the protocol type definitions.
 //!
 //! These exercise only the derived wire shapes and the static tables
-//! (method names, event kinds, defaults, error-code mapping), so they pass with
-//! the Phase-1 stubs in place. Frame-level behavior is pinned in `codec.rs`.
+//! (method names, event kinds, defaults, error-code mapping); frame-level
+//! behavior is pinned in `codec.rs`.
 
 use adesk_core::{
     ActionId, AppId, AppInfo, Button, ErrorCode, Observation, OverlayKind, Position, Rect, Region,

@@ -218,8 +218,8 @@ pub struct QuietEvent {
 
 /// `data` of an `inspect_frame` event pushed by `inspect_subscribe` (§5.7).
 ///
-/// The spec names the kind without fixing its fields; this is the resolved shape
-/// (additive fields are not breaking, §7).
+/// §5.7 fixes this shape: the subscription that produced the frame, and the
+/// composed output image with that subscription's overlays.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InspectFrameEvent {
     /// The `inspect_subscribe` subscription that produced this frame.
