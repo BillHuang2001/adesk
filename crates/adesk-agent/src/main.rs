@@ -16,14 +16,12 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{bail, Context as _, Result as AnyResult};
-use async_trait::async_trait;
 use clap::Parser;
 use tracing::{error, info, warn};
 
 use adesk_agent::{
-    AgentContext, AgentDecision, AgentLoop, AgpClient, ContextBudget, DummyMode, LlmProvider,
-    LoopConfig, ProviderConfig, ProviderError, ProviderKind, RunReport, Scenario, ScenarioId,
-    ScenarioRunner, TaskDescription,
+    AgentLoop, AgpClient, ContextBudget, DummyMode, LlmProvider, LoopConfig, ProviderConfig,
+    ProviderKind, RunReport, Scenario, ScenarioId, ScenarioRunner, TaskDescription,
 };
 
 /// Multimodal GUI agent prototype for the ADesk runtime.
@@ -153,7 +151,7 @@ async fn run(cli: Cli) -> AnyResult<bool> {
                 goal = %task.goal,
                 "running task"
             );
-            let mut agent = AgentLoop::new(client, BoxedProvider(provider), config);
+            let mut agent = AgentLoop::new(client, provider, config);
             let outcome = agent.run(&task).await?;
             if outcome.success {
                 info!(steps = outcome.steps, "task succeeded: {}", outcome.summary);
@@ -192,7 +190,7 @@ async fn run(cli: Cli) -> AnyResult<bool> {
                 runner.run(&scenario, client).await?
             } else {
                 runner
-                    .run_with_provider(&scenario, client, BoxedProvider(provider))
+                    .run_with_provider(&scenario, client, provider)
                     .await?
             };
             for check in scenario_report.checks.iter().filter(|check| !check.passed) {
@@ -295,25 +293,6 @@ fn write_report(path: &Option<PathBuf>, report: &RunReport) -> AnyResult<()> {
         ),
     }
     Ok(())
-}
-
-/// Bridges the runtime-selected `Box<dyn LlmProvider>` to the generic provider
-/// seam of [`AgentLoop`] / [`ScenarioRunner`].
-struct BoxedProvider(Box<dyn LlmProvider>);
-
-#[async_trait]
-impl LlmProvider for BoxedProvider {
-    async fn complete(&self, ctx: &AgentContext) -> Result<AgentDecision, ProviderError> {
-        self.0.complete(ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn supports_images(&self) -> bool {
-        self.0.supports_images()
-    }
 }
 
 #[cfg(test)]
