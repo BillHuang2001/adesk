@@ -4,6 +4,8 @@
 //! renderer, no GPU, no I/O. They are the deterministic tail of every capture
 //! and are unit-tested with exact-pixel assertions.
 
+use std::borrow::Cow;
+
 use adesk_core::{ImageBuffer, Rect, Size};
 use image::ImageEncoder;
 
@@ -15,11 +17,19 @@ const BPP: usize = 4;
 /// Crops `image` to `rect` (image coordinates), clamping to the image bounds.
 ///
 /// A rect that does not intersect the image (or is empty) yields an empty
-/// `0x0` image, never an error. The result is always tightly packed.
+/// `0x0` image, never an error. The result is always tightly packed (a
+/// whole-image crop of an already tight image is returned as a plain copy).
 pub fn crop(image: &ImageBuffer, rect: Rect) -> ImageBuffer {
-    let Some(clipped) = rect.intersect(&image.rect()) else {
+    let bounds = image.rect();
+    let Some(clipped) = rect.intersect(&bounds) else {
         return ImageBuffer::new_rgba(0, 0);
     };
+    if clipped == bounds && image.stride as usize == image.width as usize * BPP {
+        // Whole-image crop of an already tight buffer: the row-by-row copy would
+        // reproduce `image` exactly, so skip the zero-filled allocation and take
+        // the single clone instead.
+        return image.clone();
+    }
     let mut out = ImageBuffer::new_rgba(clipped.w, clipped.h);
     let src_stride = image.stride as usize;
     let row_bytes = clipped.w as usize * BPP;
@@ -61,10 +71,14 @@ pub fn fit_dimensions(size: Size, max_dimension: u32) -> Size {
 /// half-up per channel. Returns a copy of the image when it already fits or
 /// `max_dimension` is `0`.
 pub fn downscale(image: &ImageBuffer, max_dimension: u32) -> ImageBuffer {
-    let target = fit_dimensions(image.size(), max_dimension);
-    if target == image.size() {
+    // The no-op cases (bound disabled, degenerate image, already fits) are exactly
+    // the conditions under which `fit_dimensions` returns the size unchanged, so
+    // they are checked first: the only work left is the single output allocation.
+    let longest = image.width.max(image.height);
+    if max_dimension == 0 || image.width == 0 || image.height == 0 || longest <= max_dimension {
         return image.clone();
     }
+    let target = fit_dimensions(image.size(), max_dimension);
     let mut out = ImageBuffer::new_rgba(target.w, target.h);
     let src_stride = image.stride as usize;
     let (sw, sh) = (image.width as u64, image.height as u64);
@@ -103,15 +117,18 @@ pub fn downscale(image: &ImageBuffer, max_dimension: u32) -> ImageBuffer {
 ///
 /// The AGP `ImagePayload.data` field is base64 of exactly these bytes
 /// (`adesk-proto` performs the base64 step). Rows are re-packed to a tight
-/// stride first, so images with padded strides encode correctly. Empty images
-/// cannot be encoded and produce [`RenderError::InvalidImage`].
+/// stride first, so images with padded strides encode correctly; an image whose
+/// stride is already tight is encoded straight from its own pixel data, without
+/// copying it. Empty images cannot be encoded and produce
+/// [`RenderError::InvalidImage`]; so does a buffer holding fewer bytes than its
+/// stride and height require.
 pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
     if image.width == 0 || image.height == 0 {
         return Err(RenderError::InvalidImage {
             reason: "cannot encode an empty image".to_string(),
         });
     }
-    let tight = tight_rgba(image);
+    let tight = tight_rgba(image)?;
     let mut out = Vec::new();
     image::codecs::png::PngEncoder::new(&mut out)
         .write_image(
@@ -134,6 +151,11 @@ pub fn encode_png(image: &ImageBuffer) -> Result<Vec<u8>> {
 /// top-to-bottom in the caller's coordinate space. It is a general utility, not
 /// a renderer-specific signal — the caller decides. Padding bytes and the row
 /// order are normalized away here.
+///
+/// A tight, unflipped buffer (the common read-back layout) is copied in a single
+/// pass over `width * height * 4` bytes; padded and/or flipped rows are written
+/// into one pre-sized allocation in output order, so the result is never built
+/// through a zero-filled intermediate.
 pub fn image_from_readback(
     data: &[u8],
     width: u32,
@@ -166,31 +188,62 @@ pub fn image_from_readback(
             ),
         });
     }
-    let mut out = vec![0u8; row_bytes * height as usize];
-    for row in 0..height as usize {
-        let src_row = if flipped {
-            height as usize - 1 - row
-        } else {
-            row
-        };
-        let src = &data[src_row * stride..src_row * stride + row_bytes];
-        out[row * row_bytes..(row + 1) * row_bytes].copy_from_slice(src);
-    }
+    let out = if stride == row_bytes && !flipped {
+        // Fast path: already tight and already top-to-bottom, so the payload is
+        // exactly the first `width * height * 4` bytes — one copy, no zero-fill.
+        data[..needed].to_vec()
+    } else {
+        // Padded rows and/or bottom-to-top rows: one pre-sized allocation written
+        // in output order, with no zero-filled intermediate buffer.
+        let mut out = Vec::with_capacity(row_bytes * height as usize);
+        for row in 0..height as usize {
+            let src_row = if flipped {
+                height as usize - 1 - row
+            } else {
+                row
+            };
+            let start = src_row * stride;
+            out.extend_from_slice(&data[start..start + row_bytes]);
+        }
+        out
+    };
     ImageBuffer::from_rgba(width, height, out).map_err(|err| RenderError::InvalidImage {
         reason: err.to_string(),
     })
 }
 
-/// Returns the image rows tightly packed (copying only when `stride` is padded).
-fn tight_rgba(image: &ImageBuffer) -> Vec<u8> {
+/// Returns the image rows tightly packed.
+///
+/// Borrows `image.data` unchanged when the stride is already tight (no copy at
+/// all), and allocates a repacked copy only when the stride is padded. A buffer
+/// holding fewer bytes than `stride * height` requires is rejected as
+/// [`RenderError::InvalidImage`] instead of panicking on a row slice.
+fn tight_rgba(image: &ImageBuffer) -> Result<Cow<'_, [u8]>> {
     let row_bytes = image.width as usize * BPP;
-    if image.stride as usize == row_bytes {
-        return image.data.clone();
+    let stride = image.stride as usize;
+    let needed =
+        stride
+            .checked_mul(image.height as usize)
+            .ok_or_else(|| RenderError::InvalidImage {
+                reason: "image dimensions overflow".to_string(),
+            })?;
+    if image.data.len() < needed {
+        return Err(RenderError::InvalidImage {
+            reason: format!(
+                "image buffer holds {} bytes, {needed} required for {}x{} at stride {stride}",
+                image.data.len(),
+                image.width,
+                image.height
+            ),
+        });
+    }
+    if stride == row_bytes {
+        return Ok(Cow::Borrowed(&image.data[..needed]));
     }
     let mut out = Vec::with_capacity(row_bytes * image.height as usize);
     for row in 0..image.height as usize {
-        let start = row * image.stride as usize;
+        let start = row * stride;
         out.extend_from_slice(&image.data[start..start + row_bytes]);
     }
-    out
+    Ok(Cow::Owned(out))
 }
