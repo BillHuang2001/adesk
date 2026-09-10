@@ -7,6 +7,8 @@ use crate::input::InspectionInput;
 use crate::style::OverlayStyle;
 use crate::text;
 
+use super::common::ink_origin;
+
 /// Draws a right-aligned HUD in the canvas' top-right corner when
 /// [`InspectionInput::commit`] is `Some`: text
 /// `"commit {commit_seq} +{age_ms}ms"` in [`OverlayStyle::timing`] on the
@@ -25,13 +27,14 @@ pub fn paint(canvas: &mut Canvas<'_>, input: &InspectionInput, style: &OverlaySt
     let pad = style.pad();
     let size = text::measure(&label, style.scale());
     // `draw_label` derives the plate as the ink rect inflated by `pad`, so
-    // placing the ink origin at `clip.right() - plate_width` puts the plate's
-    // right edge (exclusive) at `clip.right() - pad`.
+    // anchoring the plate's top-left with its right edge (exclusive) at
+    // `clip.right() - pad` puts the drawn plate exactly there.
     let plate_width = size.w.saturating_add(2 * pad as u32) as i32;
     let clip = canvas.clip();
-    let origin = Point {
-        x: clip.right().saturating_sub(plate_width),
-        y: clip.y.saturating_add(pad).saturating_add(pad),
+    let plate = Point {
+        x: clip.right().saturating_sub(plate_width).saturating_sub(pad),
+        y: clip.y.saturating_add(pad),
     };
+    let origin = ink_origin(plate, pad);
     text::draw_label(canvas, origin, &label, &accent);
 }
