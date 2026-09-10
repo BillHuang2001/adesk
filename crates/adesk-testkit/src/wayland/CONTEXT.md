@@ -41,6 +41,12 @@ It must never reach into compositor internals.
 - **`wl_seat::Capability` is a `bitflags` type**, so capability bits come from its `const fn bits()`; the raw bitfield is the ground truth because a seat with pointer *and* keyboard arrives as `WEnum::Unknown(0b11)`.
 - **Reader-thread Wayland client.** The calling thread only sends requests; the reader thread owns the `EventQueue` and sends one `PumpEvent` per read/dispatch cycle on a `tokio::sync::mpsc` channel. Teardown uses `UnixStream::shutdown` plus a bounded join.
 - **One pixel ground truth.** `FillPattern::at(x, y, size)` is evaluated both by the SHM writer and by `ImageAssert::matches_pattern`, so the client and the assertion cannot disagree.
+## Known Issues
+- Superseded SHM buffer ranges are never returned to the pool: `commit_buffer` (`window.rs`) overwrites `WindowState::attached_buffer` without moving the old buffer to `pending_buffer`, and `pending_buffer` is never assigned anywhere, so the `wl_buffer.release` arm in `state.rs` finds neither slot for the superseded buffer id and skips it (`continue`).
+- The compositor emits `wl_buffer.release` for the superseded buffer while dispatching the superseding commit (Smithay `RendererSurfaceState::update_buffer` drop), i.e. always after this client overwrote `attached_buffer`, so the release can never be attributed and the free list is never fed by `commit_frame`.
+- Consequence: the 16 MiB pool grows by one frame per `commit_frame` and fails with `SHM pool exhausted` after ~3 fresh frames per client at the 1280x800 default, contradicting the "a commit loop reuses one allocation" claim in `mod.rs:115-119` / `state.rs:649-654`; in-tree tests commit at most two fresh frames per client, so the gap is latent.
+- `TestWindow::destroy`/`TestPopup::destroy` deregister the window slot before the compositor's release for the still-attached buffer arrives, so that buffer's range is not reclaimed either (same skip arm in `state.rs`).
+
 ## Notes for Agents
 - `mod.rs` documents the reader-thread, lock-order (`ClientState` → `WindowState`) and teardown rules; `state.rs` documents configure sequencing and clipboard state; `input.rs` documents the recording contract; `clipboard.rs` documents serial handling, offer tracking and fd lifetimes; `shm.rs` documents the Argb8888 byte order.
 - Largest files: `state.rs` (~930), `mod.rs` (~870), `clipboard.rs` (~855) — all under the concern threshold but close; put new dispatch impls in their feature module instead of growing `state.rs` further.
