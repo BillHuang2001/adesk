@@ -394,20 +394,16 @@ impl Dispatch<wl_data_offer::WlDataOffer, ()> for ClientState {
         _conn: &Connection,
         _qhandle: &QueueHandle<ClientState>,
     ) {
-        match event {
-            // `Offer { mime_type: String }` — one mime type the offer advertises.
-            //
-            // Recorded on the object its `data_offer` event registered. An offer the client
-            // never registered (a drag offer) is ignored rather than invented.
-            wl_data_offer::Event::Offer { mime_type } => {
-                if let Some(record) = state.offers.get_mut(&proxy.id()) {
-                    record.mime_types.push(mime_type);
-                }
+        // `Offer { mime_type: String }` — one mime type the offer advertises.
+        //
+        // Recorded on the object its `data_offer` event registered. An offer the client
+        // never registered (a drag offer) is ignored rather than invented. Every other
+        // event (`SourceActions` / `Action`, v3 drag-and-drop negotiation) is ignored: the
+        // harness never starts a drag, so none of them is clipboard state.
+        if let wl_data_offer::Event::Offer { mime_type } = event {
+            if let Some(record) = state.offers.get_mut(&proxy.id()) {
+                record.mime_types.push(mime_type);
             }
-            // `SourceActions` / `Action` (v3) report a drag-and-drop negotiation; the harness
-            // never starts a drag, so they are ignored rather than recorded as clipboard
-            // state.
-            _ => {}
         }
     }
 }
