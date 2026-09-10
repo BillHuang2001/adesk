@@ -14,7 +14,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Queries (sync, never wait): `snapshot() -> ObserverSnapshot`, `window_state(WindowId) -> Option<WindowTemporalState>`, `window_ids() -> Vec<WindowId>`, `watermark() -> u64`, `now_ms() -> u64`, `is_quiet(WindowId, quiet_ms) -> Option<bool>`.
 ### Specs (`src/spec.rs`)
 - `WaitSpec { window_id, since_commit, timeout_ms }`, `QuietSpec { window_id, quiet_ms, timeout_ms, after_action }`, `ObserveSpec { window_id, after_action, until, timeout_ms }`; all with `Default` (protocol defaults), `new()` and chainable setters; `ObserveSpec::default().until` is `Condition::Quiet { quiet_ms: 250 }`.
-- `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()`.
+- `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()` (public helper: `Quiet` → its own `quiet_ms`; `Change`/`Timeout` → the `DEFAULT_QUIET_MS` constant).
 - Image parameters (`include_image`, `region`, `max_dimension`) are deliberately absent: the server renders after the wait resolves.
 ### Actions (`src/actions.rs`)
 - `ActionKind` (13 variants, `ALL`, `is_input()`, `as_str()` = AGP method name), `ActionRecord { id, kind, window_id, position, seq, ts_ms }`.
@@ -92,6 +92,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - `after_action` pointing at an action older than the retained journal yields degraded filter-relative counts (aggregates stay exact); the affected windows are flagged `state_uncertain`.
 - Damage clipping needs window geometry, which only `resync` provides; before the first resync, `changed_regions` are unclipped (damage is already window-relative).
 - The `quiet` evidence flag for non-quiet conditions uses `ObserverConfig::default_quiet_ms`, not the server's per-request value; the server can override per request by using a `Quiet` condition.
+  The public `Condition::quiet_threshold_ms()` helper does not reflect a custom `ObserverConfig::default_quiet_ms` (it always returns the `DEFAULT_QUIET_MS` constant of 250); only the service's internal resolve path honors the config field.
 - `Clock::now_ms()` truncates to whole milliseconds, so a deadline can fire up to ~1 ms early — inherent to the event-ts domain, consistent with "quiet is evidence, never a promise".
 - Popups have no state of their own: `PopupAppeared`/`PopupDisappeared` are owner-window counted events and `WindowSnapshot::popup_count` is accepted by `resync` but ignored.
   A popup-driven `SurfaceCommit` carries the owner's `window_id` with popup-relative damage, so it advances the owner's `commit_seq`/`commit_count`, re-arms `wait_for_quiet`, and its damage is clipped against the owner's geometry — damage from a popup outside the window can be clipped away or misattributed.
