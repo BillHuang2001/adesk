@@ -123,15 +123,12 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   the binaries outside the shell will fail keyboard setup unless that variable is set.
 
 ## Status
-Phase 1 (architecture) is complete: all 12 crates are scaffolded, the workspace builds (`./scripts/dev.sh cargo check --workspace --all-targets` is green), and `docs/protocol.md` / `docs/architecture.md` / `docs/core-api.md` are normative.
-`adesk-core` is fully implemented (85 tests).
-Every other crate has real signatures, module docs and frozen acceptance test suites whose bodies are `todo!()`; baseline `cargo test --workspace` = 217 passing, and every failure is a `not yet implemented` panic in those specs.
-Implementation proceeds in waves (one Manager owns each crate):
-1. `adesk-proto`, `adesk-wm`, `adesk-render`, `adesk-observer`, `adesk-app-registry` (no sibling-implementation dependencies)
-2. `adesk-compositor`, `adesk-inspector`, `adesk-client`, `adesk-agent`
-3. `adesk-server` (needs a live compositor for its end-to-end tests)
-4. `adesk-testkit` (needs a live server)
-A crate is implementation-complete when it has zero `todo!()`, no skeleton-phase crate-level `allow` attributes left, and its full non-ignored test suite passes under the dev shell.
+All 12 crates are implementation-complete: zero `todo!()` in the workspace, no skeleton-phase crate-level `allow` attributes left, and `docs/protocol.md` / `docs/architecture.md` / `docs/core-api.md` remain normative.
+`./scripts/dev.sh cargo check --workspace --all-targets` is green and `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean.
+`./scripts/dev.sh cargo test --workspace --no-fail-fast` = 1167 passed, 0 failed, 5 ignored (the ignored tests are doc-code fences only — no behavioural skips).
+Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` (94) and `cargo test -p adesk-testkit --all-features` (49, also under `ADESK_TEST_GL=1`).
+Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suite drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
+Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and an `adesk-testkit` exec-path override (downstream crates currently ship their own fixture binary, e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
 
 ## Routing Table
 
