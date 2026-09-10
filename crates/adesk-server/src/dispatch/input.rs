@@ -24,7 +24,7 @@
 use std::time::Duration;
 
 use adesk_compositor::{CompositorError, KeyCode, RuntimeCommand};
-use adesk_core::{Button, ButtonState, KeyState, Point, Position, Rect, WindowId};
+use adesk_core::{Button, ButtonState, KeyState, Point, Position, Rect, Size, WindowId};
 use adesk_observer::ActionKind;
 use adesk_proto::{
     ActionResult, ClickParams, DoubleClickParams, DragParams, KeyDownParams, KeyUpParams,
@@ -33,6 +33,7 @@ use adesk_proto::{
 };
 use tokio::sync::oneshot;
 
+use crate::context::ServerContext;
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 
@@ -60,8 +61,8 @@ pub async fn pointer_move(
     ctx.session
         .input()
         .run(async {
-            let rect = window_rect(ctx, params.window_id).await?;
-            move_pointer(ctx, params.window_id, params.position, rect).await
+            let rect = window_rect(ctx.server, params.window_id).await?;
+            move_pointer(ctx.server, params.window_id, params.position, rect).await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -77,8 +78,8 @@ pub async fn click(ctx: &RequestContext<'_>, params: ClickParams) -> Result<Acti
     ctx.session
         .input()
         .run(async {
-            move_to(ctx, params.window_id, params.position).await?;
-            click_times(ctx, params.window_id, params.button, params.count).await
+            move_to(ctx.server, params.window_id, params.position).await?;
+            click_times(ctx.server, params.window_id, params.button, params.count).await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -97,10 +98,10 @@ pub async fn double_click(
     ctx.session
         .input()
         .run(async {
-            move_to(ctx, params.window_id, params.position).await?;
-            click_times(ctx, params.window_id, params.button, 1).await?;
+            move_to(ctx.server, params.window_id, params.position).await?;
+            click_times(ctx.server, params.window_id, params.button, 1).await?;
             tokio::time::sleep(Duration::from_millis(DOUBLE_CLICK_GAP_MS)).await;
-            click_times(ctx, params.window_id, params.button, 1).await
+            click_times(ctx.server, params.window_id, params.button, 1).await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -116,8 +117,14 @@ pub async fn mouse_down(ctx: &RequestContext<'_>, params: MouseDownParams) -> Re
     ctx.session
         .input()
         .run(async {
-            move_to(ctx, params.window_id, params.position).await?;
-            button_event(ctx, params.window_id, params.button, ButtonState::Pressed).await
+            move_to(ctx.server, params.window_id, params.position).await?;
+            button_event(
+                ctx.server,
+                params.window_id,
+                params.button,
+                ButtonState::Pressed,
+            )
+            .await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -133,8 +140,14 @@ pub async fn mouse_up(ctx: &RequestContext<'_>, params: MouseUpParams) -> Result
     ctx.session
         .input()
         .run(async {
-            move_to(ctx, params.window_id, params.position).await?;
-            button_event(ctx, params.window_id, params.button, ButtonState::Released).await
+            move_to(ctx.server, params.window_id, params.position).await?;
+            button_event(
+                ctx.server,
+                params.window_id,
+                params.button,
+                ButtonState::Released,
+            )
+            .await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -150,9 +163,9 @@ pub async fn scroll(ctx: &RequestContext<'_>, params: ScrollParams) -> Result<Ac
     ctx.session
         .input()
         .run(async {
-            move_to(ctx, params.window_id, params.position).await?;
+            move_to(ctx.server, params.window_id, params.position).await?;
             let (dx, dy) = (params.dx, params.dy);
-            send_unit(ctx, Some(params.window_id), |reply| {
+            send_unit(ctx.server, Some(params.window_id), |reply| {
                 RuntimeCommand::PointerAxis { dx, dy, reply }
             })
             .await
@@ -171,16 +184,28 @@ pub async fn drag(ctx: &RequestContext<'_>, params: DragParams) -> Result<Action
     ctx.session
         .input()
         .run(async {
-            let rect = window_rect(ctx, params.window_id).await?;
-            move_pointer(ctx, params.window_id, params.from, rect).await?;
-            button_event(ctx, params.window_id, params.button, ButtonState::Pressed).await?;
-            move_pointer(ctx, params.window_id, params.to, rect).await?;
+            let rect = window_rect(ctx.server, params.window_id).await?;
+            move_pointer(ctx.server, params.window_id, params.from, rect).await?;
+            button_event(
+                ctx.server,
+                params.window_id,
+                params.button,
+                ButtonState::Pressed,
+            )
+            .await?;
+            move_pointer(ctx.server, params.window_id, params.to, rect).await?;
             // The seat has a single motion command, so the requested duration is
             // honoured as the hold time at the destination before the release.
             if params.duration_ms > 0 {
                 tokio::time::sleep(Duration::from_millis(params.duration_ms)).await;
             }
-            button_event(ctx, params.window_id, params.button, ButtonState::Released).await
+            button_event(
+                ctx.server,
+                params.window_id,
+                params.button,
+                ButtonState::Released,
+            )
+            .await
         })
         .await?;
     Ok(ActionResult { action_id })
@@ -200,11 +225,13 @@ pub async fn keypress(ctx: &RequestContext<'_>, params: KeypressParams) -> Resul
     ctx.session
         .input()
         .run(async {
-            activate_if_needed(ctx, params.window_id).await?;
-            send_unit(ctx, params.window_id, |reply| RuntimeCommand::KeyEvent {
-                key,
-                state: KeyState::Pressed,
-                reply,
+            activate_if_needed(ctx.server, params.window_id).await?;
+            send_unit(ctx.server, params.window_id, |reply| {
+                RuntimeCommand::KeyEvent {
+                    key,
+                    state: KeyState::Pressed,
+                    reply,
+                }
             })
             .await
         })
@@ -223,11 +250,13 @@ pub async fn key_down(ctx: &RequestContext<'_>, params: KeyDownParams) -> Result
     ctx.session
         .input()
         .run(async {
-            activate_if_needed(ctx, params.window_id).await?;
-            send_unit(ctx, params.window_id, |reply| RuntimeCommand::KeyEvent {
-                key,
-                state: KeyState::Pressed,
-                reply,
+            activate_if_needed(ctx.server, params.window_id).await?;
+            send_unit(ctx.server, params.window_id, |reply| {
+                RuntimeCommand::KeyEvent {
+                    key,
+                    state: KeyState::Pressed,
+                    reply,
+                }
             })
             .await
         })
@@ -246,11 +275,13 @@ pub async fn key_up(ctx: &RequestContext<'_>, params: KeyUpParams) -> Result<Act
     ctx.session
         .input()
         .run(async {
-            activate_if_needed(ctx, params.window_id).await?;
-            send_unit(ctx, params.window_id, |reply| RuntimeCommand::KeyEvent {
-                key,
-                state: KeyState::Released,
-                reply,
+            activate_if_needed(ctx.server, params.window_id).await?;
+            send_unit(ctx.server, params.window_id, |reply| {
+                RuntimeCommand::KeyEvent {
+                    key,
+                    state: KeyState::Released,
+                    reply,
+                }
             })
             .await
         })
@@ -268,9 +299,9 @@ pub async fn type_text(ctx: &RequestContext<'_>, params: TypeTextParams) -> Resu
     ctx.session
         .input()
         .run(async {
-            activate_if_needed(ctx, params.window_id).await?;
+            activate_if_needed(ctx.server, params.window_id).await?;
             for character in params.text.chars() {
-                if !type_character(ctx, character).await? {
+                if !type_character(ctx.server, character).await? {
                     skipped.push(character.to_string());
                 }
             }
@@ -284,12 +315,33 @@ pub async fn type_text(ctx: &RequestContext<'_>, params: TypeTextParams) -> Resu
 ///
 /// Window geometry — never a hard-coded origin — is the authority for
 /// window-relative coordinates (§2).
-async fn window_rect(ctx: &RequestContext<'_>, window_id: WindowId) -> Result<Rect> {
-    let snapshot = state(ctx).await?;
+pub(crate) async fn window_rect(server: &ServerContext, window_id: WindowId) -> Result<Rect> {
+    let snapshot = state(server).await?;
     snapshot
         .window(window_id)
         .map(|window| window.geometry)
         .ok_or_else(|| unknown_window(window_id))
+}
+
+/// Resolves a VAP normalized output fraction into a window-relative position.
+///
+/// VAP pointer coordinates (`docs/viewer.md` §4) are normalized `0.0..=1.0`
+/// output fractions and carry no `window_id`; the runtime resolves them against
+/// the active window's rect through the window model (invariant 2). The output
+/// point is obtained by resolving the fraction against the output rect and is
+/// then expressed window-relative as pixels, so `Position::resolve(window)`
+/// recovers that output point for a window that fills the output.
+// The VAP viewer endpoint (`docs/viewer.md` §4) is the only intended caller;
+// nothing on the AGP path uses it yet, so the non-test build would flag it.
+#[allow(dead_code)]
+pub(crate) fn output_fraction_position(x: f64, y: f64, output: Size, window: Rect) -> Position {
+    let point = Position::normalized(x, y).resolve(Rect {
+        x: 0,
+        y: 0,
+        w: output.w,
+        h: output.h,
+    });
+    Position::pixels(point.x - window.x, point.y - window.y)
 }
 
 /// Applies the §2 default rule for an optional window-relative position.
@@ -298,7 +350,7 @@ async fn window_rect(ctx: &RequestContext<'_>, window_id: WindowId) -> Result<Re
 /// pointer position when it lies inside the window, else the window center. The
 /// center is expressed as a normalized position, so the window model performs
 /// the arithmetic.
-fn resolve_pointer_position(
+pub(crate) fn resolve_pointer_position(
     requested: Option<Position>,
     window: Rect,
     cursor: Option<Point>,
@@ -315,20 +367,20 @@ fn resolve_pointer_position(
 }
 
 /// Resolves an optional position through the window model and moves the pointer.
-async fn move_to(
-    ctx: &RequestContext<'_>,
+pub(crate) async fn move_to(
+    server: &ServerContext,
     window_id: WindowId,
     requested: Option<Position>,
 ) -> Result<()> {
-    let rect = window_rect(ctx, window_id).await?;
-    let position = resolve_pointer_position(requested, rect, ctx.server.cursor.get());
-    move_pointer(ctx, window_id, position, rect).await
+    let rect = window_rect(server, window_id).await?;
+    let position = resolve_pointer_position(requested, rect, server.cursor.get());
+    move_pointer(server, window_id, position, rect).await
 }
 
 /// Moves the pointer to a window-relative position and records the resolved
 /// output point (the compositor snapshot has no cursor).
-async fn move_pointer(
-    ctx: &RequestContext<'_>,
+pub(crate) async fn move_pointer(
+    server: &ServerContext,
     window_id: WindowId,
     position: Position,
     rect: Rect,
@@ -336,37 +388,36 @@ async fn move_pointer(
     // `adesk_wm` resolves the position against the window geometry and adds its
     // origin, which is exactly `Position::resolve` for a window rect.
     let point = position.resolve(rect);
-    send_unit(ctx, Some(window_id), |reply| RuntimeCommand::PointerMove {
-        position,
-        reply,
+    send_unit(server, Some(window_id), |reply| {
+        RuntimeCommand::PointerMove { position, reply }
     })
     .await?;
-    ctx.server.cursor.set(point);
+    server.cursor.set(point);
     Ok(())
 }
 
 /// Presses and releases `button` `count` times at the current pointer position.
-async fn click_times(
-    ctx: &RequestContext<'_>,
+pub(crate) async fn click_times(
+    server: &ServerContext,
     window_id: WindowId,
     button: Button,
     count: u32,
 ) -> Result<()> {
     for _ in 0..count {
-        button_event(ctx, window_id, button, ButtonState::Pressed).await?;
-        button_event(ctx, window_id, button, ButtonState::Released).await?;
+        button_event(server, window_id, button, ButtonState::Pressed).await?;
+        button_event(server, window_id, button, ButtonState::Released).await?;
     }
     Ok(())
 }
 
 /// Sends one pointer button event.
-async fn button_event(
-    ctx: &RequestContext<'_>,
+pub(crate) async fn button_event(
+    server: &ServerContext,
     window_id: WindowId,
     button: Button,
     state: ButtonState,
 ) -> Result<()> {
-    send_unit(ctx, Some(window_id), |reply| {
+    send_unit(server, Some(window_id), |reply| {
         RuntimeCommand::PointerButton {
             button,
             state,
@@ -381,18 +432,21 @@ async fn button_event(
 ///
 /// Runtime-native: this changes compositor state directly, it never synthesizes
 /// input.
-async fn activate_if_needed(ctx: &RequestContext<'_>, window_id: Option<WindowId>) -> Result<()> {
+pub(crate) async fn activate_if_needed(
+    server: &ServerContext,
+    window_id: Option<WindowId>,
+) -> Result<()> {
     let Some(window_id) = window_id else {
         return Ok(());
     };
-    let snapshot = state(ctx).await?;
+    let snapshot = state(server).await?;
     if snapshot.window(window_id).is_none() {
         return Err(unknown_window(window_id));
     }
     if snapshot.keyboard_focus.or(snapshot.active_window_id) == Some(window_id) {
         return Ok(());
     }
-    send_unit(ctx, Some(window_id), |reply| {
+    send_unit(server, Some(window_id), |reply| {
         RuntimeCommand::ActivateWindow { window_id, reply }
     })
     .await
@@ -404,13 +458,13 @@ async fn activate_if_needed(ctx: &RequestContext<'_>, window_id: Option<WindowId
 /// presses and releases it (the compositor brackets shifted levels itself).
 /// Characters without a keysym are skipped; so are characters the compositor
 /// keymap rejects (see [`is_unmappable_key`]) — every other failure propagates.
-async fn type_character(ctx: &RequestContext<'_>, character: char) -> Result<bool> {
+pub(crate) async fn type_character(server: &ServerContext, character: char) -> Result<bool> {
     let mut buffer = [0u8; 4];
     let name = character.encode_utf8(&mut buffer);
     let Ok(key) = KeyCode::parse_chord([name]) else {
         return Ok(false);
     };
-    match send_unit(ctx, None, |reply| RuntimeCommand::KeyEvent {
+    match send_unit(server, None, |reply| RuntimeCommand::KeyEvent {
         key,
         state: KeyState::Pressed,
         reply,
@@ -431,7 +485,7 @@ async fn type_character(ctx: &RequestContext<'_>, character: char) -> Result<boo
 /// `type_text` turns exactly that failure into a `skipped` entry (§5.5); every
 /// other failure (no focused window, unknown window, shutting down) propagates
 /// instead of being silently dropped.
-fn is_unmappable_key(error: &ServerError) -> bool {
+pub(crate) fn is_unmappable_key(error: &ServerError) -> bool {
     matches!(
         error,
         ServerError::Compositor(CompositorError::InvalidRequest(message))
@@ -444,13 +498,13 @@ fn is_unmappable_key(error: &ServerError) -> bool {
 /// The reply carries [`adesk_core::Error`]; `dispatch::windows::command_error`
 /// preserves its AGP code. A dropped reply means the compositor thread is gone,
 /// which is reported as `shutting_down`.
-async fn send_unit(
-    ctx: &RequestContext<'_>,
+pub(crate) async fn send_unit(
+    server: &ServerContext,
     window_id: Option<WindowId>,
     make: impl FnOnce(oneshot::Sender<adesk_core::Result<()>>) -> RuntimeCommand,
 ) -> Result<()> {
     let (reply, response) = oneshot::channel();
-    ctx.server.compositor.send(make(reply))?;
+    server.compositor.send(make(reply))?;
     match response.await {
         Ok(Ok(())) => Ok(()),
         Ok(Err(error)) => Err(command_error(window_id, error)),
@@ -546,5 +600,44 @@ mod tests {
         assert!(!is_unmappable_key(&ServerError::Compositor(
             CompositorError::UnknownWindow(WindowId(1))
         )));
+    }
+
+    #[test]
+    fn an_output_fraction_recovers_the_output_point_for_a_filling_window() {
+        let output = Size { w: 200, h: 100 };
+        // A window that fills the output: the fraction is resolved against the
+        // output rect, expressed window-relative and then resolves back to that
+        // same output point.
+        let full = Rect {
+            x: 0,
+            y: 0,
+            w: 200,
+            h: 100,
+        };
+        for (x, y) in [(0.0, 0.0), (0.25, 0.75), (1.0, 1.0)] {
+            let position = output_fraction_position(x, y, output, full);
+            assert_eq!(
+                position.resolve(full),
+                Position::normalized(x, y).resolve(full),
+                "({x}, {y})"
+            );
+        }
+    }
+
+    #[test]
+    fn an_output_fraction_is_expressed_relative_to_the_window_origin() {
+        let output = Size { w: 200, h: 100 };
+        let window = Rect {
+            x: 100,
+            y: 50,
+            w: 100,
+            h: 50,
+        };
+        // The last output pixel is the window's last pixel, so it is (99, 49)
+        // window-relative rather than (199, 99) output-relative.
+        assert_eq!(
+            output_fraction_position(1.0, 1.0, output, window),
+            Position::pixels(99, 49)
+        );
     }
 }

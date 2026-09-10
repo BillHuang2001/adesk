@@ -158,7 +158,7 @@ async fn capture_result(
     format: ImageFormat,
     frame: RenderedFrame,
 ) -> Result<CaptureResult> {
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     let window = snapshot
         .window(window_id)
         .cloned()
@@ -189,7 +189,7 @@ async fn observation_image(
     };
 
     let frame = render_window(ctx, window_id, region, max_dimension).await?;
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     let scale = match snapshot.window(window_id) {
         Some(window) => scale_from(source_size(window, region), &frame.image),
         // The window disappeared between the render and the state query; the
@@ -210,7 +210,7 @@ async fn observed_window(
     if window_id.is_some() {
         return Ok(window_id);
     }
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     Ok(snapshot.active_window_id.or(snapshot.keyboard_focus))
 }
 

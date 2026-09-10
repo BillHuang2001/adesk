@@ -25,9 +25,10 @@ use crate::error::{Result, ServerError};
 
 /// Reads the compositor's current state through `QueryState`.
 ///
-/// The canonical state read of every dispatch group: `pub(super)` so §5.2's
+/// The canonical state read of every dispatch group: `pub(crate)` so §5.2's
 /// `launch_app` (the compositor clock), §5.4's captures and §5.5's
-/// window-relative coordinates all use this one implementation.
+/// window-relative coordinates all use this one implementation, and so the
+/// viewer endpoint can reuse it.
 ///
 /// # Errors
 ///
@@ -35,9 +36,9 @@ use crate::error::{Result, ServerError};
 /// compositor drops the reply — `QueryState` is infallible, so a dropped reply
 /// can only mean the compositor thread is gone, i.e. the runtime is shutting
 /// down (`crates/adesk-server/CONTEXT.md`, error mapping).
-pub(super) async fn state(ctx: &RequestContext<'_>) -> Result<StateSnapshot> {
+pub(crate) async fn state(server: &ServerContext) -> Result<StateSnapshot> {
     let (reply, answer) = oneshot::channel();
-    ctx.server
+    server
         .compositor
         .send(RuntimeCommand::QueryState { reply })?;
     answer.await.map_err(|_| ServerError::ShuttingDown)
@@ -73,7 +74,7 @@ pub async fn list_windows(
     params: ListWindowsParams,
 ) -> Result<ListWindowsResult> {
     let _ = params; // `list_windows` has no parameters (§5.3).
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     Ok(ListWindowsResult {
         windows: snapshot.windows,
         active_window_id: snapshot.active_window_id,
@@ -85,7 +86,7 @@ pub async fn get_window(
     ctx: &RequestContext<'_>,
     params: GetWindowParams,
 ) -> Result<GetWindowResult> {
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     let window = snapshot
         .window(params.window_id)
         .cloned()
@@ -146,7 +147,7 @@ pub async fn close_window(
 /// `get_focus`: active window and the surface-level keyboard focus.
 pub async fn get_focus(ctx: &RequestContext<'_>, params: GetFocusParams) -> Result<GetFocusResult> {
     let _ = params; // `get_focus` has no parameters (§5.3).
-    let snapshot = state(ctx).await?;
+    let snapshot = state(ctx.server).await?;
     Ok(GetFocusResult {
         window_id: snapshot.active_window_id,
         // `keyboard_focus` is the window whose surface holds the seat's
@@ -167,7 +168,7 @@ pub async fn get_focus(ctx: &RequestContext<'_>, params: GetFocusParams) -> Resu
 ///
 /// `window_id` is the window the command targeted, used to describe an
 /// `unknown_window` failure; `None` keeps the original message.
-pub(super) fn command_error(window_id: Option<WindowId>, error: adesk_core::Error) -> ServerError {
+pub(crate) fn command_error(window_id: Option<WindowId>, error: adesk_core::Error) -> ServerError {
     let error = match error.code {
         ErrorCode::UnknownWindow => match window_id {
             Some(window_id) => CompositorError::UnknownWindow(window_id),
@@ -185,7 +186,7 @@ pub(super) fn command_error(window_id: Option<WindowId>, error: adesk_core::Erro
 }
 
 /// The `unknown_window` failure for a window the compositor does not know.
-pub(super) fn unknown_window(window_id: WindowId) -> ServerError {
+pub(crate) fn unknown_window(window_id: WindowId) -> ServerError {
     ServerError::Compositor(CompositorError::UnknownWindow(window_id))
 }
 
