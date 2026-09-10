@@ -14,7 +14,7 @@
 //! `window.origin + (pad, pad + n * (line_height + pad))`.
 //!
 //! Labels are elided to the window's inner width (`window.w - 2 * pad`) with
-//! [`text::elide`](crate::text::elide) and clipped to
+//! [`text::elide`] and clipped to
 //! `window.geometry ∩ canvas.clip()`, so a label never leaves its window.
 
 use adesk_core::{Point, Rect};

@@ -4,7 +4,8 @@
 //! state, secondary to agent-facing capture: the runtime renders the full
 //! virtual output on demand, this crate composes debug overlays
 //! (`docs/protocol.md` §5.7 — `inspect_capture` / `inspect_subscribe`,
-//! [`OverlayKind`]) onto that frame, and `adesk-server` encodes the result.
+//! [`OverlayKind`](adesk_core::OverlayKind)) onto that frame, and
+//! `adesk-server` encodes the result.
 //! Agent-facing `capture_*` / `observe` images never go through this crate.
 //!
 //! Properties (binding):
