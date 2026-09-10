@@ -125,6 +125,9 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   shell provides them. GL rendering uses Mesa's `llvmpipe` software fallback there.
 - `xkbcommon`'s keymap data comes from `XKB_CONFIG_ROOT` set by the dev shell; running
   the binaries outside the shell will fail keyboard setup unless that variable is set.
+- `adesk-testkit`'s Wayland client leaks superseded SHM buffer ranges (the 16 MiB pool
+  exhausts after ~3 fresh 1280x800 frames per client; latent because in-tree tests commit
+  at most two) — see `crates/adesk-testkit/src/wayland/CONTEXT.md`.
 
 ## Status
 All 12 crates are implementation-complete: zero `todo!()` in the workspace, no skeleton-phase crate-level `allow` attributes left, and `docs/protocol.md` / `docs/architecture.md` / `docs/core-api.md` remain normative.
