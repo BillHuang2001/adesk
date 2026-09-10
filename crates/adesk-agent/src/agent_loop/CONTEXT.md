@@ -3,7 +3,7 @@
 ## Intent
 The module that turns an `AgentClient` + `LlmProvider` pair into a run: bounded per-step context assembly, one provider decision per step, execution of that decision through AGP, recovery, budgets and the returned `LoopOutcome`.
 The public surface (`AgentLoop`, `LoopConfig`, `LoopOutcome`, `StepRecord`, `StepStatus`, `StopReason`) is re-exported at the crate root; everything else here is `pub(super)` plumbing.
-Split out of a single 992-line file: add behaviour by extending the fitting module, not by growing `execute.rs`.
+Add behaviour by extending the fitting module, not by growing `execute.rs` (it is the largest file here and the concern threshold is ~1000 lines).
 
 ## Module map
 | File | Contents |
