@@ -48,19 +48,9 @@ impl<T> OffscreenTarget<T> {
         self.format
     }
 
-    /// The renderer-specific target object.
-    pub fn texture(&self) -> &T {
-        &self.target
-    }
-
     /// Mutable access to the renderer-specific target object (used for binding).
     pub fn texture_mut(&mut self) -> &mut T {
         &mut self.target
-    }
-
-    /// Consumes the wrapper, returning the renderer target.
-    pub fn into_inner(self) -> T {
-        self.target
     }
 }
 
