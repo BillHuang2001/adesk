@@ -142,10 +142,7 @@ fn update_inspection(context: &ServerContext, event: &RuntimeEvent) {
             ..
         } if !damage.is_empty() => {
             let now_ms = context.now_ms();
-            let geometry = context
-                .observer
-                .window_state(*window_id)
-                .and_then(|state| state.geometry);
+            let geometry = context.observer.window_geometry(*window_id);
             snapshot.damage = crate::inspection::damage_to_output(damage, geometry);
             snapshot.commit = Some(CommitInfo {
                 commit_seq: *commit_seq,
