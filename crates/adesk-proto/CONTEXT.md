@@ -35,7 +35,8 @@ Images (`src/image.rs`): `ImagePayload { width, height, format, stride: Option<u
 
 Vocabulary (`src/types.rs`): `ImageFormat::{Png, Rgba8}`, `RendererKind::{Gl, Pixman}`, `Condition::{Quiet{quiet_ms}, Change, Timeout}` (tagged by `type`), `KeySpec::{Single(String), Chord(Vec<String>)}` (untagged) with `keys()` and a single `From<&str>` conversion.
 
-Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, decode(&[u8]) -> Result<Frame> }`, `NdjsonCodec` with `encode_str`/`decode_str`.Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidParams`, `InvalidEventData`, `UnknownEventKind`, `InvalidResult`, `VersionMismatch`, `Json`, `Base64`), `error_code()`, `From<ProtoError> for adesk_core::Error`, `pub type Result<T>`.
+Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, decode(&[u8]) -> Result<Frame> }`, `NdjsonCodec` with `encode_str`/`decode_str`.
+Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidParams`, `InvalidEventData`, `UnknownEventKind`, `InvalidResult`, `VersionMismatch`, `Json`, `Base64`), `error_code()`, `From<ProtoError> for adesk_core::Error`, `pub type Result<T>`.
 
 ## Constraints
 
@@ -66,6 +67,7 @@ Codec (`src/codec.rs`): `trait Codec { name, encode(&Frame) -> Result<Vec<u8>>, 
 | Method round-trip + golden JSON tests | `tests/methods_roundtrip.rs` |
 | Frame/event/codec round-trip tests | `tests/frames_events_roundtrip.rs` |
 | Image payload tests | `tests/image_roundtrip.rs` |
+| Shared test helpers + fixtures | `tests/common/mod.rs` |
 
 ## Design Decisions
 
@@ -137,4 +139,5 @@ Every frame is on the hot path: the server encodes each response/event (`connect
 
 - `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
 - `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 75/75 green (+1 doctest); `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
+- `cargo check --workspace --all-targets` is green: the removed helpers (`encode_frame`/`decode_frame`, `ResponseOutcome::{result_payload,error_payload,is_error}`, `From<String>`/`From<Vec<String>>` for `KeySpec`) break no cross-crate build.
 - `cargo doc -p adesk-proto --no-deps --document-private-items` is warning-free: every intra-doc link resolves and no link carries a redundant explicit target (write `[`ProtoError::Json`]`, not `[`ProtoError::Json`](crate::ProtoError::Json)`, and qualify out-of-scope items as `[`crate::ProtoError::Json`]`).
