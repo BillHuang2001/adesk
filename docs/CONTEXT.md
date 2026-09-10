@@ -34,6 +34,7 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
 - §4 (protocol.md:97-100) says `image` is `null` when no image was requested, but the server also returns `null` when an image was requested and no window is renderable (`crates/adesk-server/src/dispatch/capture.rs:186-189`); the doc does not state that case.
 - Popups are never explicitly excluded from `list_windows`; they surface only via `WindowInfo.popup_count` (protocol.md:81) and popup events/observation counters, not as `WindowInfo` entries.
 - `Observation.elapsed_ms` has no defined start point, and `launch_app`'s `args` placement relative to the expanded `Exec` line is unstated.
+- §5 (7 tables, 29 methods) is the only method listing in `protocol.md` and never states it is exhaustive; method totality is implied only by §1's unknown-method rule (protocol.md:21) and §6's one-response-per-request rule (protocol.md:241-242).
 
 ## Routing Table
 

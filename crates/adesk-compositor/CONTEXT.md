@@ -171,7 +171,7 @@ Event loop:
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
-- Two `#[allow(dead_code)]` sites remain, both field-level lifetime handles: `State::output` and `State::xdg_decoration_state`. No crate-level allow attributes remain.
+- Two `#[allow(dead_code)]` sites remain, both field-level retained handles with no v1 reader: `State::output` (the output global already holds its own clone from `Output::create_global`) and `State::xdg_decoration_state` (owns the `GlobalId`, whose removal is explicit via `DisplayHandle::remove_global`; no type in the wayland stack has a `Drop` that would make these lifetime guards). No crate-level allow attributes remain.
 
 ### AGP command semantics (verified against the code)
 
@@ -200,6 +200,7 @@ Unit tests (colocated `#[cfg(test)]`; 87 tests pass):
 - `input::injector`: logical buttons → evdev codes.
 - `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level, and pixel proof covers both render paths: `RenderWindow` (`window_lifecycle.rs` matches the committed pattern, `popups.rs` asserts the popup's own fill inside the owner's frame) and `RenderOutput` (`output_composition.rs` proves a tracked-but-inactive window is excluded from the composed frame).
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
+- Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
@@ -232,6 +233,7 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
+- Stale comment wording only (no code defect): the `src/render/elements.rs` and `src/render/headless.rs` test modules call the popup and tracked-but-inactive pixel proofs "queued" `tests/integration_plan.md` scenarios, but both are implemented (`tests/popups.rs`, `tests/output_composition.rs`). The plan doc is the normative statement.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 
