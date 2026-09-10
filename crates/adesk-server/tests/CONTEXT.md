@@ -5,7 +5,7 @@
 End-to-end coverage of the AGP v1 server: a real runtime (`Server::start`) on a private temp socket,
 driven through `adesk-client` (typed) and raw NDJSON, with no display, GPU, network or installed application.
 These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + transport).
-Nine integration targets totalling 55 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
+Nine integration targets totalling 56 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
 They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond generous bounds.
 
 ## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
