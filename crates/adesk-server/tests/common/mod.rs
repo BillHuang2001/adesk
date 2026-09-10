@@ -81,6 +81,17 @@ pub const OUTPUT_HEIGHT: u32 = 720;
 /// `quiet_ms`) are asserted on the returned `Observation`, never on this bound.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Short protocol `timeout_ms` (milliseconds) for waits whose exact value is
+/// immaterial: waits that only need to *expire* against an idle runtime, and
+/// `observe(until = timeout)` samples whose horizon is irrelevant.
+///
+/// Kept strictly below the protocol default `quiet_ms` (250, §5.4) so a
+/// `wait_for_quiet` carrying this timeout still expires, and short enough to
+/// keep the suites fast. `observe(until = timeout)` resolves *at* this horizon
+/// by definition, so a test asserting `elapsed_ms >= <horizon>` compares against
+/// this constant.
+pub const SHORT_TIMEOUT_MS: u64 = 100;
+
 /// The virtual output size as the `adesk-core` value type.
 pub fn output_size() -> Size {
     Size::new(OUTPUT_WIDTH, OUTPUT_HEIGHT)

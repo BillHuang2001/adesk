@@ -43,7 +43,7 @@ use adesk_client::{
 use adesk_core::{AppId, ErrorCode, Observation, OverlayKind, Position, Rect, WindowId};
 use common::{
     assert_error_code, expect_ok, output_size, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH,
-    REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT, SHORT_TIMEOUT_MS,
 };
 use serde_json::json;
 
@@ -281,7 +281,7 @@ fn every_method_answers_exactly_once() {
         let observed = client
             .observe(
                 ObserveRequest::timeout()
-                    .timeout_ms(150)
+                    .timeout_ms(SHORT_TIMEOUT_MS)
                     .include_image(false),
             )
             .await;
@@ -303,9 +303,9 @@ fn every_method_answers_exactly_once() {
                         result.observation
                     ));
                 }
-                if result.observation.elapsed_ms < 150 {
+                if result.observation.elapsed_ms < SHORT_TIMEOUT_MS {
                     return Err(format!(
-                        "until=timeout resolved after {} ms, before its 150 ms horizon",
+                        "until=timeout resolved after {} ms, before its {SHORT_TIMEOUT_MS} ms horizon",
                         result.observation.elapsed_ms
                     ));
                 }
@@ -317,7 +317,7 @@ fn every_method_answers_exactly_once() {
         );
 
         let changed = client
-            .wait_for_change(WaitForChangeRequest::default().timeout_ms(150))
+            .wait_for_change(WaitForChangeRequest::default().timeout_ms(SHORT_TIMEOUT_MS))
             .await;
         sweep.ok(
             "wait_for_change",
@@ -326,9 +326,9 @@ fn every_method_answers_exactly_once() {
             |observation| assert_timed_out("wait_for_change", observation),
         );
 
-        // `quiet_ms` defaults to 250 (§5.4), so a 150 ms timeout must expire.
+        // `quiet_ms` defaults to 250 (§5.4), so the short timeout must expire.
         let quiet = client
-            .wait_for_quiet(WaitForQuietRequest::default().timeout_ms(150))
+            .wait_for_quiet(WaitForQuietRequest::default().timeout_ms(SHORT_TIMEOUT_MS))
             .await;
         sweep.ok(
             "wait_for_quiet",
@@ -696,12 +696,13 @@ fn concurrent_requests_on_one_connection_all_resolve() {
                 client.get_app(&missing_app),
                 client.observe(
                     ObserveRequest::timeout()
-                        .timeout_ms(150)
+                        .timeout_ms(SHORT_TIMEOUT_MS)
                         .include_image(false)
                 ),
-                client.wait_for_change(WaitForChangeRequest::default().timeout_ms(150)),
+                client
+                    .wait_for_change(WaitForChangeRequest::default().timeout_ms(SHORT_TIMEOUT_MS)),
                 client.inspect_capture(InspectCaptureRequest::default()),
-                client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(150)),
+                client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(SHORT_TIMEOUT_MS)),
             )
         });
 
@@ -732,22 +733,28 @@ fn concurrent_requests_on_one_connection_all_resolve() {
 
     assert_error_code(app, ErrorCode::UnknownApp, "concurrent get_app(unknown)");
 
-    let observed = expect_ok(observed, "concurrent observe(until=timeout, 150ms)");
+    let observed = expect_ok(
+        observed,
+        &format!("concurrent observe(until=timeout, {SHORT_TIMEOUT_MS}ms)"),
+    );
     assert!(
         !observed.observation.timed_out,
         "until=timeout reaches its horizon by definition and is not an expiry, got {:?}",
         observed.observation
     );
     assert!(
-        observed.observation.elapsed_ms >= 150,
-        "until=timeout must sample its full 150 ms horizon, got {} ms",
+        observed.observation.elapsed_ms >= SHORT_TIMEOUT_MS,
+        "until=timeout must sample its full {SHORT_TIMEOUT_MS} ms horizon, got {} ms",
         observed.observation.elapsed_ms
     );
 
-    let changed = expect_ok(changed, "concurrent wait_for_change(150ms)");
+    let changed = expect_ok(
+        changed,
+        &format!("concurrent wait_for_change({SHORT_TIMEOUT_MS}ms)"),
+    );
     assert!(
         changed.timed_out,
-        "wait_for_change(150ms) with no commits must expire, got {changed:?}"
+        "wait_for_change({SHORT_TIMEOUT_MS}ms) with no commits must expire, got {changed:?}"
     );
 
     let inspect = expect_ok(inspect, "concurrent inspect_capture");
@@ -762,7 +769,7 @@ fn concurrent_requests_on_one_connection_all_resolve() {
 
     let quiet = expect_ok(
         quiet,
-        "concurrent wait_for_quiet(quiet_ms=250, timeout=150ms)",
+        &format!("concurrent wait_for_quiet(quiet_ms=250, timeout={SHORT_TIMEOUT_MS}ms)"),
     );
     assert!(
         quiet.timed_out,

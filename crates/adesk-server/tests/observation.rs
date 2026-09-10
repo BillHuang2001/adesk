@@ -42,7 +42,7 @@ mod common;
 
 use adesk_client::{ObserveRequest, WaitForChangeRequest, WaitForQuietRequest};
 use adesk_core::{ActionId, ErrorCode};
-use common::{assert_error_code, expect_ok, TestRuntime, REQUEST_TIMEOUT};
+use common::{assert_error_code, expect_ok, TestRuntime, REQUEST_TIMEOUT, SHORT_TIMEOUT_MS};
 use serde_json::{json, Value};
 
 /// An `after_action` id no runtime can have recorded (action ids start at 1 and
@@ -56,7 +56,7 @@ fn wait_for_change_times_out_without_error() {
 
     let observation = expect_ok(
         runtime.block_on_timeout(
-            client.wait_for_change(WaitForChangeRequest::default().timeout_ms(150)),
+            client.wait_for_change(WaitForChangeRequest::default().timeout_ms(SHORT_TIMEOUT_MS)),
         ),
         "wait_for_change on an idle runtime",
     );
@@ -99,14 +99,14 @@ fn wait_for_quiet_times_out_when_timeout_is_shorter_than_quiet_window() {
     // `WaitForQuietRequest::default()` carries the protocol default `quiet_ms = 250`.
     let observation = expect_ok(
         runtime.block_on_timeout(
-            client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(150)),
+            client.wait_for_quiet(WaitForQuietRequest::default().timeout_ms(SHORT_TIMEOUT_MS)),
         ),
-        "wait_for_quiet with timeout_ms (150) < quiet_ms (250)",
+        &format!("wait_for_quiet with timeout_ms ({SHORT_TIMEOUT_MS}) < quiet_ms (250)"),
     );
 
     assert!(
         observation.timed_out,
-        "the quiet window (250 ms) outlasts the timeout (150 ms), so the wait \
+        "the 250 ms quiet window outlasts the {SHORT_TIMEOUT_MS} ms timeout, so the wait \
          expires as an observation rather than an error: {observation:?}"
     );
     assert!(
@@ -158,7 +158,7 @@ fn observe_until_timeout_reports_the_horizon() {
         runtime.block_on_timeout(
             client.observe(
                 ObserveRequest::timeout()
-                    .timeout_ms(150)
+                    .timeout_ms(SHORT_TIMEOUT_MS)
                     .include_image(false),
             ),
         ),
@@ -193,7 +193,7 @@ fn observe_until_change_times_out_on_a_quiet_runtime() {
         runtime.block_on_timeout(
             client.observe(
                 ObserveRequest::change()
-                    .timeout_ms(150)
+                    .timeout_ms(SHORT_TIMEOUT_MS)
                     .include_image(false),
             ),
         ),
@@ -231,7 +231,7 @@ fn observe_with_include_image_resolves_without_pixels() {
         runtime.block_on_timeout(
             client.observe(
                 ObserveRequest::timeout()
-                    .timeout_ms(150)
+                    .timeout_ms(SHORT_TIMEOUT_MS)
                     .include_image(true),
             ),
         ),
@@ -266,7 +266,7 @@ fn wait_for_change_with_since_commit_far_ahead_times_out() {
             client.wait_for_change(
                 WaitForChangeRequest::default()
                     .since_commit(1_000_000)
-                    .timeout_ms(150),
+                    .timeout_ms(SHORT_TIMEOUT_MS),
             ),
         ),
         "wait_for_change with since_commit far beyond any commit seq",
@@ -292,7 +292,7 @@ fn unknown_after_action_is_invalid_request() {
             client.wait_for_quiet(
                 WaitForQuietRequest::default()
                     .after_action(UNKNOWN_ACTION)
-                    .timeout_ms(150),
+                    .timeout_ms(SHORT_TIMEOUT_MS),
             ),
         ),
         ErrorCode::InvalidRequest,
@@ -303,7 +303,7 @@ fn unknown_after_action_is_invalid_request() {
             client.observe(
                 ObserveRequest::timeout()
                     .after_action(UNKNOWN_ACTION)
-                    .timeout_ms(150)
+                    .timeout_ms(SHORT_TIMEOUT_MS)
                     .include_image(false),
             ),
         ),
@@ -332,7 +332,7 @@ fn waits_never_attach_an_image_on_the_wire() {
         raw.send_json(&json!({
             "id": 1,
             "method": "wait_for_change",
-            "params": {"timeout_ms": 150},
+            "params": {"timeout_ms": SHORT_TIMEOUT_MS},
         }))
         .await;
         let response = raw
@@ -343,7 +343,7 @@ fn waits_never_attach_an_image_on_the_wire() {
         raw.send_json(&json!({
             "id": 2,
             "method": "wait_for_quiet",
-            "params": {"timeout_ms": 150},
+            "params": {"timeout_ms": SHORT_TIMEOUT_MS},
         }))
         .await;
         let response = raw
@@ -425,7 +425,7 @@ fn observe_answers_a_null_image_when_pixels_were_requested() {
             "method": "observe",
             "params": {
                 "until": {"type": "timeout"},
-                "timeout_ms": 150,
+                "timeout_ms": SHORT_TIMEOUT_MS,
                 "include_image": true,
             },
         }))
