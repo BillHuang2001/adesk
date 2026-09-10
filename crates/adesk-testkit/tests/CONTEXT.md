@@ -28,3 +28,10 @@ Current state: `cargo test -p adesk-testkit --all-features` passes 66 tests + 3 
 - The harness serializes process-env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 - The frozen acceptance specs (`api_surface.rs`, `assertions.rs`, `fixtures.rs`, `runtime.rs`, `wayland_client.rs`) must not be edited; add new behavior proof in new test files.
 - `clipboard.rs` asserts strict delivery: `REQUIRE_CLIPBOARD_DELIVERY = true`, so a missing selection offer is a hard failure; the flag-false tolerant fallback is a configured escape hatch, never a passing path in the shipped configuration.
+
+## Known Issues
+
+- `e2e_launch_observe.rs:159-161` claims window↔launch attribution is not implemented ("does not yet attribute windows to it, so the event carries `launch_id: None`"), but `fixtures.rs:142` asserts `launch_id == Some(launched.launch_id)` for the same `launch_app` flow, and `adesk-server`'s dispatch docs say `WindowCreated` carries `launch_id` (ledger / `event_pump::correlate_window`) — the comment is stale and the capstone omits a correlation assertion `fixtures.rs` already proves.
+- `e2e_launch_observe.rs` phase 5 cannot observe `xdg_toplevel.close`: the helper ignores close and self-exits after `HELPER_LIFETIME`, so its `WindowDestroyed` wait would pass even if the compositor never sent the event; the real close-event proof is `e2e_close.rs` (both files document this split).
+- `fixtures.rs:105` calls its runtime "the only env-applying runtime in this binary", but `fixtures.rs:168` also applies the env (the module docs at `fixtures.rs:10-17` correctly say two; comment-only inaccuracy).
+- No test in this suite is `#[ignore]`d, `#[cfg]`-gated, GL-skipped, or has an early-return skip: `ADESK_TEST_GL` / `gl_enabled` / `require_gl` appear only inside `api_surface.rs` consistency assertions, and panics in test bodies cannot be swallowed (no test spawns tasks or threads).
