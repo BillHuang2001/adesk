@@ -42,7 +42,8 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 # E2E suites in ./tests/ drive a live runtime through the typed client SDK on
-# temp sockets. `adesk-testkit` (window-creating fixtures) is added by the
-# follow-up wave — see ./tests/CONTEXT.md.
+# temp sockets; wire-only cases use the suites' own NDJSON `RawClient`, so
+# `futures` is not needed here. Suites that need a Wayland client live in
+# adesk-testkit / adesk-agent — see ./tests/CONTEXT.md.
 adesk-client.workspace = true
 tempfile.workspace = true
