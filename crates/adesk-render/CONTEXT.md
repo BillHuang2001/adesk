@@ -109,7 +109,7 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `fit_dimensions(size, M)` with `longest = max(w, h)` returns `size` unchanged when `M == 0`, a dimension is 0, or `longest <= M`; otherwise each edge is `clamp((value*M + longest/2) / longest, 1, value)` — one shared scale `M/longest`, per-edge half-up integer rounding, never upscales, both edges ≥ 1 (`64x1` with `M = 16` → `16x1`; `M = 1` → `1x1`), so aspect ratio is only approximate for degenerate edges. No `max_dimension` value produces a `RenderError`.
 - `encode_png` returns raw PNG bytes (`Vec<u8>`): `ImagePayload.data` is base64, which is `adesk-proto`'s concern; the function re-packs padded strides so any valid `ImageBuffer` encodes correctly.
 - `image_from_readback` produces a tightly packed `ImageBuffer` (so `ImageBuffer::from_rgba`, which rejects padded strides, always succeeds); its `flipped` parameter is the caller's row-order statement, not a renderer signal.
-- `DamageAccumulator` is per window (the compositor owns one per `WindowId`), clipped to the window geometry; `take()` resets pending damage but keeps lifetime `commits`/`last_commit_seq` counters so observations can report them.
+- `DamageAccumulator` is a self-contained, per-window clipped damage set: `take()` resets pending damage but keeps lifetime `commits`/`last_commit_seq` counters. No production caller wires it in yet (see Known Issues) — the compositor reports damage through `Region::simplified()` directly.
 - `RenderError::code()` is the single place that maps pipeline failures to AGP codes; DMA-BUF import failures on the software path become `ImportFailed` → `render_failed` as `docs/architecture.md` §5 requires.
 - `create_target`'s frozen signature has no `R::Error: Send + Sync + 'static` bound (Smithay only guarantees `std::error::Error`), so `TargetCreation.source` wraps the renderer error text in a private `RendererErrorText` (`Display + Error`); the typed downcast/source chain is lost. API gap: adding the bound would restore typed sources.
 - The renderer-backed entry points (`create_target`, `render_scene`, `import_buffer`) are implemented; `render_scene`'s step-by-step contract is documented on the function itself.
@@ -122,13 +122,21 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `./tests/render_backend.rs` (12 tests): pixman-backed integration tests using a local recording `Element`/`RenderElement` double — clear color, canonical exact pixels, z-order, `-source.loc` translation, element-local full-rect damage despite partial `SceneNode::damage`, scene-coordinate crop translation, crop-before-downscale order, `RenderedFrame::damage`/`commit_seq` passthrough, off-source nodes skipped, target size/format, 0x0 `create_target` error, invalid config. One GL test runs only with `ADESK_TEST_GL=1` (surfaceless EGL + `GlesRenderer`, skips cleanly when EGL is unavailable) and asserts **exact image equality** with the pixman reference — the orientation regression guard (verified under Mesa llvmpipe).
 - `src/config.rs` `#[cfg(test)]` (13 tests): `validate`, `target_size`, `output_size` (crop, aspect-preserving `max_dimension`, no upscale, `0` disabled), defaults/formats.
 - No test needs a display, GPU, network or installed application. Run: `bash scripts/dev.sh cargo test -p adesk-render` (the wrapper is a bash script; bare `cargo` cannot link outside the dev shell). GL: `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-render --test render_backend`.
-- `import_buffer` has no direct test (constructing a `WlBuffer` needs a live wayland connection); it is covered by the `ImportAll` trait pinning and will be exercised by `adesk-compositor`/`adesk-server` integration tests. End-to-end coverage stays in `adesk-compositor/tests` and `adesk-server/tests` via `adesk-testkit`.
+- `import_buffer` currently has no caller at all (no production or test reference anywhere in the workspace; a direct test would also need a live wayland connection). End-to-end coverage stays in `adesk-compositor/tests` and `adesk-server/tests` via `adesk-testkit`.
 
 ## Status
 
 - Implemented; zero `todo!()` in the crate. `./scripts/dev.sh cargo test -p adesk-render` passes 54 tests, 0 failures, 0 ignored; `cargo check -p adesk-render --all-targets`, `cargo clippy -p adesk-render --all-targets --no-deps -- -D warnings`, `cargo doc -p adesk-render --no-deps --document-private-items` (no warnings) and `cargo fmt -p adesk-render --check` are clean.
 - `create_target`, `render_scene` and `import_buffer` are all backed by real implementations; the pixman path is verified headless, the GL path under `ADESK_TEST_GL=1` (Mesa llvmpipe) with exact image equality against the software reference.
-- Known gaps: `create_target` error boxing is text-only (signature gap above); `import_buffer` has no direct test without a live wayland connection.
+- Known gaps: `create_target` error boxing is text-only (signature gap above); `import_buffer` has no caller.
+
+## Known Issues
+
+- `import_buffer` (`src/pipeline.rs`) is unreferenced: no production or test caller anywhere in the workspace (the compositor imports buffers through Smithay's surface-tree walk instead). Its `UnsupportedBuffer`/`ImportFailed` results are therefore never produced by real code.
+- `DamageAccumulator` and `coalesce_damage` (`src/damage.rs`) are referenced only by `tests/damage.rs`, never by `adesk-compositor`/`adesk-server`.
+- `RenderError::UnsupportedFormat` is never constructed (it is only listed in `code()`); `RenderError::UnsupportedBuffer`/`ImportFailed` are constructed only inside the dead `import_buffer`.
+- Unreferenced `pub` accessors: `SceneNode::{element_mut, set_location, set_damage, into_element}`, `Scene::extend`, `OffscreenTarget::{texture, into_inner}`, `RenderConfig::with_clear_color` (tests only). `encode_png` is used by this crate's tests only.
+- `adesk-server/src/images.rs` re-implements PNG encoding and stride repacking that duplicate `src/image.rs` (`encode_png` + private `tight_rgba`); it does not call `adesk_render::encode_png`.
 
 ## Notes for Agents
 
@@ -136,7 +144,6 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `render_scene` has no "nothing to render" path: an empty `Scene` (zero nodes) or nodes with empty damage still renders `Ok` as a full-size frame of the clear color (test `pixman_empty_scene_renders_clear_color`).
   Only genuine backend/import/readback failures are `Err`; callers that want "no content" to be an error must check `Scene::is_empty()` themselves.
 - A validated `RenderConfig` guarantees a non-empty frame: `render_scene` never returns a `0x0` image (`validate` rejects empty `source`/`crop` and crop non-containment); the standalone pure `crop` helper's `0x0` output (disjoint/empty rect) is rejected by `encode_png` as `InvalidImage`.
-- `RenderError::UnsupportedFormat` is mapped to `render_failed` but no code path in this crate constructs it.
 - `render_scene` returns `RenderedFrame::damage` as raw clipped rects (no coalescing); `adesk-compositor` applies `Region::simplified()` before replying.
   The rects stay in scene/window coordinates even when `crop`/`max_dimension` shrink the image, so a cropped capture's `changed_regions` can reference coordinates outside the returned image.
 - GL readback rows are already top-down in scene space; do NOT feed `TextureMapping::flipped()` into `image_from_readback` in this pipeline — it would mirror every GL capture (see Design Decisions).
@@ -151,4 +158,6 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `adesk-core` — `ImageBuffer`, `Rect`, `Region`, `Size`, `ErrorCode`, `Error` (never fork these types).
 - `smithay` 0.7 with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow` (pulls `wayland-server`, `wayland-protocols`, `pixman`, `glow`, `gl_generator`, `drm-fourcc`).
 - `image` 0.25 (png only), `thiserror` 2.
+- System libraries (pixman, EGL/GLES, libwayland) come from the Nix dev shell; build through `./scripts/dev.sh`.
+r` 2.
 - System libraries (pixman, EGL/GLES, libwayland) come from the Nix dev shell; build through `./scripts/dev.sh`.
