@@ -63,7 +63,7 @@ Design invariants:
 | `crates/adesk-render/` | Offscreen render pipeline: render target, damage regions, crop/downsample, readback, image encoding, software path. |
 | `crates/adesk-compositor/` | Smithay integration: protocol handlers, event loop, virtual output, seat/input injection, event emission. |
 | `crates/adesk-inspector/` | Human inspection: full-output composition, debug overlays, inspection frames. |
-| `crates/adesk-server/` | Binary + lib: composes everything, owns the Unix socket and AGP dispatch. |
+| `crates/adesk-server/` | Binary + lib: composes everything, owns the AGP Unix socket and the VAP viewer listener, and dispatching every AGP method. |
 | `crates/adesk-client/` | Async Rust client SDK for AGP (typed methods + event stream). |
 | `crates/adesk-agent/` | Multimodal agent prototype: provider-agnostic LLM interface, context assembly, metrics, task scenarios. |
 | `crates/adesk-testkit/` | Dev-only test harness: in-process runtime, Wayland test client, fixtures, image assertions. |
@@ -81,7 +81,8 @@ Beyond the GUI runtime, the workspace grows toward the assistant-runtime design 
 container (`adesk-machine`) with ADesk running inside it, and a Viewer outside it that
 observes the desktop and provides limited human input over a purpose-built protocol
 (VAP, `adesk-viewer-proto` / `adesk-viewer`). ADesk's viewer endpoint lives in
-`adesk-server` and reuses the same seat/input path as agent input.
+`adesk-server` (`src/viewer/`) and reuses the same seat/input path as agent input; the
+`adesk-viewer` binary is a headless VAP client (frames → PNG, scripted input).
 
 ## Cross-crate contracts
 
@@ -140,7 +141,8 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 
 - There is no container/OCI/Docker packaging and no CI config in the repo (no `Dockerfile`/`Containerfile`, `.github/`, `.gitlab-ci`, Jenkins, CircleCI, Makefile or justfile).
 - The only build/dev tooling is `flake.nix` (a `devShells.default` dev shell; it exposes no `packages`/`apps` output) and `scripts/dev.sh` (an `exec nix develop <root> -c "$@"` wrapper).
-- The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`), so it is service/container friendly.
+- The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`, plus viewer `ADESK_VIEWER_SOCKET` / `ADESK_VIEWER_TCP`), so it is service/container friendly.
+- Two more headless binaries ship: `adesk-viewer` (VAP client: connects to the viewer endpoint, writes frames as PNG, drives scripted input) and `adesk-machine` (host-side AI Machine lifecycle CLI over a `podman` or `mock` runtime).
 - Socket path resolution: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; the process needs a writable `XDG_RUNTIME_DIR` (Wayland socket) at runtime.
 
 ## Known issues
@@ -155,15 +157,17 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 
 ## Status
 The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
-Three new crates extend the workspace toward the assistant runtime — `adesk-viewer-proto`, `adesk-viewer` and `adesk-machine` — and carry the ADesk viewer endpoint in `adesk-server`; see each crate's `CONTEXT.md` for its current state and `docs/viewer.md` / `docs/machine.md` for the designs.
+Three new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec; 38 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary; 105 tests) and `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 114 tests).
+`adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; its suite is 213 passed / 0 failed.
+`cargo check --workspace --all-targets` and `cargo test --workspace --no-fail-fast` are green with the new crates included, and the pre-existing suites are unchanged.
 `./scripts/dev.sh cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
 `./scripts/dev.sh cargo test --workspace --no-fail-fast` = 1230 passed, 0 failed, 5 ignored across 93 test targets; the 5 ignored are doc-code fences only.
 Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 94 passed.
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 71 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
-There is no human-facing way to view inspection frames beyond the AGP protocol itself: the workspace ships no viewer binary, CLI, example or HTTP/UI/display path for `inspect_capture` / `inspect_subscribe`.
-A human must run an AGP client (the `adesk-client` SDK or raw NDJSON over the runtime's Unix socket), call `inspect_capture` (or `inspect_subscribe`) and save/decode the returned PNG themselves — the server-side path is `crates/adesk-server/src/dispatch/inspect.rs` (see `crates/adesk-server/CONTEXT.md`).
+There is no GUI viewer: `adesk-viewer` is headless — it connects over VAP, writes received frames as PNG and drives input from a script — so an interactive human still needs a display-capable front-end that speaks VAP.
+Inspector debug overlays (`inspect_capture` / `inspect_subscribe`) remain AGP-only: the VAP viewer streams plain desktop frames (overlays are negotiated on the wire but not composited into v1 frames), so overlay inspection still requires an AGP client (`crates/adesk-server/src/dispatch/inspect.rs`).
 Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and an `adesk-testkit` exec-path override (downstream crates currently ship their own fixture binary, e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
 
 ## Routing Table
@@ -184,6 +188,10 @@ Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, 
 | Test harness, Wayland test client, fixtures | `crates/adesk-testkit/` |
 | Viewer wire protocol (VAP) messages + codec | `crates/adesk-viewer-proto/` |
 | Viewer server session, client SDK, headless viewer binary | `crates/adesk-viewer/` |
+| AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
+| Protocol/viewer/machine specs, architecture decisions | `docs/` |
+| Dev shell, build wrapper | `flake.nix`, `scripts/` |
+headless viewer binary | `crates/adesk-viewer/` |
 | AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
 | Protocol/viewer/machine specs, architecture decisions | `docs/` |
 | Dev shell, build wrapper | `flake.nix`, `scripts/` |
