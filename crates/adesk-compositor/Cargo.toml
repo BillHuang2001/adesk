@@ -18,7 +18,6 @@ adesk-core.workspace = true
 adesk-render.workspace = true
 adesk-wm.workspace = true
 calloop.workspace = true
-libc.workspace = true
 smithay = { workspace = true, features = [
     "wayland_frontend",
     "desktop",
