@@ -16,7 +16,7 @@ Current state: all suites implemented, green, none ignored.
 - `common/mod.rs`: shared `RuntimeEvent` fixtures; each test binary uses a subset, hence its module-level `#[allow(dead_code)]`.
 
 ## Constraints
-- Time moves only via `tokio::time::advance` under `#[tokio::test(start_paused = true)]`; events carry explicit `seq`/`ts_ms`.
+- Time moves only through the paused tokio clock: an explicit `tokio::time::advance`, or auto-advance to a parked waiter's deadline once every task is idle; events carry explicit `seq`/`ts_ms`.
 - Never un-ignore or relax a failing spec; a wrong implementation makes paused-time waits hang forever.
 - Build/run only through the dev-shell wrapper: `./scripts/dev.sh cargo test -p adesk-observer` (bare cargo fails to link).
 
