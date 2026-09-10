@@ -114,4 +114,6 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 
 ## Status
 
-- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes, `cargo check`/`clippy -p adesk-proto --all-targets` clean, 91/91 tests pass under the dev shell.
+- `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
+- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 91/91 green; `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
+- `cargo doc -p adesk-proto --no-deps --document-private-items` is warning-free: every intra-doc link resolves and no link carries a redundant explicit target (write `[`ProtoError::Json`]`, not `[`ProtoError::Json`](crate::ProtoError::Json)`, and qualify out-of-scope items as `[`crate::ProtoError::Json`]`).
