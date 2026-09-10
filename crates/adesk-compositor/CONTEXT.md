@@ -204,14 +204,14 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 87 tests pass):
+Unit tests (colocated `#[cfg(test)]`; 89 tests pass):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, reserved seqs increase without emitting, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
 - `error`: `ErrorCode` mapping per variant (including `InvalidRequest`).
 - `input::keycode`: named keys, aliases (case-insensitive), F1–F24, printable chars, chord order/display, chord release rejection, unknown/empty → `invalid_request`.
 - `input::keymap`: letters unshifted, shifted chars at level 1, unknown keysyms, uncompilable settings → keyboard error (needs `XKB_CONFIG_ROOT`).
-- `input::injector`: logical buttons → evdev codes.
+- `input::injector`: logical buttons → evdev codes; the `Shift_L`/`ISO_Level3_Shift` keycodes resolve once from the keymap (an unknown keysym is `None`, never an error).
 - `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level, and pixel proof covers both render paths: `RenderWindow` (`window_lifecycle.rs` matches the committed pattern, `popups.rs` asserts the popup's own fill inside the owner's frame) and `RenderOutput` (`output_composition.rs` proves a tracked-but-inactive window is excluded from the composed frame).
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
 - Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
