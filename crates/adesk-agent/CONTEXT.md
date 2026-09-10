@@ -10,7 +10,7 @@ The capstone e2e suite drives `AgpClient` and `AgentLoop` against a live in-proc
 
 ## API Surface
 Flat re-exports at the crate root; the module list below is the authoritative surface.
-### Loop (`src/agent_loop.rs`)
+### Loop (`src/agent_loop/`)
 - `AgentLoop<C: AgentClient, P: LlmProvider>` — `new(client, provider, config)`, `run(&TaskDescription) -> Result<LoopOutcome>`, plus `config()`, `metrics()`, `history()`, `context()`, `last_action_id()`.
 - `LoopConfig` — `max_steps` (20), `step_timeout_ms` (30s), `observe_after_input` (true), `quiet_ms` (250), `observe_timeout_ms` (5s), `include_image` (true), `capture_max_dimension` (`Some(1024)`), `max_consecutive_failures` (3), `retries_per_step` (2), `retry_backoff_ms` (200), `validate_protocol_version` (true), `context_budget`.
 - `LoopOutcome { success, summary, steps, stop_reason, metrics, history }`, `StepRecord`, `StepStatus { Ok, Recovered, Failed, Finished }`, `StopReason { Finished, StepBudgetExhausted, FailureBudgetExhausted, FatalError }`.
@@ -47,7 +47,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `src/agp.rs` is the only module that adapts `adesk-client`/`adesk-proto` wire plumbing; the loop, context and providers speak domain types (`adesk_core`) plus `adesk_proto::ImagePayload`.
 - The crate contains no `todo!()`/`unimplemented!()`; `unwrap`/`expect`/panics exist only inside `#[cfg(test)]` modules or the `testing` scaffolding module (`#[cfg(any(test, feature = "test-support"))]`), which panics by design on an exhausted or mismatched script.
 - The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait` with explicit timeouts; tests use `retry_backoff_ms = 0`.
-- Keep files well under the ~1000-line concern threshold; `src/agent_loop.rs` is at 992 lines and must be split along module boundaries before growing further.
+- Keep files well under the ~1000-line concern threshold; the loop is already split into `src/agent_loop/` (`mod.rs`, `config.rs`, `execute.rs`, `step.rs`), so grow it by adding a module rather than by extending `execute.rs`.
 
 ## Known Issues
 - The gated suites use a crate-root `#![cfg(feature = ...)]` instead of `[[test]] required-features` (the manifest uses `required-features` for the `adesk-e2e-app` example only), so `cargo test -p adesk-agent` still compiles, links and runs three 0-test binaries (`agent_loop`, `scenarios`, `e2e_runtime`) and prints "running 0 tests" for each.
@@ -61,7 +61,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 ## Routing Table
 | Area | Owner |
 |---|---|
-| Loop control flow, budgets, recovery | `./src/agent_loop.rs` |
+| Loop control flow, budgets, recovery | `./src/agent_loop/` |
 | Bounded context assembly + budgeting rules | `./src/context.rs` |
 | Decision vocabulary + serde schema | `./src/decision.rs` |
 | `AgentClient` trait + AGP request/result types | `./src/client.rs` |
@@ -75,6 +75,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | `RunReport` artifact | `./src/report.rs` |
 | `Error`, `ProviderError`, error classification | `./src/error.rs` |
 | Socket-free fake client (test scaffolding) | `./src/testing.rs` |
+| Shared char-counted truncation helper | `./src/text.rs` |
 | CLI wiring | `./src/main.rs` |
 | Fixture application the launch tests start (example, gated on `e2e`) | `./examples/adesk-e2e-app.rs` |
 | Loop/budget/recovery tests | `./tests/agent_loop.rs` |
@@ -124,7 +125,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - The dummy provider's types are re-exported both at the crate root and at `adesk_agent::provider`; `DummyMode` derives `clap::ValueEnum` (`fixed`/`random`), and the CLI dummy flags are `Option`-typed so an omitted flag keeps the documented `ProviderConfig`/`DummyConfig` default (omitted `--dummy-mode` ⇒ `random`). Unlike `MockProvider`, `DummyVlmProvider` NEVER panics on script exhaustion — it returns `Finish`.
 - `adesk-client` API divergences are adapted in `agp.rs` only — do not "fix" `client.rs`: `list_apps(query, include_hidden)`, `PingInfo.renderer` is an enum mapped to `String`, SDK request types are by-value `#[non_exhaustive]` with a mandatory `format`, `keypress` needs a `KeyChord`.
 - API key precedence: `--api-key`/`ProviderConfig::api_key` → `ADESK_AGENT_API_KEY` → `OPENAI_API_KEY`; `ProviderConfig` has no image-detail field, so the factory always uses `ImageDetail::Auto`.
-- `main.rs` defines a private `BoxedProvider` newtype because `async-trait` provides no blanket `impl LlmProvider for Box<dyn LlmProvider>`.
+- `src/main.rs` hands its runtime-selected `Box<dyn LlmProvider>` straight to `AgentLoop`/`ScenarioRunner` (and `src/agent_loop/tests.rs` keeps its stub reachable through `Arc<T>`): `provider/mod.rs` has forwarding `LlmProvider` impls for both, so no newtype wrapper is needed.
 - `ActionKind::as_str()` returns AGP method names (`capture_window`) while serde/metrics keys use `capture` — intentional, easy to trip over.
 - `src/report.rs` is the only module that touches the filesystem (`RunReport::write`, binary-only).
 - E2E wiring (`tests/e2e_runtime.rs`): the `e2e` feature gates the test file and the `adesk-e2e-app` example (Cargo has no optional dev-dependencies), so the `adesk-testkit` dev-dep is compiled for every `cargo test -p adesk-agent` and pulls in `adesk-server`/compositor — always run it under `./scripts/dev.sh`.
@@ -142,4 +143,4 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - Unreferenced public surface (`adesk-agent` is a leaf crate — nothing in `./crates` depends on it, so these have no caller outside their own tests/doc-strings): `AgpClient::sdk()`, `AgentLoop::{config, metrics, context, last_action_id}()`, `ScenarioRunner::config()`, `AgentDecision::{is_input, is_runtime}` (used only by `decision.rs` unit tests), `AgentContext::image_bytes()`, `ContextBuilder::{budget, action_count, event_count, image_count, clear_image}()`.
 - Never-constructed error variants: `ProviderError::Unsupported`, `Error::NoActiveWindow`, `Error::Config` are all classified/mapped in `error.rs` but no code path builds them (CLI config failures bail through `anyhow` in `main.rs`).
 - Write-only fields (set by `agp.rs`, never read in-crate): `LaunchOutcome::pid`, `CaptureOutcome::{commit_seq, changed_regions}`; `RuntimeInfo::runtime_version` is read only by the `e2e` ping test.
-- Char truncation exists three times with three different markers: `agent_loop.rs` (`"..."`), `context.rs::truncate_detail` (no marker), `provider/openai.rs` (`'…'`).
+- Character truncation has exactly one implementation, `src/text.rs`'s `crate::text::truncate(text, max_chars, marker)`; the call sites differ only in the marker (`agent_loop/execute.rs` `"..."`, `context.rs` `""`, `provider/openai.rs` `"…"`) and in their limits.

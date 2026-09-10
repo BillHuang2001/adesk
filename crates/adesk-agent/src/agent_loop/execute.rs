@@ -361,6 +361,13 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
     /// `error` is `None` for a successful step. Failed *attempts* are already in the metrics
     /// (recorded by the `client_call!` macro); a partially executed step still counts the
     /// action that landed before the failure.
+    ///
+    /// Invariant: **pixels only ever reach a provider that can consume them.** Any readback
+    /// is recorded as such, but it is attached to the context only when
+    /// [`LlmProvider::supports_images`] holds; observation requests are gated earlier, when
+    /// the request is built (`AgentLoop::image_policy`).
+    ///
+    /// [`LlmProvider::supports_images`]: crate::provider::LlmProvider::supports_images
     pub(super) fn record_step(
         &mut self,
         step: u32,
@@ -391,8 +398,14 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                 warn!(step, action = kind.as_str(), error = %error, "step failed");
             }
         }
-        if let Some(image) = execution.image.clone() {
-            self.context.set_image(Some(image));
+        // The capability gate is unconditional here: an explicit `capture` has no
+        // `include_image` flag for `image_policy` to fold the provider's capability
+        // into, so this is the only place that can keep its readback out of a
+        // text-only provider's context.
+        if self.provider.supports_images() {
+            if let Some(image) = execution.image.clone() {
+                self.context.set_image(Some(image));
+            }
         }
         self.context
             .record_action(action_record(step, decision, execution, error.is_none()));

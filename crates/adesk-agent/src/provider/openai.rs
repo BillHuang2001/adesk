@@ -28,6 +28,10 @@ pub const API_KEY_ENV: &str = "ADESK_AGENT_API_KEY";
 /// Fallback environment variable holding the API key.
 pub const API_KEY_ENV_FALLBACK: &str = "OPENAI_API_KEY";
 
+/// Elision marker for truncated error bodies: a single character, so a truncated
+/// body is at most one character longer than its limit.
+const ELISION_MARKER: &str = "…";
+
 /// Default system prompt: the decision schema the model must emit.
 ///
 /// This is the prompt-level contract for [`AgentDecision`]; keep it in sync when
@@ -135,16 +139,6 @@ fn context_text(ctx: &AgentContext) -> String {
         object.remove("keyframe");
     }
     value.to_string()
-}
-
-/// Truncate `text` to `max_chars` characters on a `char` boundary.
-fn truncate(text: &str, max_chars: usize) -> String {
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-    let mut truncated: String = text.chars().take(max_chars).collect();
-    truncated.push('…');
-    truncated
 }
 
 /// Map a reqwest failure onto a provider error.
@@ -275,12 +269,12 @@ impl OpenAiCompatProvider {
                 Some(object) => serde_json::from_str::<AgentDecision>(object).map_err(|err| {
                     ProviderError::InvalidResponse(format!(
                         "{err} (content: {})",
-                        truncate(trimmed, 200)
+                        crate::text::truncate(trimmed, 200, ELISION_MARKER)
                     ))
                 }),
                 None => Err(ProviderError::InvalidResponse(format!(
                     "{unfenced_error} (content: {})",
-                    truncate(trimmed, 200)
+                    crate::text::truncate(trimmed, 200, ELISION_MARKER)
                 ))),
             },
         }
@@ -320,20 +314,20 @@ impl LlmProvider for OpenAiCompatProvider {
         if !status.is_success() {
             return Err(ProviderError::Status {
                 status: status.as_u16(),
-                body: truncate(&text, 512),
+                body: crate::text::truncate(&text, 512, ELISION_MARKER),
             });
         }
 
         let value: serde_json::Value = serde_json::from_str(&text).map_err(|err| {
             ProviderError::InvalidResponse(format!(
                 "response is not JSON: {err} (body: {})",
-                truncate(&text, 200)
+                crate::text::truncate(&text, 200, ELISION_MARKER)
             ))
         })?;
         let content = extract_content(&value).ok_or_else(|| {
             ProviderError::InvalidResponse(format!(
                 "response has no choices[0].message.content (body: {})",
-                truncate(&text, 200)
+                crate::text::truncate(&text, 200, ELISION_MARKER)
             ))
         })?;
 
@@ -526,10 +520,37 @@ mod tests {
         assert!(provider.supports_images());
     }
 
+    /// The provider elides error payloads through the crate's single truncation
+    /// implementation ([`crate::text::truncate`]): the content excerpt keeps 200
+    /// characters followed by the `…` marker, cut on a `char` boundary.
     #[test]
-    fn truncate_is_char_boundary_safe() {
-        assert_eq!(truncate("abc", 5), "abc");
-        assert_eq!(truncate("日本語です", 2), "日本…");
-        assert_eq!(truncate("", 0), "");
+    fn error_content_is_elided_on_a_char_boundary() {
+        let content = "日本語です".repeat(100);
+        let err = OpenAiCompatProvider::parse_decision(&content).unwrap_err();
+        let ProviderError::InvalidResponse(message) = err else {
+            panic!("unparsable content must be an InvalidResponse, got {err:?}");
+        };
+
+        let elided = message
+            .rsplit_once("(content: ")
+            .map(|(_, elided)| elided)
+            .expect("the error names the offending content")
+            .strip_suffix(')')
+            .expect("the excerpt is parenthesized");
+        // Exactly 200 characters — 40 whole repetitions, so the cut lands on a
+        // `char` boundary — followed by the marker.
+        assert_eq!(elided, format!("{}…", "日本語です".repeat(40)));
+    }
+
+    #[test]
+    fn short_error_content_is_not_elided() {
+        let err = OpenAiCompatProvider::parse_decision("not json").unwrap_err();
+        let ProviderError::InvalidResponse(message) = err else {
+            panic!("unparsable content must be an InvalidResponse, got {err:?}");
+        };
+        assert!(
+            message.ends_with("(content: not json)"),
+            "nothing was cut, so no marker is appended: {message}"
+        );
     }
 }

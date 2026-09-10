@@ -6,11 +6,14 @@
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
-use adesk_core::{ActionId, Button, Observation, Position, Rect, Size, WindowId};
+use adesk_core::{
+    ActionId, Button, Observation, Position, Rect, Size, WindowId, WindowInfo, WindowState,
+};
+use adesk_proto::{ImageFormat, ImagePayload};
 use async_trait::async_trait;
 
 use super::{AgentLoop, LoopConfig};
-use crate::client::{ObserveOutcome, RuntimeInfo, PROTOCOL_VERSION};
+use crate::client::{CaptureOutcome, ObserveOutcome, RuntimeInfo, PROTOCOL_VERSION};
 use crate::context::{AgentContext, TaskDescription};
 use crate::decision::{AgentDecision, ObserveCondition};
 use crate::error::ProviderError;
@@ -67,29 +70,6 @@ impl LlmProvider for TextOnlyProvider {
 
     fn supports_images(&self) -> bool {
         false
-    }
-}
-
-/// Handle keeping the stub reachable after the loop takes its provider by value
-/// (`async-trait` provides no blanket `impl LlmProvider for Box<dyn LlmProvider>`).
-#[derive(Debug)]
-struct Shared(Arc<TextOnlyProvider>);
-
-#[async_trait]
-impl LlmProvider for Shared {
-    async fn complete(
-        &self,
-        ctx: &AgentContext,
-    ) -> std::result::Result<AgentDecision, ProviderError> {
-        self.0.complete(ctx).await
-    }
-
-    fn name(&self) -> &str {
-        self.0.name()
-    }
-
-    fn supports_images(&self) -> bool {
-        self.0.supports_images()
     }
 }
 
@@ -167,6 +147,58 @@ fn decisions() -> Vec<AgentDecision> {
     ]
 }
 
+/// A capture readback carrying a frame, for the explicit-`capture` case.
+fn captured_frame() -> CaptureOutcome {
+    CaptureOutcome {
+        image: ImagePayload {
+            width: 4,
+            height: 2,
+            format: ImageFormat::Png,
+            stride: None,
+            data: String::from("Q0FQVFVSRQ=="),
+            scale: 1.0,
+        },
+        window: WindowInfo {
+            id: WindowId(1),
+            app_id: None,
+            title: Some(String::from("editor")),
+            geometry: Rect::new(0, 0, 1280, 800),
+            state: WindowState::Active,
+            mapped: true,
+            pid: None,
+            created_seq: 1,
+            last_commit_seq: 3,
+            popup_count: 0,
+        },
+        commit_seq: 3,
+        changed_regions: Vec::new(),
+    }
+}
+
+/// `ping` then one explicit capture, in the loop's exact call order.
+fn capture_script() -> Vec<ScriptedResponse> {
+    vec![
+        ScriptedResponse::Ping(runtime_info()),
+        ScriptedResponse::Capture(captured_frame()),
+    ]
+}
+
+/// One explicit capture, then `Finish`; the capture is requested without any
+/// image flag, because `Capture` never has one.
+fn capture_decisions() -> Vec<AgentDecision> {
+    vec![
+        AgentDecision::Capture {
+            window_id: WindowId(1),
+            region: None,
+            max_dimension: None,
+        },
+        AgentDecision::Finish {
+            success: true,
+            summary: "captured".to_owned(),
+        },
+    ]
+}
+
 /// The `observe` call summaries a run recorded, in order.
 fn observe_summaries(client: &ScriptedClient) -> Vec<String> {
     client
@@ -179,8 +211,8 @@ fn observe_summaries(client: &ScriptedClient) -> Vec<String> {
 
 /// `LlmProvider::supports_images` is load-bearing: a text-only provider never
 /// asks the runtime for pixels and never sees any, even when the decision
-/// explicitly requests an image; an image-capable provider running the identical
-/// script is unaffected.
+/// explicitly requests an image or is an explicit `capture`; an image-capable
+/// provider running the identical script is unaffected.
 #[tokio::test]
 async fn image_requests_are_gated_on_provider_capability() {
     let task = TaskDescription::new("open the settings dialog and enable dark mode");
@@ -190,7 +222,7 @@ async fn image_requests_are_gated_on_provider_capability() {
     let mut client = ScriptedClient::new();
     client.push_all(script());
     let handle = client.clone();
-    let mut agent = AgentLoop::new(client, Shared(Arc::clone(&stub)), LoopConfig::default());
+    let mut agent = AgentLoop::new(client, Arc::clone(&stub), LoopConfig::default());
     let outcome = agent.run(&task).await.expect("run succeeds");
 
     assert!(outcome.success);
@@ -226,4 +258,31 @@ async fn image_requests_are_gated_on_provider_capability() {
     for summary in &calls {
         assert!(summary.contains("include_image=true"), "{summary}");
     }
+
+    // An explicit `capture` carries no image flag, so its readback is the one
+    // path into the context that an observation request cannot gate: the frame
+    // is real (it is a GPU readback, and the step is recorded as one) but a
+    // text-only provider must still never see it.
+    let stub = Arc::new(TextOnlyProvider::new(capture_decisions()));
+    let mut client = ScriptedClient::new();
+    client.push_all(capture_script());
+    let handle = client.clone();
+    let mut agent = AgentLoop::new(client, Arc::clone(&stub), LoopConfig::default());
+    let outcome = agent.run(&task).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(handle.call_count(ClientMethod::CaptureWindow), 1);
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 1,
+        "the readback itself did happen"
+    );
+    assert!(
+        !stub.saw_image(),
+        "an explicit capture must not hand pixels to a text-only provider"
+    );
+    assert_eq!(
+        agent.context().image_count(),
+        0,
+        "no frame was attached to the text-only provider's context"
+    );
 }
