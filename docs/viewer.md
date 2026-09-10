@@ -146,8 +146,8 @@ connection.
 
 ## 8. Crate / module contract
 
-- `adesk-viewer-proto` — the messages, the codec (`encode`/`decode` over bytes)
-  and the version helpers. Pure, no I/O.
+- `adesk-viewer-proto` — the messages, the line-ready NDJSON codec and the
+  version helpers. Pure, no I/O.
 - `adesk-viewer` — `ViewerServer` (session logic over any byte stream, driving a
   `ViewerBackend` trait the runtime implements) and `ViewerClient` (connect +
   frame stream + input methods), plus the headless `adesk-viewer` binary.
