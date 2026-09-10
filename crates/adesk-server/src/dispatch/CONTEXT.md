@@ -65,7 +65,9 @@ Shared internal helpers (not public API):
 - `type_text` classifies a character as unmappable by matching the compositor's `CompositorError::InvalidRequest` message for the substring `"keymap"`; a typed compositor error variant would be more robust (rewording the message surfaces `invalid_request` instead of a `skipped` entry — visible, not silent).
 - `double_click`'s interval (100 ms, 50 ms gap) and `drag`'s post-move sleep are local server policy — protocol §5.5 specifies no interval.
 - `inspect_subscribe` with `min_interval_ms == 0` re-renders continuously (yielding between iterations); it is client-controlled and protocol-legal but CPU-hungry.
-
+- `mod.rs::Dispatcher::context()` has no caller in the workspace: only `Dispatcher::new`/`Dispatcher::dispatch` are used (`src/connection.rs`; the request-context handle it would return is `RunningServer::context()`, a different method). It is kept as public API but is currently dead code.
+- The `adesk_core::Error` → `ServerError` mapping exists twice: the canonical `windows::command_error` (identifier-aware `unknown_window`, `ShuttingDown` → `Compositor(Stopped)`) and `src/inspection.rs::compositor_reply` (which collapses `UnknownWindow` to `Internal` and maps `ShuttingDown` to `ServerError::ShuttingDown`). They agree only on `InvalidRequest` and `RenderFailed`/`CaptureFailed`.
+- The dropped-oneshot-reply classification is not uniform: `state`/`reserve_seq`/`send_unit` report `ShuttingDown`, while `activate_window`/`close_window`/`render_window` report `Internal("compositor dropped the ... reply")`.
 ## Test Strategy
 
 - In-module unit tests cover the runtime-free parts: error-response shape, sink-registry round-trip, `command_error` mapping, `scale_from`/`source_size`, pointer-position resolution, `is_unmappable_key`, overlay/scale helpers.
