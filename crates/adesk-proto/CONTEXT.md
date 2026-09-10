@@ -103,6 +103,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 
 ## Notes for Agents
 
+- Several public helpers have no in-repo consumer outside this crate's own tests: the free `encode_frame`/`decode_frame` (`src/codec.rs`), `ResponseOutcome::{result_payload, error_payload, is_error}` (`src/frame.rs`), `EventFrame::to_runtime`/`EventPayload::to_runtime` (also called by `adesk-server/tests/subscriptions.rs`), `ImagePayload::to_rgba8_buffer` (also called from `adesk-server/src/images.rs`'s test module) and `PingResult::is_compatible`. Consumers instead use `NdjsonCodec`/the `Codec` trait directly or pattern-match `ResponseOutcome`/`Frame`. They are the documented public surface: a workspace grep miss is not permission to delete, and removing any of them is a public-API change.
 - `EventKind::InspectFrame` is a real enum variant, so `subscribe_events.kinds` deserializes it even though §5.6 lists 11 filterable kinds; enforcing filterability is `adesk-server`'s job, not this crate's.
 - `ObserveResult`'s custom serde assumes core `Observation` has no `image` field; adding one in `adesk-core` would break the split (see Design Decisions).
 - Requests are always fully explicit on the wire: `#[serde(default)]` values are still emitted when serializing params (e.g. `format:"png"`, `count:1`), which is additive-safe.
