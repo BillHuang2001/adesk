@@ -310,11 +310,6 @@ impl Region {
     pub fn rects(&self) -> &[Rect] {
         &self.rects
     }
-
-    /// Iterates over the stored rectangles in insertion order.
-    pub fn iter(&self) -> std::slice::Iter<'_, Rect> {
-        self.rects.iter()
-    }
 }
 
 /// Returns the bounding box of `a` and `b` when they overlap or touch along an
@@ -602,14 +597,5 @@ mod tests {
     #[test]
     fn region_simplified_of_empty_is_empty() {
         assert_eq!(Region::empty().simplified(), Vec::new());
-    }
-
-    #[test]
-    fn region_iter_matches_rects() {
-        let mut region = Region::empty();
-        region.push(rect(0, 0, 1, 1));
-        region.push(rect(2, 2, 1, 1));
-        let collected: Vec<Rect> = region.iter().copied().collect();
-        assert_eq!(collected, region.rects().to_vec());
     }
 }
