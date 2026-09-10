@@ -1,12 +1,9 @@
 //! Runtime lifecycle and AGP surface of the harness.
 //!
-//! Covers starting/stopping a real in-process runtime, its default renderer and output
-//! size, the AGP client round trip (`ping`, `list_windows`, a failing `capture_window`),
-//! non-blocking `Drop` and repeated shutdown cycles.
-//!
-//! Phase 1 requires only that this file **compiles**: the harness's behavior bodies are
-//! still `todo!()`, so every test below is expected to fail at runtime until Phase 2 lands.
-//! Once Phase 2 is implemented, every assertion here must hold unchanged.
+//! Frozen acceptance spec for the implemented harness. Covers starting/stopping a real
+//! in-process runtime, its default renderer and output size, the AGP client round trip
+//! (`ping`, `list_windows`, a failing `capture_window`), non-blocking `Drop` and repeated
+//! shutdown cycles.
 
 use std::time::Duration;
 

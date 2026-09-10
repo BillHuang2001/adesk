@@ -1,10 +1,23 @@
 //! The Wayland test client: the real protocol path, known SHM fills, bounded pumps.
 //!
 //! [`WaylandTestClient`] is an ordinary Wayland client built on `wayland-client` 0.31: it
-//! connects to the runtime's socket, binds `wl_compositor`/`wl_shm`/`xdg_wm_base`, creates
+//! connects to the runtime's socket, binds
+//! `wl_compositor`/`wl_shm`/`xdg_wm_base`/`wl_seat`/`wl_data_device_manager`, creates
 //! `xdg_toplevel`/`xdg_popup` surfaces and commits SHM buffers filled with a
 //! [`FillPattern`](crate::FillPattern). It never reaches into compositor state, so a test that drives this
 //! client exercises exactly what an application would.
+//!
+//! ## Seat input recording
+//!
+//! The bound `wl_seat` is what makes *injection* observable: the client creates a
+//! `wl_pointer` and a `wl_keyboard` as soon as the seat advertises those capabilities, and
+//! every event they deliver is appended to a history the reader thread owns (see
+//! [`input`]). A test reads it with [`WaylandTestClient::pointer_events`] /
+//! [`WaylandTestClient::keyboard_events`] or blocks on it with
+//! [`WaylandTestClient::wait_for_pointer_event`] /
+//! [`WaylandTestClient::wait_for_keyboard_event`] (plus the `wait_for_pointer_button` /
+//! `wait_for_key` conveniences) — all deadline-bounded, so an AGP action can be proven to
+//! have travelled through the seat instead of trusting the runtime's own report.
 //!
 //! ## Threading model
 //!
@@ -71,14 +84,22 @@ use wayland_client::protocol::wl_shm;
 use wayland_client::{Connection, EventQueue, Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::xdg_positioner;
 
+use crate::block_until;
 use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
 
+mod clipboard;
+mod input;
 mod protocol;
 mod shm;
 mod state;
 mod window;
 
+pub use clipboard::DEFAULT_SELECTION_TIMEOUT;
+pub use input::{
+    AxisKind, ButtonState, KeyState, KeyboardEvent, ModifiersState, PointerEvent, BTN_LEFT, KEY_C,
+    KEY_LEFTCTRL,
+};
 pub use protocol::Globals;
 pub use window::{ConfiguredSize, PopupSpec, TestPopup, TestWindow, ToplevelSpec};
 
@@ -208,10 +229,15 @@ impl WaylandTestClient {
     ///    `(GlobalList, EventQueue<ClientState>)`; snapshot
     ///    `globals_list.contents().clone_list()` into `ClientState::globals` (a
     ///    `GlobalListContents` cannot be owned — it lives inside the registry object data).
-    /// 4. `protocol::bind_globals` binds `wl_compositor` (v4+), `wl_shm` (v1+) and
-    ///    `xdg_wm_base` (v1+) at `min(server, interface_max)`; a missing global is
+    /// 4. `protocol::bind_globals` binds `wl_compositor` (v4+), `wl_shm` (v1+),
+    ///    `xdg_wm_base` (v1+), `wl_seat` (v1+) and `wl_data_device_manager` (v1+) at
+    ///    `min(server, interface_max)`; a missing global is
     ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported).
-    /// 5. Spawn the reader thread described in the module docs with a clone of `state`,
+    /// 5. `data_device_manager.get_data_device(seat, qhandle, ())` creates the client's
+    ///    `wl_data_device` (the clipboard object, see [`clipboard`]) and it is handed to
+    ///    `ClientState::new` *before* the reader thread starts, so no offer/selection event
+    ///    can arrive before there is state to record it in.
+    /// 6. Spawn the reader thread described in the module docs with a clone of `state`,
     ///    the event queue and an `UnboundedSender<PumpEvent>`, then wait (bounded by
     ///    [`ROUNDTRIP_TIMEOUT`]) for the real `wl_shm.format` events to arrive. A runtime
     ///    that never advertises `ARGB8888` is
@@ -251,6 +277,12 @@ impl WaylandTestClient {
             &qhandle,
             SHM_POOL_CAPACITY,
         )?));
+        // The clipboard device is created before the reader thread exists, so it is already
+        // in `ClientState` when its first `data_offer`/`selection` event is dispatched.
+        let data_device =
+            globals
+                .data_device_manager()
+                .get_data_device(globals.seat(), &qhandle, ());
 
         // The advertised formats start empty: `wait_for_shm_formats` must observe the
         // real `wl_shm.format` events before `supports_argb8888` means anything (a
@@ -258,6 +290,8 @@ impl WaylandTestClient {
         let state = Arc::new(Mutex::new(ClientState::new(
             globals_snapshot,
             HashSet::new(),
+            globals.seat().clone(),
+            data_device,
         )));
         let (pump_tx, mut pump_rx) = unbounded_channel();
         let reader_state = Arc::clone(&state);
@@ -300,6 +334,112 @@ impl WaylandTestClient {
         &self.globals
     }
 
+    /// Every `wl_pointer` event recorded so far, in delivery order.
+    ///
+    /// The history is append-only until [`Self::clear_input_events`], and recording happens
+    /// on the reader thread, so events are present even if no pump was ever called. The
+    /// values are exactly what the protocol delivered (see [`input`] for the recording
+    /// rules).
+    pub fn pointer_events(&self) -> Vec<PointerEvent> {
+        lock_client(&self.state).pointer_events.clone()
+    }
+
+    /// Every `wl_keyboard` event recorded so far, in delivery order (see
+    /// [`Self::pointer_events`] for the recording rules).
+    pub fn keyboard_events(&self) -> Vec<KeyboardEvent> {
+        lock_client(&self.state).keyboard_events.clone()
+    }
+
+    /// Clears the recorded input history.
+    ///
+    /// Both histories are emptied; the latest input serial is deliberately *kept*, because
+    /// a serial belongs to the seat's input stream rather than to the recorded history
+    /// (see [`input`]). A test uses this to scope an assertion to the actions it is about
+    /// to perform.
+    pub fn clear_input_events(&self) {
+        let mut state = lock_client(&self.state);
+        state.pointer_events.clear();
+        state.keyboard_events.clear();
+    }
+
+    /// Waits until a recorded pointer event satisfies `pred`.
+    ///
+    /// The predicate is evaluated against the current history first, so an event that
+    /// arrived before this call still satisfies the wait; afterwards the call blocks in
+    /// bounded slices ([`block_until`]) while the reader thread keeps appending — it never
+    /// touches this client's pump channel, so it cannot steal a notification from a
+    /// concurrent [`Self::pump_until`]/[`Self::roundtrip`].
+    ///
+    /// Fails with [`TestkitError::Timeout`] after `timeout`, naming `what`.
+    pub fn wait_for_pointer_event(
+        &self,
+        timeout: Duration,
+        what: &'static str,
+        mut pred: impl FnMut(&PointerEvent) -> bool,
+    ) -> Result<()> {
+        block_until(timeout, what, || {
+            lock_client(&self.state)
+                .pointer_events
+                .iter()
+                .any(&mut pred)
+        })
+    }
+
+    /// Waits until a recorded keyboard event satisfies `pred` (see
+    /// [`Self::wait_for_pointer_event`] for the scan/blocking rules).
+    pub fn wait_for_keyboard_event(
+        &self,
+        timeout: Duration,
+        what: &'static str,
+        mut pred: impl FnMut(&KeyboardEvent) -> bool,
+    ) -> Result<()> {
+        block_until(timeout, what, || {
+            lock_client(&self.state)
+                .keyboard_events
+                .iter()
+                .any(&mut pred)
+        })
+    }
+
+    /// Waits until `button` was recorded in `state` (`wl_pointer.button`).
+    ///
+    /// The button code is the raw evdev code the protocol carries (e.g. [`BTN_LEFT`]).
+    pub fn wait_for_pointer_button(
+        &self,
+        button: u32,
+        state: ButtonState,
+        timeout: Duration,
+    ) -> Result<()> {
+        self.wait_for_pointer_event(timeout, "pointer button", |event| {
+            matches!(event, PointerEvent::Button { button: recorded, state: recorded_state }
+                if *recorded == button && *recorded_state == state)
+        })
+    }
+
+    /// Waits until `keycode` was recorded in `state` (`wl_keyboard.key`).
+    ///
+    /// The keycode is the raw evdev code the protocol carries (e.g. [`KEY_LEFTCTRL`]).
+    pub fn wait_for_key(&self, keycode: u32, state: KeyState, timeout: Duration) -> Result<()> {
+        self.wait_for_keyboard_event(timeout, "key", |event| {
+            matches!(event, KeyboardEvent::Key { keycode: recorded, state: recorded_state }
+                if *recorded == keycode && *recorded_state == state)
+        })
+    }
+
+    /// The modifier state of the most recent `wl_keyboard.modifiers` event, if any.
+    ///
+    /// `None` before the compositor sent one (or after
+    /// [`Self::clear_input_events`]).
+    pub fn last_modifiers(&self) -> Option<ModifiersState> {
+        lock_client(&self.state)
+            .keyboard_events
+            .iter()
+            .rev()
+            .find_map(|event| match event {
+                KeyboardEvent::Modifiers(modifiers) => Some(*modifiers),
+                _ => None,
+            })
+    }
     /// Whether the connection is closed (teardown ran, or the reader saw EOF).
     pub fn is_closed(&self) -> bool {
         self.closed || state::lock_client(&self.state).closed

@@ -152,6 +152,7 @@ Event loop:
 - `WindowId` allocation is entirely `adesk-wm`'s: `WindowModel::next_id` (a per-`WindowManager` `u64` field, no statics/atomics) starts at `1` and increments only in `policy::on_map`, so a fresh compositor assigns `WindowId(1)`, then `WindowId(2)`, ... to the first two *mapped* toplevels; registration and duplicate maps allocate nothing. Popups use a separate `SurfaceRegistry::next_popup_id` counter and surfaces a separate `SurfaceKey` counter, so only a toplevel map can consume a window id.
 - Title/app-id updates are metadata-only: `policy::on_title` returns no actions and neither path marks damage or re-configures — damage comes exclusively from surface commits.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding.
+- Output composition is the single-visible-toplevel projection: `State::render_output` collects every tracked window with a root surface into a *candidate* list of `OutputWindow`s (`active` marks the one `adesk-wm` tiles), and `elements::output_scene` draws exactly the first `active` candidate (`visible_index`) — tracked-but-inactive windows are never composed and two toplevels cannot stack. The composed window's popups ride along through `window_elements`, overlays are computed from the composed window alone, and no active candidate yields an empty scene (a clear frame). Window-level `render_window` still renders any window by id.
 - `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model. Its surface: `new(output_size)`, `active_window`, `keyboard_focus`, `window_for_surface`, `windows`, `tiled_rect`, `toplevel_of`, `surface_of`, `last_commit_seq`, `note_launch`, `resolve_position`, `register_toplevel`, `unmapped_toplevel`, `map_toplevel -> MapOutcome`, `destroy_toplevel`, `title_changed`, `app_id_changed`, `popup_added`, `popup_removed`, `popup_window_offset`, `note_popup_grab`, `popup_grab`, `take_popup_grab`, `commit`, `activate`. `WmDecision { actions, previous_focus }` captures focus *before* the policy ran.
 - `State`'s side-effect API is the only mutation path: `on_toplevel_mapped`, `on_toplevel_registered`, `on_toplevel_destroyed`, `on_title_changed`, `on_app_id_changed`, `on_popup_created`, `on_popup_destroyed`, `on_surface_commit`, `note_launch`, `activate_window`, `close_window`, `inject_key`, `inject_pointer_move`, `inject_pointer_button`, `inject_pointer_axis`, `render_window`, `render_output`, `snapshot`. Protocol handlers never touch `adesk-wm`, the renderer or input internals directly.
 - `WmBridge` owns the surface registry: toplevels, subsurfaces and popups resolve to a `WindowId`; commit counters and damage are per-window and window-relative.
@@ -162,7 +163,7 @@ Event loop:
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
-- Three `#[allow(dead_code)]` sites remain, all field/method-level: `State::output` and `State::xdg_decoration_state` (lifetime handles for their globals) and `WmBridge::note_launch` (stale — it is reachable via `RuntimeCommand::NoteLaunch`). No crate-level allow attributes remain.
+- Two `#[allow(dead_code)]` sites remain, both field-level lifetime handles: `State::output` and `State::xdg_decoration_state`. No crate-level allow attributes remain.
 
 ### AGP command semantics (verified against the code)
 
@@ -180,7 +181,7 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 82 tests pass today):
+Unit tests (colocated `#[cfg(test)]`; 85 tests pass today):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
@@ -188,7 +189,7 @@ Unit tests (colocated `#[cfg(test)]`; 82 tests pass today):
 - `input::keycode`: named keys, aliases (case-insensitive), F1–F24, printable chars, chord order/display, chord release rejection, unknown/empty → `invalid_request`.
 - `input::keymap`: letters unshifted, shifted chars at level 1, unknown keysyms, uncompilable settings → keyboard error (needs `XKB_CONFIG_ROOT`).
 - `input::injector`: logical buttons → evdev codes.
-- `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors.
+- `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing, overlay markers/colors; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), an empty scene without a visible window, and overlays marking only the composed window. The selection is proven at the selection/scene level; pixel proof with a real tracked-but-inactive window (and the composed window's popups) arrives with the queued `tests/integration_plan.md` scenarios.
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
@@ -207,7 +208,7 @@ Integration tests: defined, not yet implemented — `tests/integration_plan.md` 
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (82 lib + 3 smoke + doctests)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (85 lib + 3 smoke + doctests)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
@@ -215,13 +216,10 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
-- `WmBridge::note_launch` still carries a comment and `#[allow(dead_code)]` claiming no AGP command feeds it, but `RuntimeCommand::NoteLaunch` does feed it through `State::note_launch`.
 - `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 - The `adesk-render` API vs. the element-walker assumptions is verified only through the crate's own tests and the GL clear-frame path; end-to-end pixel assertions arrive with `adesk-testkit` (Phase 4).
 - A late `xdg_toplevel.app_id` (set after the first buffer commit) is not written back into the window model: `WmBridge::app_id_changed` (src/wm.rs:805) updates only its own change-detection map and the launch ledger, and `adesk-wm` has no app-id setter, so `WindowInfo.app_id`/`list_windows` keep the map-time value. Clients that set `app_id` before their first commit are unaffected.
-- Output composition stacks every mapped window at the same tiled rect (`State::render_output` includes all windows; `output_scene` pushes them in creation order). `OutputWindow.active` only drives the `focus` overlay, so with 2+ windows `render_output`/`inspect_capture` shows the last-created window on top regardless of which one is active. Window-level `render_window` is unaffected.
-- The `WmBridge::note_launch` doc comment (src/wm.rs:624-627) still claims "No AGP command feeds this today"; `adesk-server` sends `RuntimeCommand::NoteLaunch` (crates/adesk-server/src/dispatch/apps.rs:82) and `dispatch.rs:65-81` serves it.
 
 ## Dependencies
 

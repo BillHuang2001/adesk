@@ -30,7 +30,7 @@ Three frame kinds:
 {"id": 1, "result": {"action_id": 582}}
 {"id": 1, "error": {"code": "unknown_window", "message": "window 99 is not known", "data": {"window_id": 99}}}
 
-// event    (server -> client, unsolicited; only after subscribe_events)
+// event    (server -> client, unsolicited; only after subscribe_events or inspect_subscribe)
 {"event": "surface_commit", "seq": 8291, "ts_ms": 51234, "data": {"window_id": 17, "commit_seq": 8291, "damage": [{"x": 630, "y": 220, "w": 410, "h": 180}]}}
 ```
 
@@ -94,6 +94,11 @@ Observation = {"window_id": 17 | null, "after_action": 582 | null,
 filter point (window-relative, clipped to the window geometry), coalesced and
 simplified. It is *evidence*, not a guarantee of visual difference.
 
+`observe`, `wait_for_change` and `wait_for_quiet` return
+`{"observation": {..., "image": ImagePayload | null}}`; `image` is a field *inside*
+the observation object and is `null` when no image was requested
+(`include_image=false`, or the `false` default of the two waits).
+
 ## 5. Methods
 
 ### 5.1 Runtime
@@ -145,16 +150,22 @@ input.
 
 Semantics:
 
-- Filters: only events with `seq > after_action` (if given) or `commit_seq > since_commit`
-  (if given) and belonging to `window_id` (if given) count.
+- Filters: `window_id` (if given) and `seq > after_action` (if given) always apply;
+  `since_commit` (if given) additionally restricts counted *commits* to
+  `commit_seq > since_commit` — lifecycle, title, focus and popup events are not
+  commit-numbered and always count.
 - `quiet(ms)`: returns once `ms` have elapsed with no counted surface commit for the
   window. `timeout_ms` still bounds the wait.
 - `change`: returns on the first counted surface commit (or window lifecycle event).
 - `timeout`: waits the full `timeout_ms` and reports what accumulated (useful for
   sampling animations).
-- A return always reports whether the condition was met (`quiet`) or the wait
-  expired (`timed_out`). Surface quietness is evidence, not proof of semantic
-  completion; the agent must treat it as such.
+- `quiet` is evidence, not proof of semantic completion: it reports whether the wait's
+  scope has been quiet for the threshold at resolution time — the condition's `quiet_ms`
+  for a quiet wait, otherwise the runtime default — so a timed-out `change` wait can
+  legitimately carry `quiet: true`.
+- `timed_out` reports that the wait expired before its condition was met, except
+  `{"type": "timeout"}`, which reaches its horizon by design and therefore always
+  reports `timed_out: false`.
 
 ### 5.5 Input (application input, delivered through the Wayland seat)
 
@@ -193,12 +204,25 @@ Semantics:
 `surface_commit`, `surface_damage`, `focus_changed`, `popup_appeared`,
 `popup_disappeared`, `quiet`, `app_launched`.
 
+Emitted event names are `window_created`, `window_destroyed`, `window_activated`,
+`title_changed`, `surface_commit`, `focus_changed`, `popup_appeared`,
+`popup_disappeared` and `app_launched`. `surface_damage` is a subscription filter
+*alias*, never an emitted event name: it matches `surface_commit` events whose
+`damage` is non-empty, and subscribers still receive frames named `surface_commit`.
+`quiet` is a reserved filterable kind with no emitter in v1 — quietness is observed
+pull-style via `wait_for_quiet`/`observe`. `inspect_frame` is not a subscribable
+`EventKind`; it is pushed only to `inspect_subscribe` subscribers (§5.7).
+
 ### 5.7 Human inspector
 
 | Method | Params | Result |
 |---|---|---|
 | `inspect_capture` | `{"overlays": [OverlayKind] = ["window_ids","focus","damage"], "region": Rect?, "max_dimension": u32?}` | `{"image": ImagePayload}` |
 | `inspect_subscribe` | `{"overlays": [OverlayKind], "min_interval_ms": u64 = 100}` | `{"subscription_id": u64}` (pushes `inspect_frame` events) |
+
+Each `inspect_frame` event's `data` is `{"subscription_id": u64, "image": ImagePayload}`:
+the subscription that produced the frame, and a PNG of the composed output with
+that subscription's overlays.
 
 `OverlayKind` ∈ `window_ids`, `app_ids`, `focus`, `damage`, `surface_bounds`,
 `cursor`, `actions`, `commit_timing`. Overlays are debug-only; agent-facing

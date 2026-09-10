@@ -1,12 +1,9 @@
 //! Wayland protocol-path tests: the harness drives the compositor exactly like an
 //! ordinary application.
 //!
-//! Covers toplevel mapping and tiling configures, commit events, captured pixels against
-//! the [`FillPattern`] ground truth, window destruction, popups and resizes.
-//!
-//! Phase 1 requires only that this file **compiles**: the client's protocol bodies are
-//! still `todo!()`, so every test below is expected to fail at runtime until Phase 2
-//! lands. Once Phase 2 is implemented, every assertion here must hold unchanged.
+//! Frozen acceptance spec for the implemented harness. Covers toplevel mapping and tiling
+//! configures, commit events, captured pixels against the [`FillPattern`] ground truth,
+//! window destruction, popups and resizes.
 //!
 //! # Process-environment hazard
 //!
@@ -15,9 +12,8 @@
 //! (`adesk-compositor`'s `socket` module: `ListeningSocket` requires it), so a runtime
 //! whose socket a client connects to must scope the process env to its own
 //! [`TestEnv`](adesk_testkit::TestEnv). Every test here therefore uses
-//! [`TestRuntimeConfig::with_apply_env`]`(true)`, and this test binary must run with
-//! `--test-threads=1`: two runtimes applying different envs in parallel would race on the
-//! global `XDG_RUNTIME_DIR` and bind into the wrong runtime dir.
+//! [`TestRuntimeConfig::with_apply_env`]`(true)`; the harness serializes env-scoped
+//! runtimes within one test binary itself, so no `--test-threads=1` is required.
 
 use std::time::Duration;
 
@@ -34,7 +30,7 @@ const DEADLINE: Duration = Duration::from_secs(10);
 ///
 /// The compositor binds `XDG_RUNTIME_DIR/<display>` from the *process* environment, so the
 /// env must be scoped to this runtime for the socket to land in the runtime's own temp dir
-/// (see the module docs). Requires `--test-threads=1` for this binary.
+/// (see the module docs); the harness serializes env-scoped runtimes itself.
 fn wayland_config() -> TestRuntimeConfig {
     TestRuntimeConfig::new().with_apply_env(true)
 }

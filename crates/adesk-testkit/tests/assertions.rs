@@ -1,13 +1,10 @@
 //! Self-checks of the assertion and waiting helpers.
 //!
-//! These tests need no runtime: they build synthetic [`ImageBuffer`]s with the same
-//! [`FillPattern::at`] function the Wayland client uses for SHM fills, and drive
-//! [`EventAssert`] from a plain `tokio::sync::broadcast` channel. They pin the semantics
-//! the rest of the harness (and its users) rely on.
-//!
-//! Phase 1 requires only that this file **compiles**: the assertion bodies are still
-//! `todo!()`, so every test below is expected to fail at runtime until Phase 2 lands. Once
-//! Phase 2 is implemented, every assertion here must hold unchanged.
+//! Frozen acceptance spec for the implemented harness. These tests need no runtime: they
+//! build synthetic [`ImageBuffer`]s with the same [`FillPattern::at`] function the Wayland
+//! client uses for SHM fills, and drive [`EventAssert`] from a plain
+//! `tokio::sync::broadcast` channel. They pin the semantics the rest of the harness (and
+//! its users) rely on.
 
 use std::time::Duration;
 

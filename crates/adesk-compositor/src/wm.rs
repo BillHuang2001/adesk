@@ -622,10 +622,13 @@ impl WmBridge {
     /// Record that the app registry spawned a process, so a toplevel mapping shortly
     /// afterwards can be correlated with the launch.
     ///
-    /// No AGP command feeds this today (`adesk_app_registry::Correlator` is the active
-    /// server-side path); it is kept and unit-tested because it is the compositor-local
-    /// correlation the architecture allows.
-    #[allow(dead_code)]
+    /// This is the compositor-local launch correlation, fed by
+    /// [`RuntimeCommand::NoteLaunch`](crate::RuntimeCommand): the server's `launch_app`
+    /// sends it right after a successful spawn, `run::dispatch` serves it and
+    /// `State::note_launch` forwards it here, so the compositor's own `WindowCreated`
+    /// broadcast can carry `launch_id`. The server-side
+    /// `adesk_app_registry::Correlator` additionally stamps the events the server
+    /// projects.
     pub(crate) fn note_launch(&mut self, launch_id: LaunchId, app_id: AppId, pid: Option<i32>) {
         self.launches.record(launch_id, app_id, pid, Instant::now());
     }

@@ -10,6 +10,26 @@
 //! Lock order is always `ClientState` → `WindowState`; no dispatch impl locks a window
 //! slot and then the client state, so the two mutexes cannot deadlock.
 //!
+//! ## Seat input recording
+//!
+//! `wl_seat.capabilities` decides which input objects the client creates
+//! ([`ClientState::pointer`]/[`ClientState::keyboard`]) and every event those objects
+//! deliver is appended to [`ClientState::pointer_events`]/[`ClientState::keyboard_events`]
+//! in delivery order — see [`super::input`] for the recorded contract. Recording happens
+//! in the dispatch bodies (the reader thread already holds the `ClientState` lock), so it
+//! never blocks, never touches I/O and is complete even if a test never pumps.
+//!
+//! ## Clipboard state
+//!
+//! `wl_data_device` is the object the clipboard runs on: its `data_offer` event creates a
+//! `wl_data_offer` ([`ClientState::offers`], keyed by object id) and its `selection` event
+//! names the offer that is currently the selection ([`ClientState::current_offer`], with
+//! [`ClientState::selection_offer_count`] counting how many offers were announced). The
+//! source side is the mirror image: [`ClientState::selection_source`] holds the
+//! `wl_data_source` the client last published, so a `wl_data_source.send` can be answered
+//! with the stored bytes. See [`super::clipboard`] for the lifecycle rules around all of
+//! this (supersede, fd handling, deadlines).
+//!
 //! ## Configure sequencing
 //!
 //! An xdg configure is two events: the role event (`xdg_toplevel.configure` with
@@ -29,7 +49,8 @@ use adesk_core::{Point, Rect, Size};
 use wayland_client::backend::ObjectId;
 use wayland_client::globals::{Global, GlobalListContents};
 use wayland_client::protocol::{
-    wl_buffer, wl_callback, wl_compositor, wl_output, wl_registry, wl_shm, wl_shm_pool, wl_surface,
+    wl_buffer, wl_callback, wl_compositor, wl_data_device, wl_data_offer, wl_data_source,
+    wl_keyboard, wl_output, wl_pointer, wl_registry, wl_seat, wl_shm, wl_shm_pool, wl_surface,
 };
 use wayland_client::{Connection, Dispatch, Proxy, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{
@@ -38,11 +59,34 @@ use wayland_protocols::xdg::shell::client::{
 
 use crate::fill::FillPattern;
 
+use super::input::{self, KeyboardEvent, PointerEvent};
 use super::shm::{ShmBuffer, ShmPool};
 use super::window::ConfiguredSize;
 
 /// A window's state, shared between its handle and the dispatch impls.
 pub(crate) type WindowSlot = Arc<Mutex<WindowState>>;
+
+/// The `wl_data_source` the client last published as the clipboard selection.
+///
+/// Holding the proxy is what keeps the object alive while the compositor may still answer
+/// with `wl_data_source.send`; `mime`/`bytes` are the payload that request is answered with
+/// (see [`super::clipboard`]).
+pub(crate) struct SelectionSource {
+    /// The live `wl_data_source` proxy.
+    pub(crate) source: wl_data_source::WlDataSource,
+    /// The single mime type this source offered.
+    pub(crate) mime: String,
+    /// The exact bytes written to a `wl_data_source.send` file descriptor.
+    pub(crate) bytes: Vec<u8>,
+}
+
+/// A `wl_data_offer` the compositor created, with the mime types it advertised.
+pub(crate) struct OfferRecord {
+    /// The offer proxy, used to issue `wl_data_offer.receive`.
+    pub(crate) offer: wl_data_offer::WlDataOffer,
+    /// Every `wl_data_offer.offer` mime type, in delivery order.
+    pub(crate) mime_types: Vec<String>,
+}
 
 /// Event-queue state shared by the client and the reader thread.
 pub(crate) struct ClientState {
@@ -53,6 +97,40 @@ pub(crate) struct ClientState {
     /// exists so the client can inspect what was advertised without reaching into the
     /// event queue.
     pub(crate) globals: Vec<Global>,
+    /// The `wl_seat` this client bound.
+    ///
+    /// Held here (a clone of `Globals::seat()`) because the seat is the object every input
+    /// object is created from: `wl_seat.capabilities` arrives on the reader thread, which
+    /// creates/destroys `wl_pointer`/`wl_keyboard` from this handle.
+    pub(crate) seat: wl_seat::WlSeat,
+    /// The `wl_seat.name` the compositor reported (v2+), when it sent one.
+    pub(crate) seat_name: Option<String>,
+    /// The `wl_data_device` this client holds for the bound seat.
+    ///
+    /// Created from the `wl_data_device_manager` at connect time, before the reader thread
+    /// starts, so no `data_offer`/`selection` event can arrive before there is state to
+    /// record it in.
+    pub(crate) data_device: wl_data_device::WlDataDevice,
+    /// The `wl_data_source` the client last published, with its payload.
+    pub(crate) selection_source: Option<SelectionSource>,
+    /// Every offer the compositor created, keyed by the `wl_data_offer` object id.
+    pub(crate) offers: HashMap<ObjectId, OfferRecord>,
+    /// The offer `wl_data_device.selection` most recently announced.
+    pub(crate) current_offer: Option<ObjectId>,
+    /// How many `wl_data_device.selection` events carried an offer (`Some`).
+    ///
+    /// A `selection` with no offer clears the selection and deliberately does *not* count.
+    pub(crate) selection_offer_count: u64,
+    /// The live `wl_pointer`, while the seat advertises the pointer capability.
+    pub(crate) pointer: Option<wl_pointer::WlPointer>,
+    /// The live `wl_keyboard`, while the seat advertises the keyboard capability.
+    pub(crate) keyboard: Option<wl_keyboard::WlKeyboard>,
+    /// Every `wl_pointer` event recorded, in delivery order (append-only until cleared).
+    pub(crate) pointer_events: Vec<PointerEvent>,
+    /// Every `wl_keyboard` event recorded, in delivery order (append-only until cleared).
+    pub(crate) keyboard_events: Vec<KeyboardEvent>,
+    /// Serial of the most recent serial-carrying input event (see [`Self::latest_input_serial`]).
+    pub(crate) latest_input_serial: Option<u32>,
     /// Every live surface, keyed by the `wl_surface` object id.
     pub(crate) windows: HashMap<ObjectId, WindowSlot>,
     /// SHM formats the compositor advertised (`wl_shm.format`).
@@ -70,14 +148,52 @@ pub(crate) struct ClientState {
 
 impl ClientState {
     /// Creates empty client state seeded with the connect-time globals snapshot.
-    pub(crate) fn new(globals: Vec<Global>, shm_formats: HashSet<wl_shm::Format>) -> ClientState {
+    pub(crate) fn new(
+        globals: Vec<Global>,
+        shm_formats: HashSet<wl_shm::Format>,
+        seat: wl_seat::WlSeat,
+        data_device: wl_data_device::WlDataDevice,
+    ) -> ClientState {
         ClientState {
             globals,
+            seat,
+            seat_name: None,
+            data_device,
+            selection_source: None,
+            offers: HashMap::new(),
+            current_offer: None,
+            selection_offer_count: 0,
+            pointer: None,
+            keyboard: None,
+            pointer_events: Vec::new(),
+            keyboard_events: Vec::new(),
+            latest_input_serial: None,
             windows: HashMap::new(),
             shm_formats,
             closed: false,
             sync_watermark: 0,
         }
+    }
+
+    /// The serial of the most recent input event that answered with one.
+    ///
+    /// Exactly three events update it — `wl_pointer.enter`, `wl_pointer.button` and
+    /// `wl_keyboard.enter` — because those are the events a client may legally answer with
+    /// a request that needs a serial (`wl_data_source.set_selection`). Other
+    /// serial-carrying events (`wl_pointer.leave`, `wl_keyboard.leave`,
+    /// `wl_keyboard.key`, `wl_keyboard.modifiers`) deliberately do *not*: a serial from an
+    /// event the compositor sent only to notify is not a grant of input, and the pinned
+    /// contract names exactly these three sources.
+    ///
+    /// Internal plumbing: no public API exposes it, and
+    /// [`clear_input_events`](super::WaylandTestClient::clear_input_events) keeps it,
+    /// because a serial belongs to the seat's input stream rather than to the recorded
+    /// event history.
+    ///
+    /// Its consumer is [`clipboard`](super::clipboard): `wl_data_source.set_selection`
+    /// must quote a serial a real input event carried.
+    pub(crate) fn latest_input_serial(&self) -> Option<u32> {
+        self.latest_input_serial
     }
 }
 
@@ -255,6 +371,255 @@ impl Dispatch<wl_shm::WlShm, ()> for ClientState {
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.
+    }
+}
+
+impl Dispatch<wl_seat::WlSeat, ()> for ClientState {
+    fn event(
+        state: &mut ClientState,
+        _proxy: &wl_seat::WlSeat,
+        event: wl_seat::Event,
+        _data: &(),
+        _conn: &Connection,
+        qhandle: &QueueHandle<ClientState>,
+    ) {
+        match event {
+            // `Capabilities { capabilities: WEnum<Capability> }`.
+            //
+            // The client keeps exactly the input objects the seat advertises: the pointer
+            // and the keyboard are created when their bit is present and released when it
+            // disappears (a seat can change capabilities at any time).
+            //
+            // `capabilities` is a *bitfield*: the generated binding only knows single-bit
+            // values, so a seat with a pointer *and* a keyboard arrives as
+            // `WEnum::Unknown(0b11)`. The raw bits are the ground truth
+            // (`input::capability_bits`), which is why an unknown numeric code cannot be
+            // mistaken for "no capability" — and why nothing here can panic.
+            wl_seat::Event::Capabilities { capabilities } => {
+                let bits = input::capability_bits(capabilities);
+                if bits & input::POINTER_CAPABILITY != 0 {
+                    if state.pointer.is_none() {
+                        state.pointer = Some(state.seat.get_pointer(qhandle, ()));
+                    }
+                } else if let Some(pointer) = state.pointer.take() {
+                    release_pointer(&pointer);
+                }
+                if bits & input::KEYBOARD_CAPABILITY != 0 {
+                    if state.keyboard.is_none() {
+                        state.keyboard = Some(state.seat.get_keyboard(qhandle, ()));
+                    }
+                } else if let Some(keyboard) = state.keyboard.take() {
+                    release_keyboard(&keyboard);
+                }
+            }
+            // `Name { name: String }` (since v2).
+            //
+            // Recorded so a failure can name the seat the runtime exposed.
+            wl_seat::Event::Name { name } => state.seat_name = Some(name),
+            // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
+            // versions fall through and are ignored rather than rejected.
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_pointer::WlPointer, ()> for ClientState {
+    fn event(
+        state: &mut ClientState,
+        _proxy: &wl_pointer::WlPointer,
+        event: wl_pointer::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<ClientState>,
+    ) {
+        match event {
+            // `Enter { serial, surface, surface_x, surface_y }` — the pointer entered a
+            // surface.
+            //
+            // The position is surface-local, which is what an injected window-relative
+            // position becomes once the window model has resolved it. The serial is the one
+            // a client may answer with (see `ClientState::latest_input_serial`).
+            wl_pointer::Event::Enter {
+                serial,
+                surface,
+                surface_x,
+                surface_y,
+            } => {
+                state.latest_input_serial = Some(serial);
+                state.pointer_events.push(PointerEvent::Enter {
+                    surface: surface.id(),
+                    x: surface_x,
+                    y: surface_y,
+                });
+            }
+            // `Leave { serial, surface }` — the pointer left a surface.
+            wl_pointer::Event::Leave { surface, .. } => {
+                state.pointer_events.push(PointerEvent::Leave {
+                    surface: surface.id(),
+                });
+            }
+            // `Motion { time, surface_x, surface_y }` — movement on the focused surface.
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.pointer_events.push(PointerEvent::Motion {
+                    x: surface_x,
+                    y: surface_y,
+                });
+            }
+            // `Button { serial, time, button, state }` — a button changed state.
+            //
+            // `state` arrives as `WEnum`; a code the pinned bindings do not know is skipped
+            // rather than recorded as the wrong button state.
+            wl_pointer::Event::Button {
+                serial,
+                button,
+                state: button_state,
+                ..
+            } => {
+                state.latest_input_serial = Some(serial);
+                if let Some(button_state) = input::button_state(button_state) {
+                    state.pointer_events.push(PointerEvent::Button {
+                        button,
+                        state: button_state,
+                    });
+                }
+            }
+            // `Axis { time, axis, value }` — a scroll axis moved.
+            //
+            // An axis code the bindings do not know is skipped (recording it as the wrong
+            // axis would make a scroll assertion lie).
+            wl_pointer::Event::Axis { axis, value, .. } => {
+                if let Some(axis) = input::axis_kind(axis) {
+                    state
+                        .pointer_events
+                        .push(PointerEvent::Axis { axis, value });
+                }
+            }
+            // `Frame` (since v5) — the end of a group of pointer events.
+            wl_pointer::Event::Frame => state.pointer_events.push(PointerEvent::Frame),
+            // Generated event enums are `#[non_exhaustive]`: unknown future events
+            // (`axis_source`, `axis_stop`, `axis_value120`, ...) are ignored.
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<wl_keyboard::WlKeyboard, ()> for ClientState {
+    fn event(
+        state: &mut ClientState,
+        _proxy: &wl_keyboard::WlKeyboard,
+        event: wl_keyboard::Event,
+        _data: &(),
+        _conn: &Connection,
+        _qhandle: &QueueHandle<ClientState>,
+    ) {
+        match event {
+            // `Keymap { format, fd, size }` — the keymap the compositor uses for keycodes.
+            //
+            // The `OwnedFd` is an open file descriptor to a server-side keymap file and is
+            // *dropped immediately*: the harness only ever needs the keycodes (or the
+            // shortcut text) a test triggers, so the file is never memory-mapped, never
+            // stored and never leaked — and with it there is nothing that could keep the
+            // descriptor alive past this dispatch.
+            wl_keyboard::Event::Keymap { format, fd, size } => {
+                drop(fd);
+                state.keyboard_events.push(KeyboardEvent::Keymap {
+                    format: input::keymap_format(format),
+                    size,
+                });
+            }
+            // `Enter { serial, surface, keys }` — the keyboard focused a surface.
+            //
+            // `keys` is the raw native-endian `u32` array of keycodes logically down; the
+            // decoding (`input::decode_keys`) drops a trailing partial word instead of
+            // panicking. The serial is the one a client may answer with (see
+            // `ClientState::latest_input_serial`).
+            wl_keyboard::Event::Enter {
+                serial,
+                surface,
+                keys,
+            } => {
+                state.latest_input_serial = Some(serial);
+                state.keyboard_events.push(KeyboardEvent::Enter {
+                    surface: surface.id(),
+                    keys: input::decode_keys(&keys),
+                });
+            }
+            // `Leave { serial, surface }` — the keyboard left a surface.
+            wl_keyboard::Event::Leave { surface, .. } => {
+                state.keyboard_events.push(KeyboardEvent::Leave {
+                    surface: surface.id(),
+                });
+            }
+            // `Key { serial, time, key, state }` — a key changed state.
+            //
+            // The state arrives as `WEnum`; an unknown code is skipped rather than recorded
+            // as the wrong key state.
+            wl_keyboard::Event::Key {
+                key,
+                state: key_state,
+                ..
+            } => {
+                if let Some(key_state) = input::key_state(key_state) {
+                    state.keyboard_events.push(KeyboardEvent::Key {
+                        keycode: key,
+                        state: key_state,
+                    });
+                }
+            }
+            // `Modifiers { serial, mods_depressed, mods_latched, mods_locked, group }`.
+            //
+            // The four masks are recorded exactly as delivered; the harness never
+            // interprets them, so a test compares what the compositor actually sent.
+            wl_keyboard::Event::Modifiers {
+                mods_depressed,
+                mods_latched,
+                mods_locked,
+                group,
+                ..
+            } => {
+                state
+                    .keyboard_events
+                    .push(KeyboardEvent::Modifiers(input::ModifiersState {
+                        depressed: mods_depressed,
+                        latched: mods_latched,
+                        locked: mods_locked,
+                        group,
+                    }));
+            }
+            // `RepeatInfo { rate, delay }` (since v4).
+            wl_keyboard::Event::RepeatInfo { rate, delay } => {
+                state
+                    .keyboard_events
+                    .push(KeyboardEvent::RepeatInfo { rate, delay });
+            }
+            // Generated event enums are `#[non_exhaustive]`: unknown future events are
+            // ignored.
+            _ => {}
+        }
+    }
+}
+
+/// Releases a `wl_pointer` whose capability disappeared and drops the client-side object.
+///
+/// `wl_pointer.release` is the destructor request, but it only exists since v3: on an older
+/// object there is nothing to send, so the proxy is simply dropped (the backend removes the
+/// client-side object and the compositor notices the id is gone).
+fn release_pointer(pointer: &wl_pointer::WlPointer) {
+    if pointer.version() >= 3 {
+        pointer.release();
+    }
+}
+
+/// Releases a `wl_keyboard` whose capability disappeared and drops the client-side object.
+///
+/// Same version rule as [`release_pointer`]: `wl_keyboard.release` is v3+.
+fn release_keyboard(keyboard: &wl_keyboard::WlKeyboard) {
+    if keyboard.version() >= 3 {
+        keyboard.release();
     }
 }
 

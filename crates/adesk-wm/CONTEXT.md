@@ -14,7 +14,8 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - `set_output_size(size: Size) -> Vec<WmAction>` — re-tiles every mapped window.
 - `on_map(request: MapRequest) -> (WindowId, Vec<WmAction>)` — assigns the id, returns `[ConfigureWindow, Activate]`.
 - `on_destroy(id) -> Vec<WmAction>` — MRU fallback via `[ActivatePrevious { id }]` when the active window goes away.
-- `on_title(id, title: Option<String>) -> Vec<WmAction>`, `on_commit(id, commit_seq: u64, damage: &Region) -> Vec<WmAction>`.
+- `on_title(id, title: Option<String>) -> Vec<WmAction>`, `on_app_id(id, app_id: Option<AppId>) -> Vec<WmAction>`, `on_commit(id, commit_seq: u64, damage: &Region) -> Vec<WmAction>`.
+- `on_app_id` handles a late `xdg_toplevel.app_id` (a client may set it after the first buffer commit): it stores exactly the passed value, so `None` clears it. Metadata-only — no actions, no re-configure, no damage; unknown ids are ignored.
 - `on_popup_added(id) -> Vec<WmAction>`, `on_popup_removed(id) -> Vec<WmAction>`.
 - `activate(id) -> Vec<WmAction>` — `[Activate { id }]`, `[None]` when already active, `[]` when unknown.
 - `active_window() -> Option<WindowId>`, `window(id) -> Option<&WindowRecord>`, `require_window(id) -> Result<&WindowRecord>`, `windows() -> &[WindowRecord]`, `window_by_surface(SurfaceKey) -> Option<WindowId>`, `window_info(id) -> Option<WindowInfo>`.
@@ -48,6 +49,7 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - Apply `ConfigureWindow { id, rect }` by configuring the toplevel to `rect.size()` and placing its surface tree at `(rect.x, rect.y)` in output space; apply `Activate`/`ActivatePrevious` by moving keyboard focus and emitting `WindowActivated { window_id: id, previous }` + `FocusChanged`, where `previous` is the compositor's focus target before the action (`None` for `ActivatePrevious`, whose predecessor is already destroyed); `None` emits nothing.
 - Destroy (unmap and destroy are not distinguished in v1): emit `WindowDestroyed { window_id: id }` first, then apply `wm.on_destroy(id)`.
 - Title / commit / popups: call `on_title`, `on_commit`, `on_popup_added`/`on_popup_removed` and emit `TitleChanged`, `SurfaceCommit { commit_seq, damage }`, `PopupAppeared`/`PopupDisappeared`.
+- Late app id: when `WmBridge::app_id_changed` observes `xdg_toplevel.app_id` set after the first buffer commit, call `wm.on_app_id(id, app_id)`; it returns no actions, so nothing is configured or damaged — only the read-model (`WindowInfo.app_id`, `list_windows`) changes.
 - Input: `wm.resolve_position(id, position)` yields the output `Point` for the seat; `None` means reply `unknown_window`.
 - `activate_window`: `wm.require_window(id)?` (yields `unknown_window`), then apply `wm.activate(id)`; an empty list is unreachable after the check, `[None]` means already active (emit no event).
 - `list_windows`: `wm.windows().iter().map(WindowRecord::info).collect()` plus `wm.active_window()`.
@@ -94,16 +96,17 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - `last_commit_seq` is updated with `max(current, new)` so duplicate or reordered commits cannot regress the watermark; `on_commit` is the hot path and allocates nothing.
 - `popup_count` saturates at zero and duplicate popup events are ignored; popups never change which toplevel is visible.
 - v1 does not distinguish unmap from destroy: the compositor calls `on_destroy` for both and a remapped surface key gets a new id; a future `on_unmap` is additive.
+- `on_app_id` stores exactly the passed `Option<AppId>`, so `None` clears the app id: it mirrors `on_title`'s contract and matches the compositor, which maps an empty `xdg_toplevel.app_id` to `None` (a client may legitimately unset or never set it).
 - `on_commit` accepts `damage` but ignores it in v1 (`adesk-observer` owns damage history); the parameter keeps a damage-aware policy addable without touching call sites.
 - `close_window` is compositor-only (`xdg_toplevel.close`); the window leaves the model through `on_destroy`, so there is no `Closing` lifecycle state in v1.
 - `on_map` for an already-tracked `SurfaceKey` is an evaluated no-op (`[None]`) that reuses the existing id, so a duplicate map can never mint a second id for one surface tree.
 
 ## Test Strategy
 
-- 40 tests, all pure — no display, GPU, network, clock or installed application; run with `./scripts/dev.sh cargo test -p adesk-wm`.
+- 44 tests, all pure — no display, GPU, network, clock or installed application; run with `./scripts/dev.sh cargo test -p adesk-wm`.
 - Unit tests live in `./src/policy_tests.rs` (declared `#[cfg(test)] mod policy_tests;` in `lib.rs`), not inline in `policy.rs`: the full matrix pushed `policy.rs` past the ~1000-line threshold, so the module was extracted. Unit tests may construct `WindowModel` directly — that is how non-origin geometry and saturated counters are exercised.
-- Coverage: map (id assignment, record defaults, action order, previous active deactivated but mapped), duplicate-surface-key idempotence, destroy (MRU fallback / inactive / last window / unknown), activate (switch + MRU reorder, `[None]`, `[]`), id monotonicity and no reuse, popup saturation in both directions, title, commit watermark monotonicity, unknown-id tolerance on every event path, `window_info` field projection, `windows()` creation order, `window_by_surface` round-trip, `resolve_position` (documented non-origin examples, origin clamping, normalized corners/center/NaN/∞, empty window), `set_output_size` re-tiling in creation order, and an invariant sweep after every step of a mixed sequence.
-- `./tests/policy_matrix.rs` (3 tests) drives the full lifecycle through the public API only — the exact calls `adesk-compositor` makes.
+- Coverage: map (id assignment, record defaults, action order, previous active deactivated but mapped), duplicate-surface-key idempotence, destroy (MRU fallback / inactive / last window / unknown), activate (switch + MRU reorder, `[None]`, `[]`), id monotonicity and no reuse, popup saturation in both directions, title, app id (set / overwrite / clear, no policy side effects, unknown id ignored), commit watermark monotonicity, unknown-id tolerance on every event path, `window_info` field projection, `windows()` creation order, `window_by_surface` round-trip, `resolve_position` (documented non-origin examples, origin clamping, normalized corners/center/NaN/∞, empty window), `set_output_size` re-tiling in creation order, and an invariant sweep after every step of a mixed sequence.
+- `./tests/policy_matrix.rs` (4 tests) drives the full lifecycle through the public API only — the exact calls `adesk-compositor` makes.
 - The `src/lib.rs` doctest is a running example (id assignment, action order, activation, `resolve_position`); it must stay green.
 - The data-plumbing tests in `config`/`error`/`model`/`action` (10) stay green.
 
@@ -114,5 +117,5 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 
 ## Status
 
-- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes left, `cargo check`/`clippy --all-targets -- -D warnings`/`fmt --check` clean under the dev shell, 36 unit + 3 integration + 1 doctest passing.
-- Public API is unchanged from the architecture phase; `adesk-compositor` applies the `WmAction`s per the integration section above.
+- Implementation-complete: zero `todo!()`, no crate-level `allow` attributes left, `cargo check`/`clippy --all-targets -- -D warnings`/`fmt --check` clean under the dev shell, 39 unit + 4 integration + 1 doctest passing.
+- Public API: `adesk-compositor` applies the `WmAction`s per the integration section above and calls `wm.on_app_id(id, app_id)` for late `xdg_toplevel.app_id` changes.
