@@ -95,7 +95,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 ## Test Strategy
 
 - `tests/wire.rs` (24) pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
-- `tests/codec.rs` (19) is the frozen frame-level acceptance spec, all active; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
+- `tests/codec.rs` (19) freezes the frame-level acceptance spec; its assertions are normative — change `docs/protocol.md` first and update this file in the same change.
 - `tests/methods_roundtrip.rs` (19): all 29 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape.
 - `tests/frames_events_roundtrip.rs` (14): response/error/event golden JSON, all 11 payload kinds and all 9 `RuntimeEvent`s round-tripped, `EventKind::matches` table, malformed lines, codec trait.
 - `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases.
