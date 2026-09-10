@@ -118,4 +118,4 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 ## Status
 
 - Implementation-complete: zero `todo!()`, no crate-level `allow` attributes left, `cargo check`/`clippy --all-targets -- -D warnings`/`fmt --check` clean under the dev shell, 39 unit + 4 integration + 1 doctest passing.
-- Public API is unchanged from the architecture phase; `adesk-compositor` applies the `WmAction`s per the integration section above.
+- Public API: `adesk-compositor` applies the `WmAction`s per the integration section above and calls `wm.on_app_id(id, app_id)` for late `xdg_toplevel.app_id` changes.
