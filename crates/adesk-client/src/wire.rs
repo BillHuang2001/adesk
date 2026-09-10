@@ -21,7 +21,7 @@
 //! `RequestFrame { id, method }` + `RequestFrame::new` and
 //! `Method::from_parts(name, params)`,
 //! `ResponseFrame { id, outcome }` + `ResponseOutcome::{Result(ResultPayload),
-//! Error(ErrorPayload)}` + `ResultPayload::as_value`,
+//! Error(ErrorPayload)}` + `ResultPayload`'s public `Value` tuple field,
 //! `EventFrame { event, seq, ts_ms, data }`, `EventKind` (snake_case serde),
 //! `EventPayload::to_data`, `NdjsonCodec` + the `Codec` trait, and the
 //! `ImagePayload` / `QuietEvent` payloads.
@@ -30,6 +30,7 @@ use adesk_core::ErrorCode;
 use adesk_proto::methods::Method;
 use adesk_proto::{
     Codec, EventFrame, EventKind, Frame, NdjsonCodec, RequestFrame, ResponseFrame, ResponseOutcome,
+    ResultPayload,
 };
 use serde_json::Value;
 
@@ -87,16 +88,23 @@ pub(crate) struct ServerError {
 
 /// The wire name of an event kind (`snake_case`, protocol §5.6).
 ///
-/// [`EventKind`] exposes no `as_str()`, so the name is read back from its serde
-/// representation (the same encoding the frame's `event` field uses).
-fn event_name(kind: EventKind) -> Result<String> {
-    match serde_json::to_value(kind).map_err(|error| ClientError::Protocol {
-        message: format!("failed to encode event name: {error}"),
-    })? {
-        Value::String(name) => Ok(name),
-        other => Err(ClientError::Protocol {
-            message: format!("event name is not a string: {other}"),
-        }),
+/// A static table mirroring [`EventKind`]'s serde `snake_case` representation
+/// (the same encoding the frame's `event` field uses); a `match` recovers the
+/// name without a per-event serde round-trip.
+fn event_name(kind: EventKind) -> &'static str {
+    match kind {
+        EventKind::WindowCreated => "window_created",
+        EventKind::WindowDestroyed => "window_destroyed",
+        EventKind::WindowActivated => "window_activated",
+        EventKind::TitleChanged => "title_changed",
+        EventKind::SurfaceCommit => "surface_commit",
+        EventKind::SurfaceDamage => "surface_damage",
+        EventKind::FocusChanged => "focus_changed",
+        EventKind::PopupAppeared => "popup_appeared",
+        EventKind::PopupDisappeared => "popup_disappeared",
+        EventKind::Quiet => "quiet",
+        EventKind::AppLaunched => "app_launched",
+        EventKind::InspectFrame => "inspect_frame",
     }
 }
 
@@ -149,9 +157,9 @@ pub(crate) fn decode_line(line: &[u8]) -> Result<Inbound> {
 fn from_frame(frame: Frame) -> Result<Inbound> {
     match frame {
         Frame::Response(ResponseFrame { id, outcome }) => match outcome {
-            ResponseOutcome::Result(payload) => Ok(Inbound::Response {
+            ResponseOutcome::Result(ResultPayload(value)) => Ok(Inbound::Response {
                 id,
-                result: Ok(payload.as_value().clone()),
+                result: Ok(value),
             }),
             ResponseOutcome::Error(error) => Ok(Inbound::Response {
                 id,
@@ -167,7 +175,7 @@ fn from_frame(frame: Frame) -> Result<Inbound> {
             ts_ms,
             data,
         }) => {
-            let name = event_name(event)?;
+            let name = event_name(event).to_owned();
             let data = data.to_data().map_err(|error| ClientError::Protocol {
                 message: format!("malformed event payload: {error}"),
             })?;
