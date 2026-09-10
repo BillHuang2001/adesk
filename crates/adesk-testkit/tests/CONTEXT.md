@@ -18,7 +18,7 @@ Current state: `cargo test -p adesk-testkit --all-features` passes 66 tests + 3 
 | `e2e_launch_observe.rs` | capstone: fixture → runtime → launch → capture → close → input → temporal observation |
 | `e2e_close.rs` | `close_window` really sends `xdg_toplevel.close` (proved via `TestWindow::close_requested`) |
 | `input_capture.rs` | real-seat input capture: pointer enter/motion coordinates from the tiled geometry, button press/release order, vertical axis + frame, ctrl+c chord press/reverse-release, keyboard/pointer enter and leave transitions |
-| `clipboard.rs` | two-client clipboard: selection round trip, first-offer supersede, unadvertised mime, bounded no-selection timeout, no payload leakage into events |
+| `clipboard.rs` | two-client clipboard (strict offer delivery): selection round trip, first-offer supersede, unadvertised mime, bounded no-selection timeout, no payload leakage into events |
 
 ## Constraints
 
@@ -27,4 +27,4 @@ Current state: `cargo test -p adesk-testkit --all-features` passes 66 tests + 3 
 - Never hard-code the output size: use `expected_window_geometry` / `TestRuntime::tiled_rect()`.
 - The harness serializes process-env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 - The frozen acceptance specs (`api_surface.rs`, `assertions.rs`, `fixtures.rs`, `runtime.rs`, `wayland_client.rs`) must not be edited; add new behavior proof in new test files.
-- `clipboard.rs` is strict/tolerant gated by `REQUIRE_CLIPBOARD_DELIVERY` (today `false`): the strict round-trip assertions engage automatically when selection offers arrive; until adesk-compositor wires data-device focus, the tolerant branch asserts the documented bounded no-offer `Timeout` instead.
+- `clipboard.rs` asserts strict delivery: `REQUIRE_CLIPBOARD_DELIVERY = true`, so a missing selection offer is a hard failure; the flag-false tolerant fallback is a configured escape hatch, never a passing path in the shipped configuration.

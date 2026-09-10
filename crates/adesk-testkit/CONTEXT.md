@@ -72,7 +72,7 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 
 - Self-tests live in `tests/`: `runtime.rs` (start/stop, ping, renderer, drop), `wayland_client.rs` (toplevel appears in `list_windows` with the tiling configure, commit → `SurfaceCommit`, captured pixels match the fill, popups, resize), `input_capture.rs` (real-seat pointer/keyboard recording: motion surface coordinates match AGP injection, press/release ordering, axis + frame, `ctrl+c` chord press/reverse-release, focus enters), `clipboard.rs` (selection round trip between two clients, second `set_selection` supersedes the first offer, unadvertised mime → `Ok(None)`, bounded no-selection timeout, no payload leak into events), `fixtures.rs` (`.desktop` writing, launch path, helper process), `assertions.rs` (ImageAssert/EventAssert/`wait_until` self-checks), `api_surface.rs` (signature stability), `e2e_launch_observe.rs` (capstone: launch → observe → capture → input → close round trip) and `e2e_close.rs` (cooperating-client proof that `close_window` really sends `xdg_toplevel.close`).
 - Unit tests inside `src/assert/`, `src/fixtures/` and `src/bin/adesk-test-app.rs` cover the already-implemented plumbing.
-- Run with `./scripts/dev.sh cargo test -p adesk-testkit --all-features`; the full suite passes (66 tests + 3 doctests, 0 failures) and no test is `#[ignore]`d; the only gates are the GL paths (skip cleanly without `ADESK_TEST_GL=1`) and `clipboard.rs`'s strict/tolerant `REQUIRE_CLIPBOARD_DELIVERY` switch.
+- Run with `./scripts/dev.sh cargo test -p adesk-testkit --all-features`; the full suite passes (66 tests + 3 doctests, 0 failures) and no test is `#[ignore]`d; the only gate is the GL paths (skip cleanly without `ADESK_TEST_GL=1`).
 - No test needs a display, GPU, network or installed app; the helper binary is built by cargo (`env!("CARGO_BIN_EXE_adesk-test-app")` is available to this package's integration tests).
 - Launch tests mutate the process env; the harness serializes env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 
@@ -83,7 +83,6 @@ Status: implemented — `src/` and `tests/` contain no `todo!()`/`unimplemented!
 
 ## Known Issues
 
-- **Clipboard delivery is blocked by a compositor gap**: `adesk-compositor` never wires Smithay's `set_data_device_focus`, so Smithay skips `data_offer`/`selection` for every client — not even the publisher receives an offer; `tests/clipboard.rs` therefore runs with `REQUIRE_CLIPBOARD_DELIVERY = false` and its tolerant branch asserts the documented bounded no-offer `Timeout`. Flip the const to `true` once the compositor wires data-device focus on activation; full analysis in `src/wayland/CONTEXT.md`.
 - `tests/fixtures.rs` prints `Io error: Broken pipe (os error 32)` on stdout while still passing — log noise from the helper-process path, not a failure.
 
 ## Notes for Agents
