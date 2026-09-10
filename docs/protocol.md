@@ -102,9 +102,10 @@ Observation = {"window_id": 17 | null, "after_action": 582 | null,
 filter point (window-relative, clipped to the window geometry), coalesced and
 simplified. It is *evidence*, not a guarantee of visual difference.
 
-`elapsed_ms` counts from the moment the runtime issued the wait (the request's
-arrival) to the moment the observation resolved, in the same monotonic domain as
-`ts_ms`; a `{"type": "timeout"}` wait therefore reports roughly its `timeout_ms`.
+`elapsed_ms` counts from the moment the runtime issued the wait (when the wait was
+created, after the request was decoded and routed, and before any image rendering)
+to the moment the observation resolved, in the same monotonic domain as `ts_ms`; a
+`{"type": "timeout"}` wait therefore reports roughly its `timeout_ms`.
 
 `ImagePayload.scale` is the factor the runtime applied when it downscaled the
 rendered image: `width / source width`, where the source is the requested `region`
@@ -124,8 +125,11 @@ state at the moment the condition was noticed. Because only `capture_window` and
 request crops it: `observe` honours its own `region` and `max_dimension`, while the
 two waits have neither param and therefore attach the full window at natural size.
 An unscoped observation (no `window_id`) renders the runtime's active window, else
-the keyboard-focus window; when there is no such window — or when no window is
-renderable at that moment — `image` is `null` even though an image was requested.
+the keyboard-focus window; `image` is `null` only when that yields no candidate at
+all. A candidate that fails to render is *not* reported as `null`: the request fails
+with an AGP error instead (`unknown_window` when the window vanished,
+`render_failed` for a renderer failure). A window that is tracked but whose surface
+currently holds no buffer renders as a clear frame, i.e. a normal non-null image.
 
 ## 5. Methods
 
@@ -194,8 +198,8 @@ application's reaction (a commit, a title change) is the agent's job through
 
 `list_windows` lists normal toplevels only: an xdg-popup never becomes a
 `WindowInfo`. Popups surface through their owner's `WindowInfo.popup_count`, the
-`popup_appeared`/`popup_disappeared` events, and the popup counters of an
-`Observation`.
+`popup_appeared`/`popup_disappeared` events, and the popup id lists
+(`popups_appeared`, `popups_disappeared`) of an `Observation`.
 
 ### 5.4 Capture and observation
 
