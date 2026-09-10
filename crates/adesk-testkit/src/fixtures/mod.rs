@@ -23,11 +23,12 @@
 //! # Locating the helper binary
 //!
 //! [`TestApp::spawn`] and [`TestAppSpec::desktop_entry`] resolve `adesk-test-app` at runtime
-//! with [`helper_bin_path`]. Integration tests *of this package* may instead use
+//! with [`helper_bin_path`], unless the spec carries an explicit program
+//! ([`TestAppSpec::with_exec`]). Integration tests *of this package* may instead use
 //! `env!("CARGO_BIN_EXE_adesk-test-app")`: Cargo defines that variable at compile time for a
 //! package's own integration tests, benches and examples. Downstream crates cannot (Cargo
 //! does not define it outside the owning package), which is exactly what [`helper_bin_path`]
-//! is for.
+//! is for — or hand [`TestAppSpec::with_exec`] their own fixture binary.
 //!
 //! # `Exec` arguments are quoted automatically
 //!
@@ -358,12 +359,13 @@ impl DesktopEntryFixture {
     }
 }
 
-/// Description of the helper process [`TestApp`] spawns for one fixture app.
+/// Description of the fixture process [`TestApp`] spawns for one fixture app.
 ///
 /// Defaults: title = app id, `640x480`, [`FillPattern::default`], no exit deadline, no extra
-/// arguments. [`TestAppSpec::cli_args`] is the single source of truth for the
-/// `adesk-test-app` command line, and [`TestAppSpec::desktop_entry`] embeds exactly that
-/// command line in an `Exec` value.
+/// arguments, no program override (the packaged `adesk-test-app` helper is used).
+/// [`TestAppSpec::cli_args`] is the single source of truth for the command line, and
+/// [`TestAppSpec::desktop_entry`] embeds exactly that command line after
+/// [`TestAppSpec::exec`]`()`/the helper path in an `Exec` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TestAppSpec {
     /// The app id the toplevel reports and the `.desktop` file is named after.
@@ -378,6 +380,9 @@ pub struct TestAppSpec {
     exit_after: Option<Duration>,
     /// Extra arguments appended verbatim after the standard flags.
     extra_args: Vec<String>,
+    /// Explicit fixture program; `None` resolves the packaged `adesk-test-app` helper with
+    /// [`helper_bin_path`].
+    exec: Option<PathBuf>,
 }
 
 impl TestAppSpec {
@@ -394,6 +399,7 @@ impl TestAppSpec {
             fill: FillPattern::default(),
             exit_after: None,
             extra_args: Vec::new(),
+            exec: None,
         }
     }
 
@@ -432,9 +438,30 @@ impl TestAppSpec {
         self
     }
 
+    /// Overrides the program [`TestAppSpec::desktop_entry`] and [`TestApp::spawn`] run.
+    ///
+    /// `None` (the default) resolves the packaged `adesk-test-app` helper with
+    /// [`helper_bin_path`]; setting a program lets a downstream crate point a fixture at its
+    /// own binary without re-implementing the spec. Only the program changes — the `Exec`
+    /// arguments are still exactly [`TestAppSpec::cli_args`].
+    pub fn with_exec(mut self, program: impl Into<PathBuf>) -> Self {
+        self.exec = Some(program.into());
+        self
+    }
+
     /// The app id this spec's toplevel reports.
     pub fn app_id(&self) -> &AppId {
         &self.app_id
+    }
+
+    /// The window title (`--title`), defaulting to the app id.
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The explicit fixture program, or `None` when the packaged helper is used.
+    pub fn exec(&self) -> Option<&Path> {
+        self.exec.as_deref()
     }
 
     /// The helper's argument vector (without `argv[0]`).
@@ -469,19 +496,23 @@ impl TestAppSpec {
 
     /// The `.desktop` entry that launches this spec.
     ///
-    /// `Exec` is `[helper_bin_path("adesk-test-app")?, ...cli_args()]`, `StartupWMClass` is
-    /// the app id (so pid-less launches still correlate) and `Name` is the title. The helper
-    /// path must be UTF-8, otherwise [`TestkitError::Fixture`] is returned — a `.desktop`
-    /// file cannot carry a non-UTF-8 path.
+    /// `Exec` is `[<program>, ...cli_args()]`, where `<program>` is
+    /// [`TestAppSpec::exec`] when set and [`helper_bin_path`]`("adesk-test-app")` otherwise;
+    /// `StartupWMClass` is the app id (so pid-less launches still correlate) and `Name` is
+    /// the title. The program path must be UTF-8, otherwise [`TestkitError::Fixture`] is
+    /// returned — a `.desktop` file cannot carry a non-UTF-8 path.
     pub fn desktop_entry(&self) -> Result<DesktopEntryFixture> {
-        let helper = helper_bin_path(HELPER_APP)?;
-        let helper = helper.to_str().ok_or_else(|| {
+        let program = match &self.exec {
+            Some(program) => program.clone(),
+            None => helper_bin_path(HELPER_APP)?,
+        };
+        let program = program.to_str().ok_or_else(|| {
             TestkitError::Fixture(format!(
-                "helper binary path {} is not valid UTF-8",
-                helper.display()
+                "fixture program path {} is not valid UTF-8",
+                program.display()
             ))
         })?;
-        let mut exec = vec![helper.to_string()];
+        let mut exec = vec![program.to_string()];
         exec.extend(self.cli_args());
         let mut entry = DesktopEntryFixture::new(self.title.clone(), exec);
         entry.startup_wm_class = Some(self.app_id.as_str().to_string());
@@ -503,11 +534,12 @@ pub struct TestApp {
 }
 
 impl TestApp {
-    /// Spawns `adesk-test-app` for `spec` against `runtime`'s Wayland socket.
+    /// Spawns the fixture program for `spec` against `runtime`'s Wayland socket.
     ///
     /// Semantics (exactly this):
     ///
-    /// 1. program = [`helper_bin_path`]`("adesk-test-app")`, args = [`TestAppSpec::cli_args`];
+    /// 1. program = [`TestAppSpec::exec`] when set, else [`helper_bin_path`]`("adesk-test-app")`,
+    ///    args = [`TestAppSpec::cli_args`];
     /// 2. environment: `WAYLAND_DISPLAY` = [`TestRuntime::wayland_display`],
     ///    `XDG_RUNTIME_DIR` = [`TestRuntime::env`]`().runtime_dir()`, `XDG_DATA_DIRS` /
     ///    `XDG_DATA_HOME` = the runtime's own dirs (the helper must never inherit the host's
@@ -520,7 +552,10 @@ impl TestApp {
     /// Spawning itself does not wait for the toplevel to appear — use
     /// [`TestRuntime::wait_for_window_app`] for that.
     pub async fn spawn(runtime: &TestRuntime, spec: &TestAppSpec) -> Result<TestApp> {
-        let program = helper_bin_path(HELPER_APP)?;
+        let program = match spec.exec() {
+            Some(program) => program.to_path_buf(),
+            None => helper_bin_path(HELPER_APP)?,
+        };
         let env = runtime.env();
         let mut command = tokio::process::Command::new(&program);
         command
@@ -861,6 +896,7 @@ mod tests {
                 fill: FillPattern::default(),
                 exit_after: None,
                 extra_args: Vec::new(),
+                exec: None,
             }
         );
 
@@ -879,6 +915,7 @@ mod tests {
                 fill: FillPattern::solid_rgb(1, 2, 3),
                 exit_after: Some(Duration::from_millis(250)),
                 extra_args: vec!["--verbose".to_string()],
+                exec: None,
             }
         );
     }
