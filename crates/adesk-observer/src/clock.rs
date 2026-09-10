@@ -74,12 +74,6 @@ impl Clock {
     }
 }
 
-/// Convenience: the duration from now until `ts_ms` in the clock domain.
-#[allow(dead_code)]
-pub(crate) fn until(clock: &Clock, ts_ms: u64) -> Duration {
-    Duration::from_millis(ts_ms.saturating_sub(clock.now_ms()))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,18 +179,6 @@ mod tests {
         assert_eq!(clock.now_ms(), 1_250);
     }
 
-    /// `until()` is `deadline()`'s arithmetic in duration form, with the same
-    /// saturation behaviour for timestamps in the past.
-    #[tokio::test(start_paused = true)]
-    async fn until_saturates_for_past_timestamps() {
-        let mut clock = Clock::new();
-        clock.observe_ts(500);
-
-        assert_eq!(until(&clock, 700), Duration::from_millis(200));
-        assert_eq!(until(&clock, 500), Duration::ZERO);
-        assert_eq!(until(&clock, 100), Duration::ZERO);
-    }
-
     /// A bogus timestamp saturates instead of wrapping; the clock stays usable.
     #[tokio::test(start_paused = true)]
     async fn extreme_timestamps_saturate_instead_of_wrapping() {
@@ -214,6 +196,5 @@ mod tests {
 
         // Deadlines still yield a sane (saturated) instant, never a panic.
         assert!(clock.deadline(u64::MAX) <= tokio::time::Instant::now());
-        assert_eq!(until(&clock, u64::MAX), Duration::ZERO);
     }
 }
