@@ -6,8 +6,9 @@
 //!
 //! This module is also the canonical home of the compositor-bridge helpers the
 //! sibling dispatch groups share: `state` (§5.2/§5.3/§5.4/§5.5 state reads),
-//! `command_error` (command failures) and `unknown_window`. `capture.rs` and
-//! `input.rs` import them from here so each has exactly one implementation.
+//! `reserve_seq` (sequences of server-synthesized events), `command_error`
+//! (command failures) and `unknown_window`. `apps.rs`, `capture.rs`, `input.rs`
+//! and `inspect.rs` import them from here so each has exactly one implementation.
 
 use adesk_compositor::{CompositorError, RuntimeCommand, StateSnapshot};
 use adesk_core::{ErrorCode, WindowId};
@@ -18,13 +19,14 @@ use adesk_proto::{
 };
 use tokio::sync::oneshot;
 
+use crate::context::ServerContext;
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 
 /// Reads the compositor's current state through `QueryState`.
 ///
 /// The canonical state read of every dispatch group: `pub(super)` so §5.2's
-/// `launch_app` (sequence watermark/clock), §5.4's captures and §5.5's
+/// `launch_app` (the compositor clock), §5.4's captures and §5.5's
 /// window-relative coordinates all use this one implementation.
 ///
 /// # Errors
@@ -38,6 +40,30 @@ pub(super) async fn state(ctx: &RequestContext<'_>) -> Result<StateSnapshot> {
     ctx.server
         .compositor
         .send(RuntimeCommand::QueryState { reply })?;
+    answer.await.map_err(|_| ServerError::ShuttingDown)
+}
+
+/// Reserves the next event sequence number from the compositor's counter.
+///
+/// `seq` has one global monotonic domain covering compositor- **and**
+/// server-emitted events (`docs/protocol.md` §1), and the compositor owns the
+/// only counter. Server-synthesized events (`AppLaunched` §5.2, `inspect_frame`
+/// §5.7) therefore take their `seq` from here instead of deriving it from the
+/// observed watermark: the reservation advances the shared counter and emits
+/// nothing, so a later compositor event can never reuse the number. Gaps are
+/// allowed (a reserved number may go unused), reuse is not.
+///
+/// # Errors
+///
+/// [`ServerError::ShuttingDown`] when the command channel is closed and when the
+/// compositor drops the reply — `ReserveSeq` is infallible, so a dropped reply
+/// can only mean the compositor thread is gone, i.e. the runtime is shutting
+/// down (`crates/adesk-server/CONTEXT.md`, error mapping).
+pub(super) async fn reserve_seq(server: &ServerContext) -> Result<u64> {
+    let (reply, answer) = oneshot::channel();
+    server
+        .compositor
+        .send(RuntimeCommand::ReserveSeq { reply })?;
     answer.await.map_err(|_| ServerError::ShuttingDown)
 }
 

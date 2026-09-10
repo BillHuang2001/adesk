@@ -8,8 +8,6 @@
 //! `WindowCreated` on its own broadcast, where only it can stamp `launch_id`.
 //! Child reaping is the server's job.
 
-use std::sync::atomic::{AtomicU64, Ordering};
-
 use adesk_app_registry::{Error as RegistryError, LaunchEnv};
 use adesk_compositor::RuntimeCommand;
 use adesk_core::{AppId, AppInfo, RuntimeEvent};
@@ -44,12 +42,14 @@ pub async fn launch_app(
 ) -> Result<LaunchAppResult> {
     let app = lookup(ctx, &params.app_id)?;
 
-    // The compositor owns the single event sequence counter; the server only
-    // observes its watermark (`QueryState`). Stamping the `app_launched` event
-    // *before* spawning means a compositor that cannot answer fails the request
-    // without leaving an unannounced process behind.
+    // Both the clock (`ts_ms`) and the `app_launched` sequence number come from
+    // the compositor — it owns the single event counter, and `seq` has one global
+    // monotonic domain over compositor- and server-emitted events (§1). Taking
+    // them *before* spawning means a compositor that cannot answer fails the
+    // request without leaving an unannounced process behind; a reserved number
+    // that ends up unused is fine, because gaps are allowed and reuse is not.
     let snapshot = windows::state(ctx).await?;
-    let seq = next_launch_seq(snapshot.seq);
+    let seq = windows::reserve_seq(ctx.server).await?;
 
     // The child must see the compositor's Wayland socket; everything else is
     // inherited from the runtime's environment.
@@ -128,44 +128,4 @@ fn lookup(ctx: &RequestContext<'_>, app_id: &AppId) -> Result<AppInfo> {
         .registry
         .get(app_id)
         .ok_or_else(|| ServerError::Registry(RegistryError::UnknownApp(app_id.clone())))
-}
-
-/// Sequence numbers allocated for server-emitted events (`app_launched`).
-///
-/// The compositor's counter is not reachable from this crate, so the server
-/// allocates strictly above the watermark it observed and remembers the value:
-/// consecutive launches stay monotonic even when the compositor emitted nothing
-/// in between.
-static LAUNCH_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// The next sequence number for a server-emitted event, above `watermark`.
-///
-/// `fetch_max` lifts the counter to at least `watermark + 1`; the following
-/// `fetch_add` hands out a unique value, so two launches with the same observed
-/// watermark still get distinct, increasing ids.
-fn next_launch_seq(watermark: u64) -> u64 {
-    let candidate = watermark.saturating_add(1);
-    LAUNCH_SEQ.fetch_max(candidate, Ordering::Relaxed);
-    LAUNCH_SEQ.fetch_add(1, Ordering::Relaxed)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn launch_seq_is_monotonic_and_above_the_watermark() {
-        let first = next_launch_seq(41);
-        assert!(first > 41, "must be above the observed watermark");
-
-        let second = next_launch_seq(41);
-        assert_eq!(
-            second,
-            first + 1,
-            "a second launch without compositor progress still gets a fresh id"
-        );
-
-        let jumped = next_launch_seq(first + 10);
-        assert!(jumped > first + 10, "a newer watermark is never overtaken");
-    }
 }

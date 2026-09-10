@@ -18,7 +18,7 @@ use adesk_proto::{
 use tokio::sync::mpsc::error::TrySendError;
 
 use crate::context::ServerContext;
-use crate::dispatch::RequestContext;
+use crate::dispatch::{windows, RequestContext};
 use crate::error::Result;
 use crate::images;
 use crate::inspection::{self, InspectionSnapshot};
@@ -148,20 +148,24 @@ async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
 
 /// Renders one composed inspection frame: refresh, overlay, encode PNG.
 ///
-/// Returns the payload plus the snapshot's `seq`/`ts_ms`, which stamp the
-/// `inspect_frame` event (§1).
+/// Returns the payload plus the `inspect_frame` event's `seq`/`ts_ms` (§1): the
+/// clock is the inspection snapshot's (the compositor's `QueryState` value),
+/// while `seq` is reserved from the compositor's counter per frame — the
+/// snapshot's own `seq` is a watermark that consecutive idle frames share, so
+/// stamping it would reuse a sequence number.
 async fn render_frame(
     context: &ServerContext,
     inspector: &Inspector,
 ) -> Result<(ImagePayload, u64, u64)> {
     let snapshot = refresh(context).await?;
+    let seq = windows::reserve_seq(context).await?;
     let input = context.inspection.inspection_input(inspector.overlays())?;
     let buffer = inspector.render_request(&input, &InspectionRequest::IDENTITY)?;
     let scale = super::capture::scale_from(snapshot.frame.size(), &buffer);
     let png = images::encode_png(&buffer)?;
     Ok((
         ImagePayload::from_png(buffer.width, buffer.height, &png, scale),
-        snapshot.seq,
+        seq,
         snapshot.ts_ms,
     ))
 }
