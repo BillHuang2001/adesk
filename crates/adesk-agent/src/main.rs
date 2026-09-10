@@ -4,6 +4,7 @@
 //!
 //! ```text
 //! adesk-agent --provider mock --scenario click
+//! adesk-agent --provider dummy --dummy-mode random --dummy-seed 42 --task "Explore the desktop"
 //! adesk-agent --provider openai --task "Open the settings dialog and enable dark mode" \
 //!             --max-steps 30 --report runs/dark-mode.json
 //! ```
@@ -20,9 +21,9 @@ use clap::Parser;
 use tracing::{error, info, warn};
 
 use adesk_agent::{
-    AgentContext, AgentDecision, AgentLoop, AgpClient, ContextBudget, LlmProvider, LoopConfig,
-    ProviderConfig, ProviderError, ProviderKind, RunReport, Scenario, ScenarioId, ScenarioRunner,
-    TaskDescription,
+    AgentContext, AgentDecision, AgentLoop, AgpClient, ContextBudget, DummyMode, LlmProvider,
+    LoopConfig, ProviderConfig, ProviderError, ProviderKind, RunReport, Scenario, ScenarioId,
+    ScenarioRunner, TaskDescription,
 };
 
 /// Multimodal GUI agent prototype for the ADesk runtime.
@@ -64,6 +65,23 @@ struct Cli {
     /// API key (falls back to `ADESK_AGENT_API_KEY` / `OPENAI_API_KEY`).
     #[arg(long, env = "ADESK_AGENT_API_KEY")]
     api_key: Option<String>,
+
+    /// Dummy provider sampling mode: `fixed` replays a canned script, `random`
+    /// draws from an action pool (`--provider dummy`).
+    #[arg(long, value_enum, env = "ADESK_AGENT_DUMMY_MODE")]
+    dummy_mode: Option<DummyMode>,
+
+    /// PRNG seed for the dummy provider's random mode (default `0x5EED_5EED`).
+    #[arg(long, env = "ADESK_AGENT_DUMMY_SEED")]
+    dummy_seed: Option<u64>,
+
+    /// Per-step finish probability for the dummy provider's random mode (default `0.15`).
+    #[arg(long, env = "ADESK_AGENT_DUMMY_FINISH_PROBABILITY")]
+    dummy_finish_probability: Option<f64>,
+
+    /// Hard step budget for the dummy provider's random mode (default `10`).
+    #[arg(long, env = "ADESK_AGENT_DUMMY_STEP_BUDGET")]
+    dummy_step_budget: Option<u32>,
 
     /// Maximum image dimension sent to the provider (downscale target).
     #[arg(long, default_value_t = 1024)]
@@ -215,15 +233,30 @@ fn loop_config(cli: &Cli) -> LoopConfig {
 }
 
 /// Provider selection and credentials; env fallbacks are handled by clap and
-/// [`ProviderConfig::build`].
+/// [`ProviderConfig::build`]. Dummy fields override [`ProviderConfig::default`]
+/// only when the user (or its `ADESK_AGENT_DUMMY_*` env fallback) set them, so the
+/// documented dummy defaults are preserved otherwise.
 fn provider_config(cli: &Cli) -> ProviderConfig {
-    ProviderConfig {
+    let mut config = ProviderConfig {
         kind: cli.provider,
         model: cli.model.clone(),
         base_url: cli.base_url.clone(),
         api_key: cli.api_key.clone(),
         ..ProviderConfig::default()
+    };
+    if let Some(mode) = cli.dummy_mode {
+        config.dummy_mode = mode;
     }
+    if let Some(seed) = cli.dummy_seed {
+        config.dummy_seed = seed;
+    }
+    if let Some(probability) = cli.dummy_finish_probability {
+        config.dummy_finish_probability = probability;
+    }
+    if let Some(budget) = cli.dummy_step_budget {
+        config.dummy_step_budget = budget;
+    }
+    config
 }
 
 /// Resolve the AGP socket: `--socket` / `$ADESK_SOCKET` (clap), else
@@ -280,5 +313,103 @@ impl LlmProvider for BoxedProvider {
 
     fn supports_images(&self) -> bool {
         self.0.supports_images()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `--provider dummy --dummy-mode fixed --dummy-seed 1` parses to the expected
+    /// fields.
+    #[test]
+    fn cli_parses_the_dummy_flags() {
+        let cli = Cli::try_parse_from([
+            "adesk-agent",
+            "--provider",
+            "dummy",
+            "--dummy-mode",
+            "fixed",
+            "--dummy-seed",
+            "1",
+            "--dummy-finish-probability",
+            "0.25",
+            "--dummy-step-budget",
+            "3",
+            "--task",
+            "explore",
+        ])
+        .expect("the fixed-mode dummy invocation parses");
+
+        assert_eq!(cli.provider, ProviderKind::Dummy);
+        assert_eq!(cli.dummy_mode, Some(DummyMode::Fixed));
+        assert_eq!(cli.dummy_seed, Some(1));
+        assert_eq!(cli.dummy_finish_probability, Some(0.25));
+        assert_eq!(cli.dummy_step_budget, Some(3));
+    }
+
+    /// Unset dummy flags stay `None`, so [`provider_config`] keeps the documented
+    /// defaults, and the `ADESK_AGENT_DUMMY_*` env vars are the fallback. The env
+    /// assertions live in this test (rather than a second, parallel one) so no two
+    /// tests race over the same process-wide variables.
+    #[test]
+    fn cli_dummy_flags_default_to_none_and_env_fallbacks_apply() {
+        // Hermetic: any ambient dummy env vars must not leak into the assertions.
+        for var in [
+            "ADESK_AGENT_DUMMY_MODE",
+            "ADESK_AGENT_DUMMY_SEED",
+            "ADESK_AGENT_DUMMY_FINISH_PROBABILITY",
+            "ADESK_AGENT_DUMMY_STEP_BUDGET",
+        ] {
+            std::env::remove_var(var);
+        }
+
+        let cli = Cli::try_parse_from(["adesk-agent", "--task", "explore"])
+            .expect("a bare invocation parses");
+        assert_eq!(cli.dummy_mode, None);
+        assert_eq!(cli.dummy_seed, None);
+        assert_eq!(cli.dummy_finish_probability, None);
+        assert_eq!(cli.dummy_step_budget, None);
+
+        let default = provider_config(&cli);
+        assert_eq!(default.dummy_mode, DummyMode::Random);
+        assert_eq!(
+            default.dummy_seed,
+            adesk_agent::provider::dummy::DEFAULT_SEED
+        );
+        assert_eq!(
+            default.dummy_finish_probability,
+            adesk_agent::provider::dummy::DEFAULT_FINISH_PROBABILITY
+        );
+        assert_eq!(
+            default.dummy_step_budget,
+            adesk_agent::provider::dummy::DEFAULT_STEP_BUDGET
+        );
+
+        std::env::set_var("ADESK_AGENT_DUMMY_MODE", "random");
+        std::env::set_var("ADESK_AGENT_DUMMY_SEED", "7");
+        std::env::set_var("ADESK_AGENT_DUMMY_FINISH_PROBABILITY", "0.5");
+        std::env::set_var("ADESK_AGENT_DUMMY_STEP_BUDGET", "9");
+        let cli = Cli::try_parse_from(["adesk-agent", "--task", "explore"])
+            .expect("the env-only invocation parses");
+        for var in [
+            "ADESK_AGENT_DUMMY_MODE",
+            "ADESK_AGENT_DUMMY_SEED",
+            "ADESK_AGENT_DUMMY_FINISH_PROBABILITY",
+            "ADESK_AGENT_DUMMY_STEP_BUDGET",
+        ] {
+            std::env::remove_var(var);
+        }
+
+        assert_eq!(cli.dummy_mode, Some(DummyMode::Random));
+        assert_eq!(cli.dummy_seed, Some(7));
+        assert_eq!(cli.dummy_finish_probability, Some(0.5));
+        assert_eq!(cli.dummy_step_budget, Some(9));
+
+        let from_env = provider_config(&cli);
+        assert_eq!(from_env.dummy_mode, DummyMode::Random);
+        assert_eq!(from_env.dummy_seed, 7);
+        assert_eq!(from_env.dummy_finish_probability, 0.5);
+        assert_eq!(from_env.dummy_step_budget, 9);
     }
 }

@@ -8,7 +8,7 @@ All four files are implementation-complete and audited clean: zero executable in
 ## API Surface
 - `mod.rs`: `LlmProvider` trait (`complete`, `name`, `supports_images` default `true`), `ProviderKind { Mock, OpenAi, Dummy }` (`as_str()` → `"mock"`/`"openai"`/`"dummy"`), `ProviderConfig` + `build() -> Result<Box<dyn LlmProvider>, ProviderError>`.
 - `mock.rs`: `MockProvider` (`new`, `scripted`, `from_json`, `with_name`, `contexts`, `context_count`, `remaining`, `reset`) and `ScriptEntry` (`decision`, `error`, `with_latency`).
-- `dummy.rs`: `DummyVlmProvider` (`from_config`, `fixed`, `random`, `config`, `with_name`, `contexts`, `context_count`, `remaining`, `reset`), `DummyConfig` (+ `Default`), `DummyMode { Fixed, Random }` (`Default` = `Random`), `default_action_pool()`, and constants `DEFAULT_SEED` (`0x5EED_5EED`), `DEFAULT_FINISH_PROBABILITY` (`0.15`), `DEFAULT_STEP_BUDGET` (`10`).
+- `dummy.rs`: `DummyVlmProvider` (`from_config`, `fixed`, `random`, `config`, `with_name`, `contexts`, `context_count`, `remaining`, `reset`), `DummyConfig` (+ `Default`), `DummyMode { Fixed, Random }` (derives `Debug + Clone + Copy + PartialEq + Eq + Default + clap::ValueEnum`, `Default` = `Random`, `--dummy-mode` values `fixed`/`random`), `default_action_pool()`, and constants `DEFAULT_SEED` (`0x5EED_5EED`), `DEFAULT_FINISH_PROBABILITY` (`0.15`), `DEFAULT_STEP_BUDGET` (`10`).
 - `openai.rs`: `OpenAiCompatProvider` (`new`, `config`, pure `build_chat_request`/`parse_decision`), `OpenAiConfig` (+ `Default`), `ImageDetail { Auto, Low, High }`, constants `DEFAULT_BASE_URL`, `DEFAULT_MODEL`, `DEFAULT_TIMEOUT_MS`, `API_KEY_ENV`, `API_KEY_ENV_FALLBACK`, `DEFAULT_SYSTEM_PROMPT`.
 
 ## Constraints
