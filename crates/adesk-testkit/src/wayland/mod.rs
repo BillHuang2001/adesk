@@ -114,9 +114,10 @@ const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Bytes reserved for the client's single SHM pool (page aligned).
 ///
-/// A `1280x800` buffer is ~4 MiB, so the pool holds several frames at once; released
-/// buffers go back to the pool's free list ([`shm::ShmPool::free`]), so a commit loop
-/// reuses one allocation instead of growing the pool.
+/// A `1280x800` buffer is ~4 MiB, so the pool holds several frames at once; a released
+/// buffer's range goes back to the pool's free list ([`shm::ShmPool::release`], driven by
+/// `wl_buffer.release`), so a commit loop reuses one allocation instead of growing the
+/// pool.
 const SHM_POOL_CAPACITY: usize = 16 * 1024 * 1024;
 
 /// How long the reader thread sleeps between non-blocking read attempts.
@@ -236,7 +237,9 @@ impl WaylandTestClient {
     /// 5. `data_device_manager.get_data_device(seat, qhandle, ())` creates the client's
     ///    `wl_data_device` (the clipboard object, see the `clipboard` module) and it is handed to
     ///    `ClientState::new` *before* the reader thread starts, so no offer/selection event
-    ///    can arrive before there is state to record it in.
+    ///    can arrive before there is state to record it in. The SHM pool goes to
+    ///    `ClientState::new` as well, so a `wl_buffer.release` can be attributed without
+    ///    looking at a window slot (see `state.rs`).
     /// 6. Spawn the reader thread described in the module docs with a clone of `state`,
     ///    the event queue and an `UnboundedSender<PumpEvent>`, then wait (bounded by
     ///    `ROUNDTRIP_TIMEOUT`) for the real `wl_shm.format` events to arrive. A runtime
@@ -292,6 +295,7 @@ impl WaylandTestClient {
             HashSet::new(),
             globals.seat().clone(),
             data_device,
+            Arc::clone(&pool),
         )));
         let (pump_tx, mut pump_rx) = unbounded_channel();
         let reader_state = Arc::clone(&state);

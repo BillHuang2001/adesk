@@ -13,25 +13,34 @@
 //! writer evaluates [`FillPattern::at`] in RGBA order and swaps the first and third byte
 //! when serialising, which is the single place that byte-order rule lives. Stride is
 //! always `width * 4` (no padding); an allocation is `stride * height` bytes rounded up
-//! to a 64-byte multiple, so [`ShmBuffer::len`] is the allocated length, not the exact
-//! pixel payload.
+//! to a 64-byte multiple, and that rounded length — not the exact pixel payload — is what
+//! the pool records as the range's size.
 //!
 //! ## Allocation
 //!
 //! The pool is a bump allocator with a free list: `alloc` first fits into the free list
-//! (best effort, first fit), then bumps `next_offset`; `free` returns the range to the free
-//! list and coalesces it with every touching neighbour. `wl_buffer.release` is what calls
-//! `free`, so a test that commits frames in a loop reuses one allocation instead of growing
-//! the pool.
+//! (best effort, first fit), then bumps `next_offset`; the range is recorded in the pool's
+//! live table under the new `wl_buffer`'s object id, and [`ShmPool::release`] — the handler
+//! of `wl_buffer.release` — returns it to the free list, coalescing it with every touching
+//! neighbour. A test that commits frames in a loop therefore reuses one allocation instead
+//! of growing the pool.
+//!
+//! Attribution is by *identity*, never by slot: the compositor releases a superseded buffer
+//! while it dispatches the superseding commit (so the window slot already holds the new
+//! buffer), and a destroyed window's slot is deregistered before its last release arrives.
+//! The live table is what can still answer "which range was that?", and a release it cannot
+//! attribute is ignored — which is also what makes a re-attached buffer's second release
+//! harmless.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::os::fd::AsFd;
 use std::os::unix::fs::FileExt;
 
 use adesk_core::Size;
+use wayland_client::backend::ObjectId;
 use wayland_client::protocol::{wl_buffer, wl_shm, wl_shm_pool};
-use wayland_client::QueueHandle;
+use wayland_client::{Proxy, QueueHandle};
 
 use crate::error::{Result, TestkitError};
 use crate::fill::FillPattern;
@@ -46,23 +55,25 @@ pub(crate) struct ShmPool {
     file: File,
     /// Total size of `file` in bytes.
     capacity: usize,
-    /// Free `(offset, len)` ranges returned by `wl_buffer.release`.
+    /// Free `(offset, len)` ranges returned by [`ShmPool::release`].
     free_list: Vec<(usize, usize)>,
     /// Bump pointer for allocations the free list cannot satisfy.
     next_offset: usize,
+    /// Every live allocation, keyed by the `wl_buffer` object id that owns it: the range is
+    /// removed here — and only here — when the compositor releases that buffer.
+    live: HashMap<ObjectId, (usize, usize)>,
     /// Queue handle used to create `wl_buffer` objects for this pool.
     qhandle: QueueHandle<ClientState>,
 }
 
-/// A `wl_buffer` plus the bookkeeping needed to return its bytes to the pool.
+/// A `wl_buffer` created by [`ShmPool::alloc`].
+///
+/// The bytes behind it live in the pool's live table, keyed by the buffer's object id:
+/// dropping the handle only drops the client's proxy, the range is returned by
+/// [`ShmPool::release`] when the compositor is done with it.
 pub(crate) struct ShmBuffer {
     /// The protocol buffer object.
     buffer: wl_buffer::WlBuffer,
-    /// Byte offset of the buffer inside the pool.
-    pub(crate) offset: usize,
-    /// Allocated length in bytes: `stride * height` rounded up to a 64-byte multiple, so
-    /// `free(offset, len)` returns exactly the range `alloc` reserved.
-    pub(crate) len: usize,
 }
 
 impl ShmPool {
@@ -98,6 +109,7 @@ impl ShmPool {
             capacity,
             free_list: Vec::new(),
             next_offset: 0,
+            live: HashMap::new(),
             qhandle: qhandle.clone(),
         })
     }
@@ -115,6 +127,9 @@ impl ShmPool {
     ///    compositing.
     /// 4. The buffer is created with `pool.create_buffer(offset as i32, w as i32, h as i32,
     ///    (w * 4) as i32, wl_shm::Format::Argb8888, &self.qhandle, ())`.
+    /// 5. The range is recorded in the live table under the new buffer's object id, so the
+    ///    `wl_buffer.release` for exactly this buffer is what returns it (see
+    ///    [`release`](ShmPool::release)).
     pub(crate) fn alloc(&mut self, size: Size, fill: FillPattern) -> Result<ShmBuffer> {
         fill.require_opaque()?;
         if size.w == 0 || size.h == 0 {
@@ -157,11 +172,24 @@ impl ShmPool {
             &self.qhandle,
             (),
         );
-        Ok(ShmBuffer {
-            buffer,
-            offset,
-            len,
-        })
+        self.live.insert(buffer.id(), (offset, len));
+        Ok(ShmBuffer { buffer })
+    }
+
+    /// Returns the range of the buffer `id` to the free list (the compositor released it).
+    ///
+    /// The `wl_buffer` object id is the only reliable handle on an allocation: `wl_buffer`
+    /// carries no user data, the release for a superseded buffer arrives while the
+    /// superseding commit is dispatched (so the window slot already holds the new buffer)
+    /// and a destroyed window's slot is deregistered before its last release arrives, so no
+    /// slot lookup can attribute a release. An id this pool never allocated — or already
+    /// released — is ignored, which is what keeps a second release of the same buffer (it
+    /// was re-attached by [`commit_pending`](super::TestWindow::commit_pending)) from
+    /// handing the same range out twice.
+    pub(crate) fn release(&mut self, id: &ObjectId) {
+        if let Some((offset, len)) = self.live.remove(id) {
+            self.free(offset, len);
+        }
     }
 
     /// Returns a previously allocated range to the free list.
@@ -169,8 +197,10 @@ impl ShmPool {
     /// `(offset, len)` is pushed and coalesced with every touching neighbour (one merge can
     /// make the next one adjacent). A range that [`alloc`](ShmPool::alloc) never handed
     /// out — `len == 0`, past the pool, past the bump pointer, or overlapping an already
-    /// free range — is ignored: it indicates a bug in the caller, not in the pool.
-    pub(crate) fn free(&mut self, offset: usize, len: usize) {
+    /// free range — is ignored: it indicates a bug in the caller, not in the pool. The only
+    /// caller is [`release`](ShmPool::release), which takes the range from the live table,
+    /// so a range is never returned twice.
+    fn free(&mut self, offset: usize, len: usize) {
         if len == 0 {
             return;
         }

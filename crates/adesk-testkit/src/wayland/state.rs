@@ -7,8 +7,10 @@
 //! by the window handle (locked from the calling thread) and the dispatch impls (locked
 //! from the reader thread).
 //!
-//! Lock order is always `ClientState` → `WindowState`; no dispatch impl locks a window
-//! slot and then the client state, so the two mutexes cannot deadlock.
+//! Lock order is always `ClientState` → `WindowState`, with `ShmPool` innermost (a commit
+//! locks the window slot it draws into, the `wl_buffer.release` handler locks the client's
+//! pool directly); no dispatch impl locks a window slot and then the client state, so the
+//! three mutexes cannot deadlock.
 //!
 //! ## Seat input recording
 //!
@@ -135,6 +137,15 @@ pub(crate) struct ClientState {
     pub(crate) windows: HashMap<ObjectId, WindowSlot>,
     /// SHM formats the compositor advertised (`wl_shm.format`).
     pub(crate) shm_formats: HashSet<wl_shm::Format>,
+    /// The client's single SHM pool, shared with every window it creates.
+    ///
+    /// Held here — as well as in each [`WindowState`] that allocates from it — so a
+    /// `wl_buffer.release` can be attributed to the pool that handed the range out. The
+    /// window slot that committed the buffer is not a reliable witness: the compositor
+    /// releases a superseded buffer while it dispatches the superseding commit (the slot
+    /// already holds the new buffer) and a destroyed window's slot is deregistered before
+    /// its last release arrives, while the pool's own identity table still has the range.
+    pub(crate) pool: Arc<Mutex<ShmPool>>,
     /// Set when the reader thread reported EOF or a fatal protocol error.
     pub(crate) closed: bool,
     /// Number of `wl_display.sync` callbacks the compositor answered.
@@ -153,6 +164,7 @@ impl ClientState {
         shm_formats: HashSet<wl_shm::Format>,
         seat: wl_seat::WlSeat,
         data_device: wl_data_device::WlDataDevice,
+        pool: Arc<Mutex<ShmPool>>,
     ) -> ClientState {
         ClientState {
             globals,
@@ -170,6 +182,7 @@ impl ClientState {
             latest_input_serial: None,
             windows: HashMap::new(),
             shm_formats,
+            pool,
             closed: false,
             sync_watermark: 0,
         }
@@ -225,17 +238,11 @@ pub(crate) struct WindowState {
     pub(crate) destroyed: bool,
     /// The compositor sent `xdg_toplevel.close` / `xdg_popup.popup_done`.
     pub(crate) close_requested: bool,
-    /// Buffer allocated for the next commit, before it is attached.
-    pub(crate) pending_buffer: Option<ShmBuffer>,
-    /// Buffer currently attached to the surface.
+    /// Buffer currently attached to the surface, kept so
+    /// [`commit_pending`](super::TestWindow::commit_pending) can re-attach it without
+    /// allocating. Its bytes belong to the pool's live table, keyed by the buffer's object
+    /// id — the compositor's `wl_buffer.release` is what returns them, never this slot.
     pub(crate) attached_buffer: Option<ShmBuffer>,
-    /// Buffers whose bytes were already returned to [`Self::pool`] by `wl_buffer.release`.
-    ///
-    /// A buffer that is re-attached by
-    /// [`commit_pending`](super::TestWindow::commit_pending) is released again by the
-    /// compositor; the set keeps the second release from handing the same range out
-    /// twice (see [`ShmPool::free`]).
-    pub(crate) released_buffers: HashSet<ObjectId>,
     /// The SHM pool this window allocates from (one pool per client).
     pub(crate) pool: Arc<Mutex<ShmPool>>,
     /// Damage the last commit reported, or `None` before the first commit.
@@ -280,9 +287,7 @@ impl WindowState {
             commits: 0,
             destroyed: false,
             close_requested: false,
-            pending_buffer: None,
             attached_buffer: None,
-            released_buffers: HashSet::new(),
             pool,
             last_damage: None,
             outputs: HashSet::new(),
@@ -648,34 +653,17 @@ impl Dispatch<wl_buffer::WlBuffer, ()> for ClientState {
     ) {
         // `Release`.
         //
-        // The compositor is done reading the buffer. Return its bytes to the owning pool's
-        // free list (`ShmPool::free`) so repeated frames reuse one allocation instead of
-        // growing the pool. `wl_buffer` carries no user data, so the owner is the slot
-        // that still holds this object id.
+        // The compositor is done reading the buffer. Return its bytes to the pool's free
+        // list (`ShmPool::release`) so repeated frames reuse one allocation instead of
+        // growing the pool. The pool's own table — keyed by the buffer's object id — is the
+        // only place the allocation can still be found: `wl_buffer` carries no user data,
+        // the release of a superseded buffer is emitted while the superseding commit is
+        // dispatched (so the owning slot already holds the new buffer) and a destroyed
+        // window's slot is deregistered before its last release arrives. A release the pool
+        // cannot attribute (already released, or never allocated there) is ignored, which
+        // is what makes a re-attached buffer's second release harmless.
         if let wl_buffer::Event::Release = event {
-            let id = proxy.id();
-            for slot in state.windows.values() {
-                let mut window = lock_window(slot);
-                let found = window
-                    .pending_buffer
-                    .iter()
-                    .chain(window.attached_buffer.iter())
-                    .find(|buffer| buffer.buffer().id() == id)
-                    .map(|buffer| (buffer.offset, buffer.len, Arc::clone(&window.pool)));
-                let Some((offset, len, pool)) = found else {
-                    continue;
-                };
-                // A second release of the same buffer (it was re-attached by
-                // `commit_pending`) must not return the range again: the pool may have
-                // handed it to a newer buffer meanwhile. The buffer itself stays in the
-                // slot, so `commit_pending` can still re-attach it.
-                if !window.released_buffers.insert(id) {
-                    break;
-                }
-                drop(window);
-                lock_pool(&pool).free(offset, len);
-                break;
-            }
+            lock_pool(&state.pool).release(&proxy.id());
         }
         // Generated event enums are `#[non_exhaustive]`: events added by newer protocol
         // versions fall through and are ignored rather than rejected.

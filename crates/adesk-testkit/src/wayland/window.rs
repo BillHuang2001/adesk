@@ -61,6 +61,9 @@ fn commit_buffer(
     surface.attach(Some(buffer.buffer()), 0, 0);
     surface.damage(0, 0, size.w as i32, size.h as i32);
     surface.commit();
+    // Overwriting the slot supersedes the previous buffer: the compositor releases it while
+    // it dispatches this commit, and the pool returns its range by object id, so nothing
+    // here has to keep the superseded buffer alive.
     window.attached_buffer = Some(buffer);
     window.commits = window.commits.saturating_add(1);
     window.fill = fill;

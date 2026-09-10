@@ -102,7 +102,7 @@ async fn launch_app_starts_helper_window() -> Result<()> {
     let app_id = fixtures.write_app(&spec)?;
     assert_eq!(app_id, *spec.app_id());
 
-    // The only env-applying runtime in this binary (see the module docs).
+    // One of the two env-applying runtimes in this binary (see the module docs).
     let runtime = TestRuntime::start_with(
         TestRuntimeConfig::new()
             .with_fixture_dir(&fixtures)

@@ -17,6 +17,7 @@ Run them with `./scripts/dev.sh cargo test -p adesk-testkit` (the crate declares
 | `e2e_launch_observe.rs` | capstone: fixture → runtime → launch → capture → close → input → temporal observation |
 | `e2e_close.rs` | `close_window` really sends `xdg_toplevel.close` (proved via `TestWindow::close_requested`) |
 | `input_capture.rs` | real-seat input capture: pointer enter/motion coordinates from the tiled geometry, button press/release order, vertical axis + frame, ctrl+c chord press/reverse-release, keyboard/pointer enter and leave transitions |
+| `shm_pool.rs` | SHM pool release regression: ten fresh frames in a row reuse released ranges (capture still shows the last fill), and six windows destroyed in turn each get their final buffer's range back — both exhaust the 16 MiB pool unless `wl_buffer.release` is attributed by buffer object id |
 | `clipboard.rs` | two-client clipboard (strict offer delivery): selection round trip, first-offer supersede, unadvertised mime, bounded no-selection timeout, no payload leakage into events, and the publication→focus-change ordering barrier |
 
 ## Constraints
