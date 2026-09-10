@@ -48,15 +48,12 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `src/agp.rs` is the only module that adapts `adesk-client`/`adesk-proto` wire plumbing; the loop, context and providers speak domain types (`adesk_core`) plus `adesk_proto::ImagePayload`.
 - The crate contains no `todo!()`/`unimplemented!()`; `unwrap`/`expect`/panics exist only inside `#[cfg(test)]` modules or the `testing` scaffolding module (`#[cfg(any(test, feature = "test-support"))]`), which panics by design on an exhausted or mismatched script.
 - The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait` with explicit timeouts; tests use `retry_backoff_ms = 0`.
-- Keep files well under the ~1000-line concern threshold; the loop is already split into `src/agent_loop/` (`mod.rs`, `config.rs`, `execute.rs`, `step.rs`), so grow it by adding a module rather than by extending `execute.rs`.
+- Keep files well under the ~1000-line concern threshold; the loop is split into `src/agent_loop/` (`mod.rs`, `config.rs`, `execute.rs`, `step.rs`, `tests.rs`), so grow it by adding a module rather than by extending `execute.rs`.
 
 ## Known Issues
-- The gated suites use a crate-root `#![cfg(feature = ...)]` instead of `[[test]] required-features` (the manifest uses `required-features` for the `adesk-e2e-app` example only), so `cargo test -p adesk-agent` still compiles, links and runs three 0-test binaries (`agent_loop`, `scenarios`, `e2e_runtime`) and prints "running 0 tests" for each.
-  Because no other crate enables these features, the default workspace run sees only 60 of the crate's 94 tests.
-- `tests/e2e_runtime.rs` holds the crate's only two wall-clock sleeps: 400 ms before the popup destroy and 800 ms before the title rename.
-  The popup one is load-bearing: the dialog scenario's first wait is an anchor-less `observe(change)`, whose filter starts at the watermark, so the disappearance must be journaled after the wait registers.
-  The title one is not load-bearing: the loop anchors its explicit `Observe` at `last_action_id`, so an earlier rename would still be counted.
-  Deterministic replacement (already proven by `observation_causality_after_click`): click → mutate → `observe(after_action = Some(click_id))`, or hook the mutation onto the click inside a test-local `AgentClient` decorator.
+- `tests/e2e_runtime.rs` holds one wall-clock sleep: 800 ms before the title rename in `scenario_navigation_title_change`.
+  It is load-bearing — the rename must land after the click that the test's observation is anchored to (`after_action: None` resolves to the loop's `last_action_id`).
+  `scenario_dialog_popup_lifecycle` uses the same click-anchored plan for its 400 ms popup destroy, because an anchor-less first wait misses a disappearance that is journaled before the waiter registers.
 - `HELPER_LIFETIME` (5 s) is a leak guard, not wall clock the tests pay: the registry drops the spawned `Child` and the helper exits on Wayland EOF; neither launch test waits for the process.
 
 ## Routing Table
