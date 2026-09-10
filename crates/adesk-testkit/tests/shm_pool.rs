@@ -15,21 +15,21 @@
 //!   slot before the compositor's release for the still-attached buffer arrives.
 //!
 //! The range is therefore attributed by buffer object id, which is what these tests pin.
+//!
+//! The release is awaited rather than slept for: after a commit's runtime event the
+//! compositor has already put the superseded buffer's `wl_buffer.release` on this client's
+//! socket, so each test blocks on the reader thread dispatching it ([`wait_for_release`]) —
+//! the wait ends as soon as the range is back, and never relies on a fixed pad.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use adesk_testkit::{
     EventAssert, Expected, FillPattern, ImageAssert, Result, RuntimeEvent, Size, TestRuntime,
-    TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient, WindowId,
+    TestRuntimeConfig, TestWindow, TestkitError, ToplevelSpec, WaylandTestClient, WindowId,
 };
 
 /// Every bounded wait in this file uses this deadline.
 const DEADLINE: Duration = Duration::from_secs(10);
-
-/// How long each commit is given to have its `wl_buffer.release` dispatched before the next
-/// frame is allocated. The reader thread polls the socket every 5 ms, so this is many
-/// intervals; it is a bounded pump, never an unbounded sleep.
-const RELEASE_PUMP: Duration = Duration::from_millis(100);
 
 /// Frames committed in a row: more than the pool can hold at the default output size (a
 /// tiled 1280x800 frame is ~4 MiB, the pool 16 MiB, so five concurrent frames can never
@@ -41,8 +41,12 @@ const FRAMES: usize = 10;
 const WINDOWS: usize = 6;
 
 /// A runtime whose Wayland socket a client can connect to (see `wayland_client.rs`).
+///
+/// Nothing is launched and `runtime.wayland_client()` connects by absolute path, so the
+/// process env is only needed across startup and `apply_env(false)` releases the harness's
+/// process-env lock immediately, letting the two tests run in parallel.
 fn wayland_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(true)
+    TestRuntimeConfig::new().with_apply_env(false)
 }
 
 /// The fill of frame `index`: distinct per frame, so a recycled range still holding an older
@@ -85,6 +89,49 @@ async fn wait_for_commit(events: &mut EventAssert, window_id: WindowId, seq: u64
     Ok(())
 }
 
+/// Waits until the reader thread has dispatched the `wl_buffer.release` of the buffer the
+/// most recent commit superseded.
+///
+/// The compositor releases the superseded buffer while it dispatches the commit, so once
+/// [`wait_for_commit`] has observed that commit's runtime event the release is already on the
+/// client's socket and *is* the next protocol event this connection reads. [`drain_notifications`]
+/// clears every earlier read first, so waiting for one dispatched protocol event is exactly
+/// waiting for the freed range to be back in the pool — a deterministic barrier, not a sleep.
+/// The reader thread polls the socket every 5 ms, so a leaked range still fails the test: no
+/// `wl_buffer.release` ever arrives and this times out instead of returning.
+async fn wait_for_release(wayland: &mut WaylandTestClient) -> Result<()> {
+    wayland
+        .pump_until(DEADLINE, "a released SHM buffer range", |stats| {
+            stats.events >= 1
+        })
+        .await?;
+    Ok(())
+}
+
+/// Empties the reader thread's notification queue without blocking.
+///
+/// `pump_for(Duration::ZERO)` returns every notification already buffered in the channel
+/// (including a reader cycle that dispatched no events), so looping until one comes back
+/// empty leaves the queue quiescent. That is what lets [`wait_for_release`] observe the
+/// release itself: a `PumpEvent` is sent per completed reader cycle — configure reads
+/// included — and `pump_until` would otherwise be satisfied by one of those stale ones.
+/// Bounded by [`DEADLINE`], so a runtime that floods events fails the test rather than
+/// spinning here.
+async fn drain_notifications(wayland: &mut WaylandTestClient) -> Result<()> {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        if wayland.pump_for(Duration::ZERO).await?.dispatches == 0 {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            return Err(TestkitError::Timeout {
+                what: "SHM notification drain",
+                timeout: DEADLINE,
+            });
+        }
+    }
+}
+
 #[tokio::test]
 async fn fresh_frames_reuse_buffer_ranges() -> Result<()> {
     let runtime = TestRuntime::start_with(wayland_config()).await?;
@@ -101,7 +148,9 @@ async fn fresh_frames_reuse_buffer_ranges() -> Result<()> {
     // what makes the window id available for the commit waits below.
     window.commit_frame(fill(0))?;
     let window_id = created_window(&mut events).await?;
-    wayland.pump_for(RELEASE_PUMP).await?;
+    // This commit supersedes nothing, so there is no release to wait for — clearing the
+    // configure/mapping reads leaves `wait_for_release` below observing each frame's release.
+    drain_notifications(&mut wayland).await?;
 
     for index in 1..FRAMES {
         // Every one of these frames is a *fresh* allocation: if the range of the superseded
@@ -109,10 +158,10 @@ async fn fresh_frames_reuse_buffer_ranges() -> Result<()> {
         // before this loop ends.
         window.commit_frame(fill(index))?;
         // The compositor processed the commit — and with it released the superseded buffer —
-        // once the event below arrives; the pump then lets the reader thread dispatch that
-        // release before the next allocation asks for a range.
+        // once the event below arrives; the release wait then blocks until the reader thread
+        // has dispatched that release, i.e. until the range is free for the next allocation.
         wait_for_commit(&mut events, window_id, index as u64 + 1).await?;
-        wayland.pump_for(RELEASE_PUMP).await?;
+        wait_for_release(&mut wayland).await?;
     }
 
     // The buffer that survived the loop is the last frame's: its pixels are the last fill,
@@ -142,6 +191,9 @@ async fn destroyed_window_buffer_is_reclaimed() -> Result<()> {
         assert_eq!(configure_size, runtime.tiled_rect().size());
         window.commit_frame(FillPattern::solid_rgb(90, 30 + index as u8 * 20, 120))?;
         let window_id = created_window(&mut events).await?;
+        // Clear this window's configure read so the release wait below observes the release
+        // (nothing has superseded a buffer yet, so there is no release to clear).
+        drain_notifications(&mut wayland).await?;
 
         // Destroying the surface deregisters the window slot; the compositor's release for
         // the still-attached buffer arrives *after* that, so only the pool can still
@@ -151,7 +203,7 @@ async fn destroyed_window_buffer_is_reclaimed() -> Result<()> {
         events
             .wait_for_expected(&Expected::WindowDestroyed(window_id), DEADLINE)
             .await?;
-        wayland.pump_for(RELEASE_PUMP).await?;
+        wait_for_release(&mut wayland).await?;
     }
 
     let client = runtime.client().await?;

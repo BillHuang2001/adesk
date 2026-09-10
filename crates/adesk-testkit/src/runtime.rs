@@ -15,6 +15,7 @@
 //! ServerConfig::new(socket_path: impl Into<PathBuf>, compositor: CompositorConfig) -> ServerConfig
 //! ServerConfig::with_app_dirs(self, dirs: Vec<PathBuf>) -> ServerConfig   // dirs passed verbatim
 //!                                                                        // to RegistryOptions::with_search_dirs
+//! ServerConfig::without_viewer(self) -> ServerConfig                     // VAP endpoint opt-out
 //! Server::start(ServerConfig) -> impl Future<Output = Result<RunningServer, _>>   // server spawns the compositor
 //! RunningServer::socket_path(&self) -> &Path
 //! RunningServer::compositor(&self) -> &CompositorHandle
@@ -74,7 +75,7 @@ pub fn expected_window_geometry(output_size: Size) -> Rect {
 ///
 /// Defaults are deterministic and isolated: `1280x800`, pixman, no app dirs beyond the
 /// env's own fixture dir, 4096-slot event broadcast, 5 s shutdown bound, process env
-/// scoped to the runtime.
+/// scoped to the runtime, the env's private AGP socket and the VAP viewer enabled.
 #[derive(Debug, Clone)]
 pub struct TestRuntimeConfig {
     /// Virtual output size (default [`DEFAULT_OUTPUT_SIZE`]).
@@ -105,6 +106,14 @@ pub struct TestRuntimeConfig {
     /// `XDG_RUNTIME_DIR`), and always restored afterwards when this is `false`; see
     /// [`crate::env`].
     pub apply_env: bool,
+    /// Explicit AGP socket path override; `None` pins [`TestEnv::agp_socket`] (the
+    /// runtime's private `…/runtime/adesk.sock`).
+    pub agp_socket: Option<PathBuf>,
+    /// Whether to serve the VAP viewer endpoint (default `true`, the server's own default).
+    ///
+    /// When `false`, [`TestRuntime::start_with`] calls `ServerConfig::without_viewer`, so the
+    /// runtime binds no viewer socket.
+    pub viewer: bool,
 }
 
 impl Default for TestRuntimeConfig {
@@ -117,6 +126,8 @@ impl Default for TestRuntimeConfig {
             shutdown_timeout: DEFAULT_SHUTDOWN_TIMEOUT,
             socket_name: None,
             apply_env: true,
+            agp_socket: None,
+            viewer: true,
         }
     }
 }
@@ -172,6 +183,24 @@ impl TestRuntimeConfig {
     /// Enables or disables process-env scoping.
     pub fn with_apply_env(mut self, apply: bool) -> TestRuntimeConfig {
         self.apply_env = apply;
+        self
+    }
+
+    /// Overrides the AGP Unix socket path (default [`TestEnv::agp_socket`]).
+    ///
+    /// The parent directory must already exist; [`TestRuntime::socket_path`] returns exactly
+    /// the configured path and [`TestRuntime::client`] connects to it.
+    pub fn with_agp_socket(mut self, path: impl Into<PathBuf>) -> TestRuntimeConfig {
+        self.agp_socket = Some(path.into());
+        self
+    }
+
+    /// Enables or disables the VAP viewer endpoint (`true` by default).
+    ///
+    /// With `false` the runtime binds no viewer socket
+    /// (`adesk_server::config::viewer_socket_sibling` is never created).
+    pub fn with_viewer(mut self, enabled: bool) -> TestRuntimeConfig {
+        self.viewer = enabled;
         self
     }
 }
@@ -259,8 +288,15 @@ impl TestRuntime {
             .map(|root| root.join("applications"))
             .collect::<Vec<_>>();
 
-        let server_config =
-            ServerConfig::new(env.agp_socket().to_path_buf(), compositor).with_app_dirs(app_dirs);
+        // The AGP socket defaults to the env's private path; an explicit override wins.
+        let agp_socket = config
+            .agp_socket
+            .clone()
+            .unwrap_or_else(|| env.agp_socket().to_path_buf());
+        let mut server_config = ServerConfig::new(agp_socket, compositor).with_app_dirs(app_dirs);
+        if !config.viewer {
+            server_config = server_config.without_viewer();
+        }
 
         let running = match Server::start(server_config).await {
             Ok(running) => running,

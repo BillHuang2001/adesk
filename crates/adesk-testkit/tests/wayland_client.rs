@@ -5,15 +5,15 @@
 //! configures, commit events, captured pixels against the [`FillPattern`] ground truth,
 //! window destruction, popups and resizes.
 //!
-//! # Process-environment hazard
+//! # Process environment
 //!
-//! The Wayland test client itself connects by absolute socket path, but the compositor
-//! binds its listening socket under the process `XDG_RUNTIME_DIR`
-//! (`adesk-compositor`'s `socket` module: `ListeningSocket` requires it), so a runtime
-//! whose socket a client connects to must scope the process env to its own
-//! [`TestEnv`](adesk_testkit::TestEnv). Every test here therefore uses
-//! [`TestRuntimeConfig::with_apply_env`]`(true)`; the harness serializes env-scoped
-//! runtimes within one test binary itself, so no `--test-threads=1` is required.
+//! The compositor binds its listening socket under the process `XDG_RUNTIME_DIR`
+//! (`adesk-compositor`'s `socket` module: `ListeningSocket` requires it), but the harness
+//! applies that env only across `Server::start` and restores it as soon as the runtime is
+//! up. Nothing here launches an application and the Wayland client connects by absolute
+//! socket path, so the env is not needed afterwards: every test therefore uses
+//! [`TestRuntimeConfig::with_apply_env`]`(false)`, which releases the harness's process-wide
+//! env lock as soon as the server is up, so the tests run in parallel.
 
 use std::time::Duration;
 
@@ -28,11 +28,11 @@ const DEADLINE: Duration = Duration::from_secs(10);
 
 /// A runtime whose Wayland socket a client can connect to.
 ///
-/// The compositor binds `XDG_RUNTIME_DIR/<display>` from the *process* environment, so the
-/// env must be scoped to this runtime for the socket to land in the runtime's own temp dir
-/// (see the module docs); the harness serializes env-scoped runtimes itself.
+/// Nothing is launched and the client connects by absolute path, so the process env is only
+/// needed across startup: `apply_env(false)` lets the harness release the process-wide env
+/// lock as soon as the server is up (see the module docs).
 fn wayland_config() -> TestRuntimeConfig {
-    TestRuntimeConfig::new().with_apply_env(true)
+    TestRuntimeConfig::new().with_apply_env(false)
 }
 
 /// Creates a toplevel, waits for the compositor's configure and acknowledges it.
