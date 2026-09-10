@@ -144,6 +144,14 @@ Painters preserve input order for windows, damage rects and action markers.
   shared kind appears later in `adesk-observer`/`adesk-proto`, the mapping is one `From` impl.
 - `OverlayStyle::default` uses stable debug colours (white outlines/text, translucent red damage,
   green focus, yellow cursor, cyan actions, magenta timing) so tests can pin exact pixels.
+- There is **no per-kind colour function**: each painter reads shared `OverlayStyle` fields, so a
+  kind's "colour" is whichever field it reads. `window_ids` and `app_ids` label with `text`
+  (white) over the `plate`; `surface_bounds` outlines with `outline` (white); `focus` outlines
+  *and* labels with `focus` (green); `damage` fills with `fill` (`rgba(255,0,0,48)`) then outlines
+  with `outline` (white); `cursor` crosshairs with `cursor` (yellow); `actions` markers/labels use
+  `action` (cyan); `commit_timing` uses `timing` (magenta). All eight kinds have a colour.
+- Overlay kinds are `adesk_core::OverlayKind` (there is no local mirror); every painter and
+  `paint::overlay`/`order_index` match all eight variants exhaustively.
 
 ## Cross-crate contract with `adesk-render`
 
