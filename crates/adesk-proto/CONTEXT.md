@@ -63,7 +63,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | Spec defaults used by `#[serde(default = ...)]` | `src/defaults.rs` (crate-private) |
 | Protocol vocabulary types | `src/types.rs` |
 | Type-level + golden-JSON tests | `tests/wire.rs` |
-| Frame-level acceptance spec | `tests/codec.rs` |
+| Frame-envelope NDJSON goldens (exact request lines + full round-trip) | `tests/codec.rs` |
 | Method round-trip + golden JSON tests | `tests/methods_roundtrip.rs` |
 | Frame/event/codec round-trip tests | `tests/frames_events_roundtrip.rs` |
 | Image payload tests | `tests/image_roundtrip.rs` |
