@@ -19,6 +19,7 @@ use adesk_core::{
 use adesk_wm::WmAction;
 use smithay::{
     backend::renderer::utils::with_renderer_surface_state,
+    desktop::PopupManager,
     input::{Seat, SeatState},
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -76,6 +77,14 @@ pub(crate) struct State {
     pub(crate) compositor_state: CompositorState,
     /// `xdg-shell` state.
     pub(crate) xdg_shell_state: XdgShellState,
+    /// Smithay's popup-tree bookkeeping, populated by `new_popup` and kept current by
+    /// every popup commit.
+    ///
+    /// The composition path reads popups from this tree
+    /// (`PopupManager::popups_for_surface`), because Smithay's element walker skips
+    /// them; without it a popup would be tracked in ADesk's window model but never
+    /// rendered into its owner.
+    pub(crate) popup_manager: PopupManager,
     /// `wl_seat` state (one seat, keyboard + pointer).
     pub(crate) seat_state: SeatState<State>,
     /// The single seat handle (cloneable; used for injection and focus).
@@ -151,6 +160,7 @@ impl State {
             input,
             compositor_state,
             xdg_shell_state,
+            popup_manager: PopupManager::default(),
             seat_state,
             seat,
             shm_state,
