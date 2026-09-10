@@ -10,7 +10,7 @@ The capstone e2e suite drives `AgpClient` and `AgentLoop` against a live in-proc
 
 ## API Surface
 Flat re-exports at the crate root; the module list below is the authoritative surface.
-### Loop (`src/agent_loop.rs`)
+### Loop (`src/agent_loop/`)
 - `AgentLoop<C: AgentClient, P: LlmProvider>` — `new(client, provider, config)`, `run(&TaskDescription) -> Result<LoopOutcome>`, plus `config()`, `metrics()`, `history()`, `context()`, `last_action_id()`.
 - `LoopConfig` — `max_steps` (20), `step_timeout_ms` (30s), `observe_after_input` (true), `quiet_ms` (250), `observe_timeout_ms` (5s), `include_image` (true), `capture_max_dimension` (`Some(1024)`), `max_consecutive_failures` (3), `retries_per_step` (2), `retry_backoff_ms` (200), `validate_protocol_version` (true), `context_budget`.
 - `LoopOutcome { success, summary, steps, stop_reason, metrics, history }`, `StepRecord`, `StepStatus { Ok, Recovered, Failed, Finished }`, `StopReason { Finished, StepBudgetExhausted, FailureBudgetExhausted, FatalError }`.
@@ -61,7 +61,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 ## Routing Table
 | Area | Owner |
 |---|---|
-| Loop control flow, budgets, recovery | `./src/agent_loop.rs` |
+| Loop control flow, budgets, recovery | `./src/agent_loop/` |
 | Bounded context assembly + budgeting rules | `./src/context.rs` |
 | Decision vocabulary + serde schema | `./src/decision.rs` |
 | `AgentClient` trait + AGP request/result types | `./src/client.rs` |
