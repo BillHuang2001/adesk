@@ -6,7 +6,7 @@
 //!
 //! Import happens synchronously on the compositor thread through the concrete
 //! renderer — both backends implement
-//! [`ImportDma`](smithay::backend::renderer::ImportDma): `GlesRenderer` through an
+//! [`ImportDma`]: `GlesRenderer` through an
 //! EGL image, `PixmanRenderer` by mapping the dmabuf. The renderer keeps its own
 //! reference to the imported texture (keyed by the weak dmabuf, dropped when the
 //! client's buffer is gone), so the handle returned here is only used to learn

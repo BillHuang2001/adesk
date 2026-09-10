@@ -2,7 +2,7 @@
 //!
 //! The compositor injects input as *keycodes* plus modifier state, but AGP
 //! speaks keysyms. [`KeymapTable`] bridges the two: it compiles the configured
-//! xkb keymap once (the same [`XkbSettings`](crate::config::XkbSettings) the
+//! xkb keymap once (the same [`XkbSettings`] the
 //! seat uses) and records, for every keysym the keymap can produce, the first
 //! physical key and shift level that produces it.
 //!
