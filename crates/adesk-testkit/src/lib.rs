@@ -10,7 +10,10 @@
 //!   Wayland display name.
 //! - [`WaylandTestClient`] — a `wayland-client`-based client that speaks the *real*
 //!   protocol path: it creates `xdg_toplevel`/`xdg_popup` surfaces, commits known SHM
-//!   fills, answers configures and destroys windows. No shortcuts into compositor state.
+//!   fills, answers configures, destroys windows, records `wl_pointer`/`wl_keyboard`
+//!   events ([`PointerEvent`]/[`KeyboardEvent`]) and exchanges clipboard payloads over
+//!   `wl_data_device` ([`WaylandTestClient::set_selection`] /
+//!   [`WaylandTestClient::read_selection`]). No shortcuts into compositor state.
 //! - [`FixtureDir`] / [`DesktopEntryFixture`] / [`TestApp`] — `.desktop` fixture writing
 //!   and a helper process that opens a real toplevel for launch tests.
 //! - [`ImageAssert`] / [`EventAssert`] / [`wait_until`] — pixel and event assertions with
@@ -91,6 +94,4 @@ pub use wayland::{
     AxisKind, ButtonState, ConfiguredSize, KeyboardEvent, KeyState, ModifiersState, PointerEvent,
     PopupSpec, PumpStats, TestPopup, TestWindow, ToplevelSpec, WaylandTestClient,
     BTN_LEFT, DEFAULT_SELECTION_TIMEOUT, KEY_C, KEY_LEFTCTRL,
-};
-ze, PopupSpec, PumpStats, TestPopup, TestWindow, ToplevelSpec, WaylandTestClient,
 };
