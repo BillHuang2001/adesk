@@ -79,11 +79,133 @@ impl IdAllocator {
     }
 }
 
+/// Behavior a [`Registry`] expects from the entries it stores: an id for lookup
+/// and removal, the owning connection, and the outbound sink.
+trait RegistryEntry {
+    /// Id handed to the client.
+    fn entry_id(&self) -> SubscriptionId;
+    /// Owning connection.
+    fn entry_connection(&self) -> SessionId;
+    /// Destination queue.
+    fn entry_sink(&self) -> &EventSink;
+}
+
+/// Registry of id-stamped, connection-owned entries.
+///
+/// [`SubscriptionRegistry`] and [`InspectRegistry`] differ only in their payload
+/// type, so the storage, the id allocation and the lock discipline live here
+/// once; each wrapper adds just its `subscribe` constructor and its payload
+/// accessor.
+struct Registry<T> {
+    inner: Arc<Mutex<Vec<T>>>,
+    ids: IdAllocator,
+}
+
+impl<T> Clone for Registry<T> {
+    fn clone(&self) -> Registry<T> {
+        Registry {
+            inner: Arc::clone(&self.inner),
+            ids: self.ids.clone(),
+        }
+    }
+}
+
+impl<T> Default for Registry<T> {
+    fn default() -> Registry<T> {
+        Registry {
+            inner: Arc::new(Mutex::new(Vec::new())),
+            ids: IdAllocator::default(),
+        }
+    }
+}
+
+impl<T: RegistryEntry> Registry<T> {
+    /// Stores an entry built from a freshly allocated id; returns that id.
+    fn insert(&self, build: impl FnOnce(SubscriptionId) -> T) -> SubscriptionId {
+        let id = self.ids.next();
+        self.lock().push(build(id));
+        id
+    }
+
+    /// Removes one entry; returns whether it existed.
+    fn unsubscribe(&self, id: SubscriptionId) -> bool {
+        let mut entries = self.lock();
+        let before = entries.len();
+        entries.retain(|entry| entry.entry_id() != id);
+        entries.len() != before
+    }
+
+    /// Removes every entry of a connection; returns their ids.
+    fn remove_connection(&self, connection: SessionId) -> Vec<SubscriptionId> {
+        let mut entries = self.lock();
+        let mut removed = Vec::new();
+        entries.retain(|entry| {
+            if entry.entry_connection() == connection {
+                removed.push(entry.entry_id());
+                false
+            } else {
+                true
+            }
+        });
+        removed
+    }
+
+    /// Whether an entry with `id` is still registered (no payload clone).
+    fn contains(&self, id: SubscriptionId) -> bool {
+        self.lock().iter().any(|entry| entry.entry_id() == id)
+    }
+
+    /// Drops every entry whose sink is closed; returns how many were dropped.
+    fn prune_closed(&self) -> usize {
+        let mut entries = self.lock();
+        let before = entries.len();
+        entries.retain(|entry| !entry.entry_sink().is_closed());
+        before - entries.len()
+    }
+
+    /// A snapshot of the live entries, for callers that need the payloads.
+    fn list(&self) -> Vec<T>
+    where
+        T: Clone,
+    {
+        self.lock().clone()
+    }
+
+    /// Number of live entries.
+    fn len(&self) -> usize {
+        self.lock().len()
+    }
+
+    /// Whether there are no entries.
+    fn is_empty(&self) -> bool {
+        self.lock().is_empty()
+    }
+
+    /// Locks the entry list, ignoring poisoning: a panic in another thread must
+    /// not turn every later operation into a panic.
+    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<T>> {
+        self.inner.lock().unwrap_or_else(|error| error.into_inner())
+    }
+}
+
+impl RegistryEntry for Subscription {
+    fn entry_id(&self) -> SubscriptionId {
+        self.id
+    }
+
+    fn entry_connection(&self) -> SessionId {
+        self.connection
+    }
+
+    fn entry_sink(&self) -> &EventSink {
+        &self.sink
+    }
+}
+
 /// Registry of event subscriptions shared by all connections.
 #[derive(Clone, Default)]
 pub struct SubscriptionRegistry {
-    inner: Arc<Mutex<Vec<Subscription>>>,
-    ids: IdAllocator,
+    registry: Registry<Subscription>,
 }
 
 impl SubscriptionRegistry {
@@ -100,38 +222,23 @@ impl SubscriptionRegistry {
         window_id: Option<WindowId>,
         sink: EventSink,
     ) -> SubscriptionId {
-        let id = self.ids.next();
-        self.lock().push(Subscription {
+        self.registry.insert(|id| Subscription {
             id,
             connection,
             kinds,
             window_id,
             sink,
-        });
-        id
+        })
     }
 
     /// Removes one subscription; returns whether it existed.
     pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
-        let mut subscriptions = self.lock();
-        let before = subscriptions.len();
-        subscriptions.retain(|subscription| subscription.id != id);
-        subscriptions.len() != before
+        self.registry.unsubscribe(id)
     }
 
     /// Removes every subscription of a connection; returns their ids.
     pub fn remove_connection(&self, connection: SessionId) -> Vec<SubscriptionId> {
-        let mut subscriptions = self.lock();
-        let mut removed = Vec::new();
-        subscriptions.retain(|subscription| {
-            if subscription.connection == connection {
-                removed.push(subscription.id);
-                false
-            } else {
-                true
-            }
-        });
-        removed
+        self.registry.remove_connection(connection)
     }
 
     /// Delivers `event` to every matching subscription as an `EventFrame`.
@@ -140,7 +247,7 @@ impl SubscriptionRegistry {
     /// queue drops the frame (the client observes a gap, `adesk-client` reports
     /// `Lagged`), a closed queue removes the subscription.
     pub fn fan_out(&self, event: &RuntimeEvent) {
-        let mut subscriptions = self.lock();
+        let mut subscriptions = self.registry.lock();
         if subscriptions.is_empty() {
             return;
         }
@@ -163,18 +270,12 @@ impl SubscriptionRegistry {
 
     /// Number of live subscriptions.
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.registry.len()
     }
 
     /// Whether there are no subscriptions.
     pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    /// Locks the subscription list, ignoring poisoning: a panic in another
-    /// thread must not turn every later subscription into a panic.
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<Subscription>> {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner())
+        self.registry.is_empty()
     }
 }
 
@@ -193,11 +294,24 @@ pub struct InspectSubscription {
     pub sink: EventSink,
 }
 
+impl RegistryEntry for InspectSubscription {
+    fn entry_id(&self) -> SubscriptionId {
+        self.id
+    }
+
+    fn entry_connection(&self) -> SessionId {
+        self.connection
+    }
+
+    fn entry_sink(&self) -> &EventSink {
+        &self.sink
+    }
+}
+
 /// Registry of inspector streams shared by all connections.
 #[derive(Clone, Default)]
 pub struct InspectRegistry {
-    inner: Arc<Mutex<Vec<InspectSubscription>>>,
-    ids: IdAllocator,
+    registry: Registry<InspectSubscription>,
 }
 
 impl InspectRegistry {
@@ -214,58 +328,48 @@ impl InspectRegistry {
         min_interval_ms: u64,
         sink: EventSink,
     ) -> SubscriptionId {
-        let id = self.ids.next();
-        self.lock().push(InspectSubscription {
+        self.registry.insert(|id| InspectSubscription {
             id,
             connection,
             overlays,
             min_interval_ms,
             sink,
-        });
-        id
+        })
     }
 
     /// Removes one stream; returns whether it existed.
     pub fn unsubscribe(&self, id: SubscriptionId) -> bool {
-        let mut streams = self.lock();
-        let before = streams.len();
-        streams.retain(|stream| stream.id != id);
-        streams.len() != before
+        self.registry.unsubscribe(id)
     }
 
     /// Removes every stream of a connection; returns their ids.
     pub fn remove_connection(&self, connection: SessionId) -> Vec<SubscriptionId> {
-        let mut streams = self.lock();
-        let mut removed = Vec::new();
-        streams.retain(|stream| {
-            if stream.connection == connection {
-                removed.push(stream.id);
-                false
-            } else {
-                true
-            }
-        });
-        removed
+        self.registry.remove_connection(connection)
+    }
+
+    /// Whether a stream with `id` is still registered (no payload clone).
+    pub(crate) fn contains(&self, id: SubscriptionId) -> bool {
+        self.registry.contains(id)
+    }
+
+    /// Drops every stream whose sink is closed; returns how many were dropped.
+    pub(crate) fn prune_closed(&self) -> usize {
+        self.registry.prune_closed()
     }
 
     /// A snapshot of the live streams, for the throttled push loop.
     pub fn list(&self) -> Vec<InspectSubscription> {
-        self.lock().clone()
+        self.registry.list()
     }
 
     /// Number of live streams.
     pub fn len(&self) -> usize {
-        self.lock().len()
+        self.registry.len()
     }
 
     /// Whether there are no streams.
     pub fn is_empty(&self) -> bool {
-        self.lock().is_empty()
-    }
-
-    /// Locks the stream list, ignoring poisoning (see [`SubscriptionRegistry`]).
-    fn lock(&self) -> std::sync::MutexGuard<'_, Vec<InspectSubscription>> {
-        self.inner.lock().unwrap_or_else(|error| error.into_inner())
+        self.registry.is_empty()
     }
 }
 
@@ -639,5 +743,46 @@ mod tests {
         assert!(registry.unsubscribe(id));
         assert!(registry.is_empty());
         assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn inspect_contains_reports_only_registered_ids() {
+        let registry = InspectRegistry::new();
+        let (sink, _rx) = mpsc::channel(1);
+        let id = registry.subscribe(1, vec![OverlayKind::Focus], 0, sink);
+
+        assert!(registry.contains(id));
+        assert!(
+            !registry.contains(id + 1),
+            "an id that was never registered is not live"
+        );
+
+        registry.unsubscribe(id);
+        assert!(
+            !registry.contains(id),
+            "an unsubscribed id is no longer live"
+        );
+    }
+
+    #[test]
+    fn prune_closed_drops_only_streams_whose_sink_is_gone() {
+        let registry = InspectRegistry::new();
+        let (live, _live_rx) = mpsc::channel(1);
+        let (dead, dead_rx) = mpsc::channel(1);
+        let live_id = registry.subscribe(1, Vec::new(), 0, live);
+        let dead_id = registry.subscribe(2, Vec::new(), 0, dead);
+        drop(dead_rx);
+
+        assert_eq!(registry.prune_closed(), 1);
+        assert!(registry.contains(live_id));
+        assert!(!registry.contains(dead_id));
+        assert_eq!(registry.len(), 1);
+
+        assert_eq!(
+            registry.prune_closed(),
+            0,
+            "pruning an all-live registry is a no-op"
+        );
+        assert_eq!(registry.len(), 1);
     }
 }

@@ -160,12 +160,11 @@ async fn inspect_loop(
 /// Refreshes the inspection cache and returns the fresh snapshot.
 ///
 /// `adesk-inspector` is synchronous and never blocks the compositor, so the
-/// cache is the only bridge: the snapshot is stored before
-/// `InspectionSource::inspection_input` reads it.
+/// cache is the only bridge: `inspection::refresh` stores the snapshot it built
+/// before `InspectionSource::inspection_input` reads it, so this is a thin
+/// forwarding wrapper (no second full-frame copy).
 async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
-    let snapshot = inspection::refresh(context).await?;
-    context.inspection.store(snapshot.clone());
-    Ok(snapshot)
+    inspection::refresh(context).await
 }
 
 /// Renders one composed inspection frame: refresh, overlay, encode PNG.
@@ -194,12 +193,11 @@ async fn render_frame(
 
 /// Whether the subscription is still registered, so `unsubscribe_events` and a
 /// disconnect stop the loop.
+///
+/// A cheap id probe under the registry lock (`InspectRegistry::contains`) — so
+/// the per-frame check never clones the live streams.
 fn subscription_alive(context: &ServerContext, subscription_id: SubscriptionId) -> bool {
-    context
-        .inspect_subscriptions
-        .list()
-        .iter()
-        .any(|subscription| subscription.id == subscription_id)
+    context.inspect_subscriptions.contains(subscription_id)
 }
 
 /// The size a composed frame is derived from: the requested crop clipped to the
