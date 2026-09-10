@@ -8,6 +8,9 @@
 pub mod mock;
 pub mod podman;
 
+pub use mock::MockRuntime;
+pub use podman::PodmanRuntime;
+
 use async_trait::async_trait;
 
 use crate::error::Result;
