@@ -51,8 +51,12 @@ tracing-subscriber.workspace = true
 # E2E suites in ./tests/ drive a live runtime through the typed client SDK on
 # temp sockets; wire-only AGP cases use the suites' own NDJSON `RawClient`. The
 # viewer suite polls the typed `adesk_viewer::ViewerClient` streams (frames,
-# input acks), so it is the one place that needs `futures`. Suites that need a
-# Wayland client live in adesk-testkit / adesk-agent — see ./tests/CONTEXT.md.
+# input acks), so it is the one place that needs `futures`.
+# `adesk-testkit` is a dev-dependency so the viewer suite can connect the
+# in-repo Wayland test client to the runtime's own display and drive real
+# viewer input into a mapped toplevel (the same dev-dependency cycle
+# `crates/adesk-compositor` already uses) — see ./tests/CONTEXT.md.
 adesk-client.workspace = true
+adesk-testkit.workspace = true
 futures.workspace = true
 tempfile.workspace = true
