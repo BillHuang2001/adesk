@@ -46,6 +46,19 @@ fn coalesce_drops_rects_below_min_area() {
 }
 
 #[test]
+fn coalesce_min_area_keeps_survivors_sorted() {
+    let raw = region(&[
+        Rect::new(50, 50, 10, 10),
+        Rect::new(0, 0, 2, 2), // below `min_area`, dropped
+        Rect::new(30, 10, 6, 6),
+    ]);
+    let merged = coalesce_damage(&raw, &Rect::new(0, 0, 100, 100), 10);
+    assert_eq!(
+        merged.rects(),
+        &[Rect::new(30, 10, 6, 6), Rect::new(50, 50, 10, 10)]
+    );
+}
+#[test]
 fn coalesce_of_empty_region_is_empty() {
     let merged = coalesce_damage(&Region::empty(), &Rect::new(0, 0, 10, 10), 0);
     assert!(merged.is_empty());
