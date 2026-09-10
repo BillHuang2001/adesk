@@ -11,6 +11,11 @@
 //! (`get_window`, `activate_window`, `close_window`, every §5.5 method) must
 //! answer the protocol-correct `unknown_window` code (§6): the server delegates
 //! to `CompositorError::code()`, so the assertions here are the specification.
+//!
+//! The companion §5.5 case is a *keyboard* call with no `window_id`: the server
+//! then skips activation and hands the command to a seat that has no keyboard
+//! focus, whose rejection surfaces as `invalid_request` — the same delegation,
+//! read on the other branch.
 
 mod common;
 
@@ -215,5 +220,50 @@ fn input_on_unknown_window_is_unknown_window() {
     expect_ok(
         t.block_on_timeout(client.ping()),
         "ping after the input matrix must still succeed",
+    );
+}
+
+#[test]
+fn keyboard_methods_without_window_id_answer_invalid_request() {
+    let t = TestRuntime::start();
+    let client = t.connect();
+
+    // Without a `window_id` the server skips activation and sends the key
+    // command straight to the compositor. No Wayland client ever connected, so
+    // no window holds the seat's keyboard focus and the compositor rejects the
+    // command; the server delegates to `CompositorError::code()`, so the wire
+    // must carry `invalid_request` (§6) — for every keyboard method, including
+    // `type_text`, whose "unmappable key" skip only covers keymap failures.
+    assert_error_code(
+        t.block_on_timeout(client.keypress("a", None)),
+        ErrorCode::InvalidRequest,
+        "keypress(\"a\", window_id: None) with no keyboard focus",
+    );
+    assert_error_code(
+        t.block_on_timeout(client.key_down("a", None)),
+        ErrorCode::InvalidRequest,
+        "key_down(\"a\", window_id: None) with no keyboard focus",
+    );
+    assert_error_code(
+        t.block_on_timeout(client.key_up("a", None)),
+        ErrorCode::InvalidRequest,
+        "key_up(\"a\", window_id: None) with no keyboard focus",
+    );
+    assert_error_code(
+        t.block_on_timeout(client.type_text("hi", None)),
+        ErrorCode::InvalidRequest,
+        "type_text(\"hi\", window_id: None) with no keyboard focus",
+    );
+
+    // A rejection is an ordinary error response, not a panic or a closed
+    // connection: the session must still serve requests (§6).
+    let ping = expect_ok(
+        t.block_on_timeout(client.ping()),
+        "ping after the no-focus keyboard matrix must still succeed",
+    );
+    assert_eq!(
+        ping.protocol_version,
+        adesk_server::PROTOCOL_VERSION,
+        "ping after the no-focus keyboard matrix must report the server's protocol version"
     );
 }
