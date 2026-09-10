@@ -1,1 +1,775 @@
 //! Per-connection viewer session: handshake, select loop and frame pacing.
+//!
+//! `run_session` is the machinery behind
+//! [`ViewerServer::serve`](crate::server::ViewerServer::serve). It drives **one**
+//! viewer connection over any `AsyncRead + AsyncWrite` stream:
+//!
+//! 1. it reads and validates the mandatory `ViewerHello` handshake and replies
+//!    with the backend's `ServerHello` (`docs/viewer.md` §2);
+//! 2. it then runs a single `select!` loop that applies the viewer's messages in
+//!    submission order (`docs/viewer.md` §5) and pushes frames **on demand** —
+//!    only when the backend reports a desktop change or the pacing timer fires,
+//!    never on a background loop (`docs/viewer.md` §5).
+//!
+//! The session owns no transport: `serve` receives an already-connected stream.
+//! No pixel payload or message body is ever logged; only message types and
+//! counts at `debug`/`trace`.
+
+use std::sync::Arc;
+use std::time::Duration;
+
+use adesk_core::ErrorCode;
+use adesk_viewer_proto::{
+    check_version, decode_client, encode_server, ClientMessage, ServerMessage, ViewerHello,
+};
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
+use tokio::time::Instant;
+
+use crate::backend::{ViewerBackend, ViewerInput};
+use crate::error::{Result, ViewerError};
+use crate::server::{PeerInfo, ViewerServerConfig};
+use crate::transport::{read_line, write_line};
+
+/// Runs one viewer connection to completion (`docs/viewer.md` §2–§6).
+///
+/// `stream` is an already-connected bidirectional byte stream; `peer` is a log
+/// label only. The function returns `Ok(())` once the viewer leaves (EOF, `bye`,
+/// or a handshake/protocol violation that closes the connection) and `Err` only
+/// when the transport itself fails.
+///
+/// # Errors
+///
+/// Returns [`ViewerError::Io`] on a stream failure, and
+/// [`ViewerError::Handshake`] when the viewer never sends a `hello` (timeout or
+/// EOF before it).
+pub(crate) async fn run_session<B, S>(
+    backend: &Arc<B>,
+    config: &ViewerServerConfig,
+    stream: S,
+    peer: &PeerInfo,
+) -> Result<()>
+where
+    B: ViewerBackend,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let (read_half, mut write) = tokio::io::split(stream);
+    let mut read = BufReader::new(read_half);
+
+    // --- Handshake (§2) -----------------------------------------------------
+    // `perform_handshake` returns the validated hello, or `None` after it has
+    // already answered the viewer with an `error` and the connection must close.
+    let hello = match perform_handshake(&mut read, &mut write, config, peer).await? {
+        Some(hello) => hello,
+        None => return Ok(()),
+    };
+
+    // Negotiated connection settings (§2). An empty overlay list and a
+    // `min_interval_ms` of `0` mean "use the server default". Because
+    // `ViewerServerConfig::default().default_min_interval_ms` is `0`, a viewer
+    // that asks for no pacing also gets no pacing by default (§2).
+    //
+    // Overlays are negotiated for the connection's lifetime but v1 does not
+    // plumb them into rendering: `ViewerBackend::render_frame` takes no overlay
+    // argument, so the runtime backend owns its overlay set (§2). We only record
+    // the negotiated set here for the debug log.
+    let overlays = if hello.overlays.is_empty() {
+        config.default_overlays.clone()
+    } else {
+        hello.overlays.clone()
+    };
+    let min_interval_ms = if hello.min_interval_ms == 0 {
+        config.default_min_interval_ms
+    } else {
+        hello.min_interval_ms
+    };
+    tracing::debug!(
+        peer = %peer,
+        client = ?hello.client,
+        min_interval_ms,
+        overlays = ?overlays,
+        "viewer handshake accepted"
+    );
+
+    // Handshake reply (§2).
+    send(&mut write, &ServerMessage::Hello(backend.display())).await?;
+
+    // --- Select loop (§5) ---------------------------------------------------
+    let change = backend.change_signal();
+    let interval = Duration::from_millis(min_interval_ms);
+    // Time of the last pushed frame; `None` before the first frame, so the first
+    // change flushes immediately even when paced.
+    let mut last_sent: Option<Instant> = None;
+    // A desktop change arrived while the pacing interval had not yet elapsed.
+    let mut pending = false;
+
+    loop {
+        // The pacing arm is armed only while a change is pending; otherwise it is
+        // a never-resolving future so the loop only wakes on input or a change.
+        // `pending`, `last_sent` and `interval` are `Copy`, so this copies them.
+        let pacing = async move {
+            if pending {
+                let deadline = last_sent.map_or_else(Instant::now, |last| last + interval);
+                tokio::time::sleep_until(deadline).await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+
+        tokio::select! {
+            inbound = read_line(&mut read, config.max_frame_len) => {
+                let line = match inbound {
+                    Ok(Some(line)) => line,
+                    // Clean EOF: the viewer went away (§5).
+                    Ok(None) => return Ok(()),
+                    // Framing corruption (over-cap line or invalid UTF-8) is a
+                    // protocol error that closes the connection (§6).
+                    Err(ViewerError::Transport(_)) => {
+                        send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
+                        return Ok(());
+                    }
+                    Err(error) => return Err(error),
+                };
+
+                let message = match decode_client(&line) {
+                    Ok(message) => message,
+                    Err(_) => {
+                        send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
+                        return Ok(());
+                    }
+                };
+
+                match handle_message(backend, &mut write, message).await? {
+                    Disposition::Continue => {}
+                    Disposition::Close => return Ok(()),
+                }
+            }
+            () = change.changed() => {
+                // A desktop change: push a frame now if pacing allows, else
+                // collapse it into the pending change (§5).
+                if interval.is_zero()
+                    || last_sent.map_or(true, |last| last.elapsed() >= interval)
+                {
+                    push_frame(backend, &mut write).await?;
+                    last_sent = Some(Instant::now());
+                    pending = false;
+                } else {
+                    pending = true;
+                }
+            }
+            () = pacing => {
+                // The pacing deadline fired: flush the collapsed pending change.
+                pending = false;
+                push_frame(backend, &mut write).await?;
+                last_sent = Some(Instant::now());
+            }
+        }
+    }
+}
+
+/// Whether the session keeps running after handling a message.
+enum Disposition {
+    /// Keep the connection open.
+    Continue,
+    /// Close the connection with a successful session result.
+    Close,
+}
+
+/// Reads and validates the handshake, answering a refused viewer
+/// (`docs/viewer.md` §2).
+///
+/// Returns `Ok(Some(hello))` when the viewer may proceed. Returns `Ok(None)`
+/// after answering an invalid handshake with a VAP `error`, in which case the
+/// caller closes the connection. Transport failures are propagated as `Err`.
+async fn perform_handshake<R, W>(
+    read: &mut R,
+    write: &mut W,
+    config: &ViewerServerConfig,
+    peer: &PeerInfo,
+) -> Result<Option<ViewerHello>>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    // §2: the first message must arrive within the handshake timeout.
+    let line = match tokio::time::timeout(
+        config.handshake_timeout,
+        read_line(read, config.max_frame_len),
+    )
+    .await
+    {
+        Ok(result) => result?,
+        Err(_elapsed) => {
+            tracing::debug!(peer = %peer, "viewer handshake timed out");
+            return Err(ViewerError::Handshake("handshake timed out".to_owned()));
+        }
+    };
+
+    let line = match line {
+        Some(line) => line,
+        None => {
+            tracing::debug!(peer = %peer, "viewer closed before hello");
+            return Err(ViewerError::Handshake(
+                "connection closed before hello".to_owned(),
+            ));
+        }
+    };
+
+    let hello = match decode_client(&line) {
+        Ok(ClientMessage::Hello(hello)) => hello,
+        // A malformed first line is refused (§2).
+        Err(_) => {
+            send_error(
+                write,
+                ErrorCode::InvalidRequest,
+                "malformed handshake message",
+            )
+            .await?;
+            return Ok(None);
+        }
+        // Anything but a `hello` (including `Unknown`) is refused (§2).
+        Ok(_) => {
+            send_error(write, ErrorCode::InvalidRequest, "expected hello").await?;
+            return Ok(None);
+        }
+    };
+
+    // A version mismatch is a hard error: the server answers `error` with
+    // `protocol_version_mismatch` and closes (§2).
+    if let Err(mismatch) = check_version(hello.protocol_version) {
+        send_error(write, mismatch.error_code(), mismatch.to_string()).await?;
+        return Ok(None);
+    }
+
+    Ok(Some(hello))
+}
+
+/// Handles one decoded client message, applying it in submission order
+/// (`docs/viewer.md` §4, §5).
+async fn handle_message<B, W>(
+    backend: &Arc<B>,
+    write: &mut W,
+    message: ClientMessage,
+) -> Result<Disposition>
+where
+    B: ViewerBackend,
+    W: AsyncWrite + Unpin,
+{
+    match message {
+        // Headless pull: render and push one frame now (§4, §5).
+        ClientMessage::RequestFrame { .. } => {
+            match backend.render_frame().await {
+                Ok(frame) => send(write, &ServerMessage::Frame(frame)).await?,
+                // A render failure answers `error` and keeps the connection open
+                // (§6).
+                Err(error) => send_error(write, ErrorCode::RenderFailed, error.to_string()).await?,
+            }
+            Ok(Disposition::Continue)
+        }
+        // Push the current desktop metadata (§4).
+        ClientMessage::RequestState { .. } => {
+            match backend.desktop_state().await {
+                Ok(state) => send(write, &ServerMessage::State(state)).await?,
+                Err(error) => send_error(write, ErrorCode::Internal, error.to_string()).await?,
+            }
+            Ok(Disposition::Continue)
+        }
+        ClientMessage::PointerMove { x, y } => {
+            apply_input(backend, write, ViewerInput::PointerMove { x, y }).await
+        }
+        ClientMessage::PointerButton {
+            button,
+            state,
+            x,
+            y,
+        } => {
+            apply_input(
+                backend,
+                write,
+                ViewerInput::PointerButton {
+                    button,
+                    state,
+                    x,
+                    y,
+                },
+            )
+            .await
+        }
+        ClientMessage::Scroll { dx, dy, x, y } => {
+            apply_input(backend, write, ViewerInput::Scroll { dx, dy, x, y }).await
+        }
+        ClientMessage::Key { keys, action } => {
+            apply_input(backend, write, ViewerInput::Key { keys, action }).await
+        }
+        ClientMessage::Text { text } => {
+            apply_input(backend, write, ViewerInput::Text { text }).await
+        }
+        // Advisory control handshake (§5).
+        ClientMessage::SetControl { owner } => {
+            match backend.set_control(owner).await {
+                Ok(()) => send(write, &ServerMessage::Control { owner }).await?,
+                Err(error) => send_error(write, ErrorCode::Internal, error.to_string()).await?,
+            }
+            Ok(Disposition::Continue)
+        }
+        // The viewer is leaving: acknowledge with `bye` and close (§4).
+        ClientMessage::Bye { reason } => {
+            let reason = reason.unwrap_or_else(|| "viewer left".to_owned());
+            send(write, &ServerMessage::Bye { reason }).await?;
+            Ok(Disposition::Close)
+        }
+        // A second handshake is a protocol error that closes (§2).
+        ClientMessage::Hello(_) => {
+            send_error(write, ErrorCode::InvalidRequest, "duplicate hello").await?;
+            Ok(Disposition::Close)
+        }
+        // Forward compatibility: ignore unknown types (§1).
+        ClientMessage::Unknown { message_type, .. } => {
+            tracing::trace!(message_type = %message_type, "ignoring unknown viewer message");
+            Ok(Disposition::Continue)
+        }
+    }
+}
+
+/// Applies one viewer input through the backend and answers with `input_ack`
+/// when the runtime recorded an action (`docs/viewer.md` §4, §5).
+///
+/// VAP input messages carry no client `id`, so the ack's `id` is always `None`.
+async fn apply_input<B, W>(
+    backend: &Arc<B>,
+    write: &mut W,
+    input: ViewerInput,
+) -> Result<Disposition>
+where
+    B: ViewerBackend,
+    W: AsyncWrite + Unpin,
+{
+    match backend.apply_input(input).await {
+        Ok(Some(action_id)) => {
+            send(
+                write,
+                &ServerMessage::InputAck {
+                    id: None,
+                    action_id,
+                },
+            )
+            .await?;
+        }
+        // Applied but no recorded action: nothing to acknowledge.
+        Ok(None) => {}
+        // Undeliverable input answers `error` and keeps the connection open (§6).
+        Err(error) => send_error(write, ErrorCode::InvalidRequest, error.to_string()).await?,
+    }
+    Ok(Disposition::Continue)
+}
+
+/// Renders one frame and pushes it, reporting a backend failure as `error`
+/// without closing the connection (`docs/viewer.md` §5, §6).
+async fn push_frame<B, W>(backend: &Arc<B>, write: &mut W) -> Result<()>
+where
+    B: ViewerBackend,
+    W: AsyncWrite + Unpin,
+{
+    match backend.render_frame().await {
+        Ok(frame) => send(write, &ServerMessage::Frame(frame)).await,
+        Err(error) => send_error(write, ErrorCode::RenderFailed, error.to_string()).await,
+    }
+}
+
+/// Encodes and writes one server message (`docs/viewer.md` §1).
+async fn send<W: AsyncWrite + Unpin>(write: &mut W, message: &ServerMessage) -> Result<()> {
+    let line = encode_server(message);
+    write_line(write, &line).await
+}
+
+/// Writes a VAP `error` message with no client id (`docs/viewer.md` §6).
+async fn send_error<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    code: ErrorCode,
+    message: impl Into<String>,
+) -> Result<()> {
+    let message = ServerMessage::Error {
+        code,
+        message: message.into(),
+        id: None,
+    };
+    send(write, &message).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use adesk_core::Size;
+    use adesk_proto::{ImagePayload, RendererKind};
+    use adesk_viewer_proto::{
+        encode_client, ControlOwner, CursorState, DesktopState, ServerHello, ViewerFrame,
+        ViewerHello,
+    };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    use crate::backend::ChangeSignal;
+
+    /// A backend that records the input it was asked to apply, can be told to
+    /// report a desktop change, and can be made to fail rendering.
+    struct FakeBackend {
+        change: ChangeSignal,
+        actions: std::sync::Mutex<Vec<ViewerInput>>,
+        /// When set, [`ViewerBackend::render_frame`] fails.
+        fail_render: AtomicBool,
+    }
+
+    impl FakeBackend {
+        fn new() -> Arc<FakeBackend> {
+            Arc::new(FakeBackend {
+                change: ChangeSignal::new(),
+                actions: std::sync::Mutex::new(Vec::new()),
+                fail_render: AtomicBool::new(false),
+            })
+        }
+
+        fn last_action(&self) -> Option<ViewerInput> {
+            self.actions.lock().unwrap().last().cloned()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ViewerBackend for FakeBackend {
+        fn display(&self) -> ServerHello {
+            ServerHello {
+                protocol_version: adesk_viewer_proto::PROTOCOL_VERSION,
+                runtime_version: "0.1.0".to_owned(),
+                output: Size::new(4, 2),
+                renderer: RendererKind::Pixman,
+                cursor: CursorState::hidden(),
+                control: ControlOwner::Ai,
+            }
+        }
+
+        async fn render_frame(&self) -> Result<ViewerFrame> {
+            if self.fail_render.load(Ordering::SeqCst) {
+                return Err(ViewerError::Backend("renderer failed".to_owned()));
+            }
+            let data = vec![0u8; 4 * 2 * 4];
+            Ok(ViewerFrame {
+                seq: 1,
+                ts_ms: 0,
+                image: ImagePayload::from_rgba8(4, 2, &data, 1.0).expect("valid rgba8 payload"),
+                cursor: CursorState::hidden(),
+                active_window_id: None,
+            })
+        }
+
+        async fn desktop_state(&self) -> Result<DesktopState> {
+            Ok(DesktopState {
+                active_window_id: None,
+                windows: Vec::new(),
+            })
+        }
+
+        async fn apply_input(&self, input: ViewerInput) -> Result<Option<adesk_core::ActionId>> {
+            self.actions.lock().unwrap().push(input);
+            Ok(Some(adesk_core::ActionId(7)))
+        }
+
+        fn change_signal(&self) -> ChangeSignal {
+            self.change.clone()
+        }
+    }
+
+    /// The buffered line reader the tests use on the client half.
+    type ClientLines =
+        tokio::io::Lines<tokio::io::BufReader<tokio::io::ReadHalf<tokio::io::DuplexStream>>>;
+
+    fn config() -> ViewerServerConfig {
+        ViewerServerConfig::default()
+    }
+
+    /// Sends the hello and returns a line reader positioned after the server's
+    /// handshake reply.
+    async fn start(
+        backend: Arc<FakeBackend>,
+        hello: ViewerHello,
+    ) -> (
+        tokio::task::JoinHandle<Result<()>>,
+        ClientLines,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        start_with_config(backend, hello, config()).await
+    }
+
+    /// Like [`start`] but with an explicit server configuration.
+    async fn start_with_config(
+        backend: Arc<FakeBackend>,
+        hello: ViewerHello,
+        config: ViewerServerConfig,
+    ) -> (
+        tokio::task::JoinHandle<Result<()>>,
+        ClientLines,
+        tokio::io::WriteHalf<tokio::io::DuplexStream>,
+    ) {
+        let (server_stream, client_stream) = tokio::io::duplex(1 << 16);
+        let peer = PeerInfo::Other("test".to_owned());
+        let handle =
+            tokio::spawn(async move { run_session(&backend, &config, server_stream, &peer).await });
+
+        let (client_read, mut client_write) = tokio::io::split(client_stream);
+        let mut lines = tokio::io::BufReader::new(client_read).lines();
+
+        let line = encode_client(&ClientMessage::Hello(hello));
+        client_write.write_all(line.as_bytes()).await.unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        client_write.flush().await.unwrap();
+
+        let reply = lines.next_line().await.unwrap().unwrap();
+        assert!(
+            reply.contains("\"hello\""),
+            "expected the server hello: {reply}"
+        );
+
+        (handle, lines, client_write)
+    }
+
+    /// Sends a `bye` so the session ends without relying on stream teardown.
+    async fn send_bye(write: &mut tokio::io::WriteHalf<tokio::io::DuplexStream>) {
+        let line = encode_client(&ClientMessage::Bye { reason: None });
+        write.write_all(line.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handshake_replies_with_the_server_hello() {
+        let backend = FakeBackend::new();
+        let (handle, _lines, mut write) = start(backend, ViewerHello::new()).await;
+
+        send_bye(&mut write).await;
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn request_frame_is_answered_with_a_frame() {
+        let backend = FakeBackend::new();
+        let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
+
+        let request = encode_client(&ClientMessage::RequestFrame { id: None });
+        write.write_all(request.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+
+        let frame = lines.next_line().await.unwrap().unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn change_pushes_a_frame_and_input_is_forwarded() {
+        let backend = FakeBackend::new();
+        let (handle, mut lines, mut write) = start(backend.clone(), ViewerHello::new()).await;
+
+        // A desktop change pushes a frame (unpaced: one frame per change).
+        backend.change.notify();
+        let frame = lines.next_line().await.unwrap().unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        // Input is applied through the backend and acknowledged with the action.
+        let move_line = encode_client(&ClientMessage::PointerMove { x: 0.5, y: 0.25 });
+        write.write_all(move_line.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+
+        let ack = lines.next_line().await.unwrap().unwrap();
+        assert!(ack.contains("\"input_ack\""), "{ack}");
+        assert_eq!(
+            backend.last_action(),
+            Some(ViewerInput::PointerMove { x: 0.5, y: 0.25 })
+        );
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn malformed_handshake_is_refused_and_closes() {
+        let backend = FakeBackend::new();
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let config = config();
+        let peer = PeerInfo::Other("test".to_owned());
+        let handle =
+            tokio::spawn(async move { run_session(&backend, &config, server_stream, &peer).await });
+
+        let (client_read, mut client_write) = tokio::io::split(client_stream);
+        let mut lines = tokio::io::BufReader::new(client_read).lines();
+
+        client_write.write_all(b"not json\n").await.unwrap();
+        client_write.flush().await.unwrap();
+
+        let error = lines.next_line().await.unwrap().unwrap();
+        assert!(error.contains("\"error\""), "{error}");
+        assert!(error.contains("malformed handshake message"), "{error}");
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn version_mismatch_is_a_hard_error() {
+        let backend = FakeBackend::new();
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let config = config();
+        let peer = PeerInfo::Other("test".to_owned());
+        let handle =
+            tokio::spawn(async move { run_session(&backend, &config, server_stream, &peer).await });
+
+        let (client_read, mut client_write) = tokio::io::split(client_stream);
+        let mut lines = tokio::io::BufReader::new(client_read).lines();
+
+        let mut hello = ViewerHello::new();
+        hello.protocol_version = adesk_viewer_proto::PROTOCOL_VERSION + 1;
+        let line = encode_client(&ClientMessage::Hello(hello));
+        client_write.write_all(line.as_bytes()).await.unwrap();
+        client_write.write_all(b"\n").await.unwrap();
+        client_write.flush().await.unwrap();
+
+        let error = lines.next_line().await.unwrap().unwrap();
+        assert!(
+            error.contains("protocol_version_mismatch"),
+            "expected a version mismatch error: {error}"
+        );
+
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_message_type_is_ignored() {
+        let backend = FakeBackend::new();
+        let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
+
+        // An unrecognised `"type"` decodes to `Unknown` and is ignored (§1).
+        write
+            .write_all(br#"{"type":"something_new","x":1}"#)
+            .await
+            .unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+
+        // The connection is still usable: a frame request is answered.
+        let request = encode_client(&ClientMessage::RequestFrame { id: None });
+        write.write_all(request.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+
+        let frame = lines.next_line().await.unwrap().unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn eof_before_hello_is_a_handshake_error() {
+        let backend = FakeBackend::new();
+        let (server_stream, client_stream) = tokio::io::duplex(4096);
+        let config = config();
+        let peer = PeerInfo::Other("test".to_owned());
+        let handle =
+            tokio::spawn(async move { run_session(&backend, &config, server_stream, &peer).await });
+
+        drop(client_stream);
+
+        let error = handle.await.unwrap().unwrap_err();
+        assert!(
+            matches!(error, ViewerError::Handshake(_)),
+            "expected a handshake error, got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_state_and_set_control_round_trip() {
+        let backend = FakeBackend::new();
+        let (handle, mut lines, mut write) = start(backend, ViewerHello::new()).await;
+
+        let state = encode_client(&ClientMessage::RequestState { id: None });
+        write.write_all(state.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+        let reply = lines.next_line().await.unwrap().unwrap();
+        assert!(reply.contains("\"state\""), "{reply}");
+
+        let control = encode_client(&ClientMessage::SetControl {
+            owner: ControlOwner::Human,
+        });
+        write.write_all(control.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+        let reply = lines.next_line().await.unwrap().unwrap();
+        assert!(reply.contains("\"control\""), "{reply}");
+        assert!(reply.contains("human"), "{reply}");
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn render_failure_answers_error_and_keeps_the_connection_open() {
+        let backend = FakeBackend::new();
+        backend.fail_render.store(true, Ordering::SeqCst);
+        let (handle, mut lines, mut write) = start(backend.clone(), ViewerHello::new()).await;
+
+        let request = encode_client(&ClientMessage::RequestFrame { id: None });
+        write.write_all(request.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+        let error = lines.next_line().await.unwrap().unwrap();
+        assert!(error.contains("render_failed"), "{error}");
+
+        // The connection is still usable afterwards (§6).
+        backend.fail_render.store(false, Ordering::SeqCst);
+        write.write_all(request.as_bytes()).await.unwrap();
+        write.write_all(b"\n").await.unwrap();
+        write.flush().await.unwrap();
+        let frame = lines.next_line().await.unwrap().unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn paced_changes_collapse_into_a_single_frame_per_interval() {
+        let backend = FakeBackend::new();
+        // The viewer asks for no pacing (`min_interval_ms == 0`), so the server
+        // default (`200ms`) applies (§2).
+        let config = ViewerServerConfig::default().with_default_min_interval_ms(200);
+        let (handle, mut lines, mut write) =
+            start_with_config(backend.clone(), ViewerHello::new(), config).await;
+
+        // The first change flushes immediately (no previous frame).
+        backend.change.notify();
+        let frame = lines.next_line().await.unwrap().unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        // A second change within the interval is deferred, not queued: no frame
+        // arrives right away.
+        backend.change.notify();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), lines.next_line())
+                .await
+                .is_err(),
+            "a paced change must not flush before the interval elapses"
+        );
+
+        // The pacing deadline then flushes the collapsed change exactly once.
+        let frame = tokio::time::timeout(Duration::from_secs(2), lines.next_line())
+            .await
+            .expect("the pacing timer flushes a frame")
+            .unwrap()
+            .unwrap();
+        assert!(frame.contains("\"frame\""), "{frame}");
+
+        send_bye(&mut write).await;
+        handle.await.unwrap().unwrap();
+    }
+}
