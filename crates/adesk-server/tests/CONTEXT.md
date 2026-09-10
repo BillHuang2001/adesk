@@ -119,3 +119,16 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
   The `None` half is inherent to the injection: the synthetic event bypasses the compositor's own
   emission path, so the tap sees exactly what the test sent — not a server bug. Do not "fix" it by
   re-emitting events (a real mapping is stamped by the compositor ledger fed via `RuntimeCommand::NoteLaunch`).
+- Harness API with no call sites: `TestRuntime::builder()`, `TestRuntime::with_viewer()` and
+  `TestRuntimeBuilder::with_viewer()` are never used by a suite (viewer suites use
+  `TestRuntime::with_viewer_socket` / `TestRuntime::without_viewer`).
+  `RawClient::read_line` and `RawClient::expect_line` are `pub` but only called by `read_json` / `expect_json`
+  inside `common/mod.rs`.
+- Viewer-only harness accessors (single target today): `TestRuntime::connect_viewer`, `connect_viewer_raw`,
+  `viewer_socket_path`, `runtime_dir`, `wayland_display_name` are reached only from `viewer.rs`;
+  `RawClient::read_json` only from `inspector.rs`, `RawClient::expect_closed` only from `protocol.rs`,
+  `TestRuntime::running` only from `shutdown.rs`.
+- Raw-wire helpers are duplicated per target: `raw_request` (send + match the response on `id`) is
+  byte-identical in `subscriptions.rs` and `sequence.rs`, and `subscription_id` (lift `result.subscription_id`)
+  exists in both with two different bodies.
+  A new raw-wire suite should hoist them into `common/mod.rs` rather than add a third copy.
