@@ -146,6 +146,16 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - The `image` crate is used with `default-features = false, features = ["png"]`; only PNG encode/decode (and the test-only decoder) are available.
 - Integration-test crates do NOT inherit `#![forbid(unsafe_code)]` from `lib.rs`, so `tests/render_backend.rs` may use `unsafe {}` for surfaceless EGL setup; the library itself stays unsafe-free.
 
+## Performance Notes
+
+- Rendering is on demand, so per-call cost times request frequency is the metric: one full pass per `capture_window`/`capture_region`/`observe(include_image)`/`inspect_capture` and per VAP frame.
+- `render_scene` reads back the **whole** target (`copy_framebuffer` over `buffer_size`, `src/pipeline.rs`) even when `RenderConfig::crop` selects a small sub-rect, so a cropped capture pays three frame-scale passes: renderer readback + `image_from_readback` copy + `crop` copy.
+- `create_target` allocates a fresh offscreen buffer on every render; `adesk-compositor` calls it per render pass (`crates/adesk-compositor/src/render/headless.rs`) and there is no target reuse here.
+- `encode_png` clones the whole pixel buffer through `tight_rgba` even when the buffer is already tight (`src/image.rs`); a second, independent `encode_png` lives in `adesk-server/src/images.rs`.
+- `image_from_readback` zero-fills its output then copies row-by-row, so a tight readback does a redundant full-buffer memset plus H row copies (`src/image.rs`).
+- `DamageAccumulator::record_commit` allocates a `Region` per commit via `Region::clip`; `peek`/`take` call `Region::simplified`, whose `Region::coalesce` is an O(n²) pairwise merge with `Vec::remove` in `adesk-core/src/geometry.rs` (run per observation and again as `frame.damage.simplified()` in the compositor).
+- `crop` and `downscale` return a full `image.clone()` when they are a no-op (`src/image.rs`).
+
 ## Dependencies
 
 - `adesk-core` — `ImageBuffer`, `Rect`, `Region`, `Size`, `ErrorCode`, `Error` (never fork these types).
