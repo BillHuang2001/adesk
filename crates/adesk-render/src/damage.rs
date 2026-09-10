@@ -15,13 +15,46 @@ use adesk_core::{Rect, Region};
 /// `min_area == 0` keeps everything non-empty. The result is coalesced,
 /// empty-free and deterministic (ordered by `(y, x, h, w)`).
 pub fn coalesce_damage(region: &Region, bounds: &Rect, min_area: u32) -> Region {
-    let mut out = Region::empty();
-    for rect in region.clip(bounds).simplified() {
-        if rect.area() >= min_area as u64 {
-            out.push(rect);
+    if region.is_empty() || bounds.is_empty() {
+        return Region::empty();
+    }
+
+    // Clip into one scratch buffer: `bounds` is non-empty here and `Region`
+    // never stores empty rects, so every `intersect` result is non-empty.
+    let mut rects = Vec::with_capacity(region.len());
+    for rect in region.iter() {
+        if let Some(part) = rect.intersect(bounds) {
+            rects.push(part);
         }
     }
-    out
+
+    // Sort *before* coalescing. Merging keeps the earlier rect's `(y, x)` and
+    // only grows its extent, so a `(y, x, h, w)`-sorted input coalesces to a
+    // `(y, x, h, w)`-sorted result. That makes this exactly
+    // `clip(bounds).simplified()` while skipping the throwaway clipped
+    // `Region` and the clone inside `Region::simplified`.
+    rects.sort_unstable_by_key(|rect| (rect.y, rect.x, rect.h, rect.w));
+
+    let mut out = Region::empty();
+    for rect in rects {
+        out.push(rect);
+    }
+    out.coalesce();
+
+    // `min_area == 0` keeps every coalesced rect, so the common path returns
+    // the coalesced region as is. Only rebuild (one further allocation) when a
+    // rect is actually below the threshold.
+    if min_area == 0 || !out.iter().any(|rect| rect.area() < min_area as u64) {
+        return out;
+    }
+
+    let mut filtered = Region::empty();
+    for rect in out.iter() {
+        if rect.area() >= min_area as u64 {
+            filtered.push(*rect);
+        }
+    }
+    filtered
 }
 
 /// Per-window damage accumulator fed by `SurfaceCommit` events.
@@ -66,7 +99,17 @@ impl DamageAccumulator {
     pub fn record_commit(&mut self, commit_seq: u64, damage: &Region) {
         self.commits += 1;
         self.last_commit_seq = commit_seq;
-        self.pending.extend(&damage.clip(&self.bounds));
+        if self.bounds.is_empty() {
+            return;
+        }
+        // Clip straight into `pending`. This is exactly what
+        // `damage.clip(&self.bounds)` does per rect, but without allocating (and
+        // then copying) a throwaway `Region`.
+        for rect in damage.iter() {
+            if let Some(part) = rect.intersect(&self.bounds) {
+                self.pending.push(part);
+            }
+        }
     }
 
     /// Records a single damaged rectangle (clipped to the bounds).

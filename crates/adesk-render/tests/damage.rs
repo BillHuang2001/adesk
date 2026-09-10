@@ -52,6 +52,41 @@ fn coalesce_of_empty_region_is_empty() {
 }
 
 #[test]
+fn coalesce_output_is_sorted_regardless_of_input_order() {
+    // Coalescing sorts by `(y, x, h, w)` so observations replay identically;
+    // the implementation relies on this surviving an in-place coalesce.
+    let raw = region(&[
+        Rect::new(50, 40, 4, 4),
+        Rect::new(10, 20, 4, 4),
+        Rect::new(2, 3, 5, 5),
+    ]);
+    let merged = coalesce_damage(&raw, &Rect::new(0, 0, 100, 100), 0);
+    assert_eq!(
+        merged.rects(),
+        &[
+            Rect::new(2, 3, 5, 5),
+            Rect::new(10, 20, 4, 4),
+            Rect::new(50, 40, 4, 4),
+        ]
+    );
+}
+
+#[test]
+fn coalesce_of_unsorted_input_matches_simplified() {
+    // Unsorted, overlapping/edge-adjacent input: the coalesced result must be
+    // identical to `Region::simplified` (same set, same order).
+    let raw = region(&[
+        Rect::new(5, 10, 10, 10),
+        Rect::new(0, 0, 10, 10),
+        Rect::new(10, 0, 10, 10),
+        Rect::new(0, 10, 4, 4),
+    ]);
+    let merged = coalesce_damage(&raw, &Rect::new(0, 0, 100, 100), 0);
+    assert_eq!(merged.rects(), raw.simplified());
+    assert_eq!(merged.rects(), &[Rect::new(0, 0, 20, 20)]);
+}
+
+#[test]
 fn accumulator_records_commits_and_take_resets() {
     let mut acc = DamageAccumulator::new(Rect::new(0, 0, 100, 100));
     assert!(acc.is_empty());
@@ -93,6 +128,28 @@ fn accumulator_clips_damage_to_bounds() {
         damage.simplified(),
         vec![Rect::new(0, 0, 4, 4), Rect::new(14, 14, 2, 2)]
     );
+}
+
+#[test]
+fn accumulator_records_fully_clipped_commit_without_pending_damage() {
+    let mut acc = DamageAccumulator::new(Rect::new(0, 0, 10, 10));
+    acc.record_commit(5, &region(&[Rect::new(100, 100, 4, 4)]));
+    assert!(acc.is_empty());
+    assert!(acc.peek().is_empty());
+    // The commit is still counted (lifetime counters are independent of damage).
+    assert_eq!(acc.commits(), 1);
+    assert_eq!(acc.last_commit_seq(), 5);
+}
+
+#[test]
+fn accumulator_with_empty_bounds_accumulates_nothing() {
+    let mut acc = DamageAccumulator::new(Rect::EMPTY);
+    acc.record_commit(1, &region(&[Rect::new(-5, -5, 3, 3)]));
+    acc.record_rect(Rect::new(0, 0, 2, 2));
+    assert!(acc.is_empty());
+    assert!(acc.peek().is_empty());
+    assert_eq!(acc.commits(), 1);
+    assert_eq!(acc.last_commit_seq(), 1);
 }
 
 #[test]
