@@ -144,6 +144,7 @@ async fn launch_observe_input_close_round_trip() -> Result<()> {
     let RuntimeEvent::WindowCreated {
         app_id: reported_app,
         pid,
+        launch_id,
         title,
         ..
     } = &created
@@ -155,10 +156,12 @@ async fn launch_observe_input_close_round_trip() -> Result<()> {
         pid, &launched.pid,
         "the window belongs to the process the registry spawned"
     );
+    // The launch ledger is what makes a window causally attributable to the
+    // `launch_app` call that produced it: the pid above only says "some process",
+    // whereas `launch_id` pins the window to this exact launch, which is what an
+    // agent needs to reason about which of its actions caused the window.
+    assert_eq!(launch_id, &Some(launched.launch_id));
     assert_eq!(title.as_deref(), Some("Capstone"));
-    // `launch_id` is deliberately not asserted: the landed server records the launch
-    // (`dispatch::apps`) but does not yet attribute windows to it, so the event carries
-    // `launch_id: None`. The pid above is the correlation evidence available today.
 
     // A newly mapped toplevel takes the visible slot and the keyboard focus.
     events
