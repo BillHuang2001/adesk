@@ -180,7 +180,7 @@ pub struct Observation {
     pub popups_appeared: Vec<u64>,
     pub popups_disappeared: Vec<u64>,
     pub elapsed_ms: u64,
-    pub quiet: bool,                     // condition met without timing out
+    pub quiet: bool,                     // evidence flag: quiet for the threshold at resolution time
     pub timed_out: bool,
     pub last_commit_seq: u64,
     pub seq: u64,                        // sequence watermark at resolution
@@ -189,6 +189,11 @@ pub struct Observation {
 
 Images are attached by `adesk-proto` (`ObserveResult { observation, image }`), never
 by core.
+
+`quiet` is an evidence flag, not proof of semantic completion: it reports whether the
+wait's scope was quiet for the threshold at resolution time — the condition's `quiet_ms`
+for a quiet wait, otherwise the runtime default — so a timed-out `change` wait can
+legitimately carry `quiet: true` (`docs/protocol.md` §5.4).
 
 ## Errors
 
