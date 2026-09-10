@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use adesk_testkit::{
     EventAssert, Expected, FillPattern, ImageAssert, Result, RuntimeEvent, Size, TestRuntime,
-    TestRuntimeConfig, ToplevelSpec, WaylandTestClient, WindowId,
+    TestRuntimeConfig, TestWindow, ToplevelSpec, WaylandTestClient, WindowId,
 };
 
 /// Every bounded wait in this file uses this deadline.
@@ -45,11 +45,14 @@ fn wayland_config() -> TestRuntimeConfig {
     TestRuntimeConfig::new().with_apply_env(true)
 }
 
+/// The fill of frame `index`: distinct per frame, so a recycled range still holding an older
+/// frame's pixels cannot satisfy the capture assertion.
+fn frame_fill(index: usize) -> FillPattern {
+    FillPattern::solid_rgb(12 + index as u8 * 7, 40, 200 - index as u8 * 5)
+}
+
 /// Creates a toplevel, waits for the compositor's tiling configure and acknowledges it.
-fn mapped(
-    wayland: &WaylandTestClient,
-    title: &str,
-) -> Result<(adesk_testkit::TestWindow, Size)> {
+fn mapped(wayland: &WaylandTestClient, title: &str) -> Result<(TestWindow, Size)> {
     let window = wayland.create_toplevel(ToplevelSpec::new(
         "org.example.shm",
         title,
@@ -92,7 +95,7 @@ async fn fresh_frames_reuse_buffer_ranges() -> Result<()> {
     // The single visible toplevel is tiled to the whole output, so this is the frame size.
     assert_eq!(configure_size, runtime.tiled_rect().size());
 
-    let fill = |index: usize| FillPattern::solid_rgb(12 + index as u8 * 7, 40, 200 - index as u8 * 5);
+    let fill = frame_fill;
 
     // The first commit maps the window; the runtime answers with `window_created`, which is
     // what makes the window id available for the commit waits below.

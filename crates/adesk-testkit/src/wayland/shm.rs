@@ -13,8 +13,8 @@
 //! writer evaluates [`FillPattern::at`] in RGBA order and swaps the first and third byte
 //! when serialising, which is the single place that byte-order rule lives. Stride is
 //! always `width * 4` (no padding); an allocation is `stride * height` bytes rounded up
-//! to a 64-byte multiple, so [`ShmBuffer::len`] is the allocated length, not the exact
-//! pixel payload.
+//! to a 64-byte multiple, and that rounded length — not the exact pixel payload — is what
+//! the pool records as the range's size.
 //!
 //! ## Allocation
 //!
