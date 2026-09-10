@@ -324,6 +324,7 @@ mod tests {
             );
         }
     }
+
     #[test]
     fn short_data_is_rejected_without_panicking() {
         let mut image = make(2, 2);
