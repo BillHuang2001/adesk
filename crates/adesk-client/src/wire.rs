@@ -3,14 +3,15 @@
 //! `adesk-proto` owns the AGP frame/codec definitions (root `CONTEXT.md`);
 //! `adesk-client` is a consumer. To keep the client resilient while the two
 //! crates are designed side by side, every `adesk_proto` item the client needs
-//! is referenced here (plus the `ImagePayload` re-export in `lib.rs`), and this
-//! module immediately converts proto frames into the crate-internal
-//! [`Inbound`]/[`RawEvent`] vocabulary that the rest of the client uses.
+//! is referenced here (plus the `ImagePayload`/`QuietEvent` re-exports in
+//! `lib.rs`), and this module immediately converts proto frames into the
+//! crate-internal [`Inbound`]/[`RawEvent`] vocabulary that the rest of the
+//! client uses.
 //!
 //! Consequences:
 //!
-//! - If `adesk-proto`'s frame API changes, only this file (and the
-//!   `ImagePayload` re-export) needs updating.
+//! - If `adesk-proto`'s frame API changes, only this file (and the payload
+//!   re-exports) needs updating.
 //! - The transport never depends on proto types; it works on
 //!   [`RawEvent`] and [`Inbound`] only.
 //!
@@ -22,8 +23,8 @@
 //! `ResponseFrame { id, outcome }` + `ResponseOutcome::{Result(ResultPayload),
 //! Error(ErrorPayload)}` + `ResultPayload::as_value`,
 //! `EventFrame { event, seq, ts_ms, data }`, `EventKind` (snake_case serde),
-//! `EventPayload::to_data`, `NdjsonCodec` + the `Codec` trait, and
-//! `ImagePayload`.
+//! `EventPayload::to_data`, `NdjsonCodec` + the `Codec` trait, and the
+//! `ImagePayload` / `QuietEvent` payloads.
 
 use adesk_core::ErrorCode;
 use adesk_proto::methods::Method;

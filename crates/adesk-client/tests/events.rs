@@ -10,8 +10,8 @@ mod common;
 use std::time::Duration;
 
 use adesk_client::{
-    AgpEvent, Client, ClientError, ConnectOptions, EventFilter, EventKind, EventStream,
-    ImagePayload,
+    AgpEvent, AgpEventStream, Client, ClientError, ConnectOptions, EventFilter, EventKind,
+    EventStream, ImagePayload, QuietEvent,
 };
 use adesk_core::{Rect, RuntimeEvent, WindowId};
 use common::MockServer;
@@ -62,6 +62,37 @@ async fn subscribe(
 /// Await the next typed stream item, failing the test (instead of hanging) on
 /// timeout and treating the end of the stream as a failure.
 async fn next_event(stream: &mut EventStream) -> Result<RuntimeEvent, ClientError> {
+    tokio::time::timeout(STEP_TIMEOUT, stream.next())
+        .await
+        .expect("the stream yields an item instead of hanging")
+        .expect("the stream is still open")
+}
+
+/// `subscribe_frames` against the mock server, answering with `subscription_id`.
+async fn subscribe_frames(
+    server: &mut MockServer,
+    client: &Client,
+    filter: EventFilter,
+    subscription_id: u64,
+) -> AgpEventStream {
+    let request = client.subscribe_frames(filter);
+    let (stream, ()) = tokio::time::timeout(STEP_TIMEOUT, async {
+        tokio::join!(request, async {
+            let (id, method, _) = server.next_request().await;
+            assert_eq!(method, "subscribe_events");
+            server
+                .respond(id, json!({ "subscription_id": subscription_id }))
+                .await;
+        })
+    })
+    .await
+    .expect("subscribe_frames answers instead of hanging");
+    stream.expect("subscribe_frames succeeds")
+}
+
+/// Await the next `AgpEvent` frame, failing the test (instead of hanging) on
+/// timeout and treating the end of the stream as a failure.
+async fn next_frame(stream: &mut AgpEventStream) -> Result<AgpEvent, ClientError> {
     tokio::time::timeout(STEP_TIMEOUT, stream.next())
         .await
         .expect("the stream yields an item instead of hanging")
@@ -277,17 +308,7 @@ async fn subscribe_frames_yields_inspect_and_other() {
     let client = connect(&mut server).await;
 
     // `subscribe_frames` is a client extension over `subscribe_events`.
-    let request = client.subscribe_frames(EventFilter::all());
-    let (stream, ()) = tokio::time::timeout(STEP_TIMEOUT, async {
-        tokio::join!(request, async {
-            let (id, method, _) = server.next_request().await;
-            assert_eq!(method, "subscribe_events");
-            server.respond(id, json!({ "subscription_id": 9 })).await;
-        })
-    })
-    .await
-    .expect("subscribe_frames answers instead of hanging");
-    let mut stream = stream.expect("subscribe_frames succeeds");
+    let mut stream = subscribe_frames(&mut server, &client, EventFilter::all(), 9).await;
 
     // A 1x1 RGBA8 payload: small, valid, and exactly comparable.
     let image = ImagePayload::from_rgba8(1, 1, &[0x11, 0x22, 0x33, 0xff], 1.0)
@@ -301,10 +322,8 @@ async fn subscribe_frames_yields_inspect_and_other() {
         )
         .await;
 
-    let event = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+    let event = next_frame(&mut stream)
         .await
-        .expect("the inspect_frame event arrives")
-        .expect("the stream is still open")
         .expect("the inspect_frame event is typed");
     match event {
         AgpEvent::InspectFrame(frame) => {
@@ -321,10 +340,8 @@ async fn subscribe_frames_yields_inspect_and_other() {
         .emit_event("future_kind", 22, 310, data.clone())
         .await;
 
-    let event = tokio::time::timeout(STEP_TIMEOUT, stream.next())
+    let event = next_frame(&mut stream)
         .await
-        .expect("the unknown event arrives")
-        .expect("the stream is still open")
         .expect("an unknown kind is not an error");
     match event {
         AgpEvent::Other {
@@ -493,4 +510,293 @@ async fn connection_close_ends_stream_with_closed() {
         "the stream ends after reporting Closed once, got {end:?}"
     );
     assert!(client.is_closed(), "the connection reports the close");
+}
+
+/// A wire `quiet` frame is typed as `AgpEvent::Quiet`.
+///
+/// Subscribe with `subscribe_frames(EventFilter::all())`; emit a 'quiet' frame
+/// whose data is `{"window_id": 17, "quiet_ms": 250}` and assert
+/// `AgpEvent::Quiet` carries both fields; emit a runtime-wide quiet
+/// (`window_id: null`) and assert `window_id: None`; then emit a
+/// 'surface_damage' frame and assert it still arrives as `AgpEvent::Other` with
+/// name/seq/ts_ms/data preserved (it is a subscription-only filter alias that
+/// is never emitted as a typed frame).
+///
+/// `AgpEvent::Quiet` carries the proto payload only, so unlike
+/// `RuntimeEvent`/`InspectFrame` it has no envelope `seq`/`ts_ms` to assert.
+#[tokio::test]
+async fn quiet_frame_is_typed() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+    let mut stream = subscribe_frames(&mut server, &client, EventFilter::all(), 10).await;
+
+    server
+        .emit_event(
+            "quiet",
+            71,
+            4000,
+            json!({ "window_id": 17, "quiet_ms": 250 }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the quiet event is typed")
+    {
+        AgpEvent::Quiet(quiet) => {
+            assert_eq!(
+                quiet,
+                QuietEvent {
+                    window_id: Some(WindowId(17)),
+                    quiet_ms: 250,
+                }
+            );
+        }
+        other => panic!("expected AgpEvent::Quiet, got {other:?}"),
+    }
+
+    // Runtime-wide quiet: no window id.
+    server
+        .emit_event(
+            "quiet",
+            73,
+            4200,
+            json!({ "window_id": null, "quiet_ms": 100 }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the runtime-wide quiet event is typed")
+    {
+        AgpEvent::Quiet(quiet) => {
+            assert_eq!(quiet.window_id, None, "null window_id means the runtime");
+            assert_eq!(quiet.quiet_ms, 100);
+        }
+        other => panic!("expected AgpEvent::Quiet, got {other:?}"),
+    }
+
+    // `surface_damage` stays untyped: a filter alias, not a frame kind.
+    let damage = json!({
+        "window_id": 17,
+        "damage": [{ "x": 1, "y": 2, "w": 3, "h": 4 }],
+    });
+    server
+        .emit_event("surface_damage", 74, 4300, damage.clone())
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("a surface_damage frame is not an error")
+    {
+        AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data,
+        } => {
+            assert_eq!(name, "surface_damage");
+            assert_eq!(seq, 74);
+            assert_eq!(ts_ms, 4300);
+            assert_eq!(data, damage, "the raw payload is preserved");
+        }
+        other => panic!("expected AgpEvent::Other for surface_damage, got {other:?}"),
+    }
+}
+
+/// Typed `quiet` events participate in local kind and window filtering.
+///
+/// Subscribe with `EventFilter::kinds([EventKind::Quiet])`; emit a
+/// 'surface_commit' (a non-matching kind) then a 'quiet'; assert only the quiet
+/// is yielded. Then open a second subscription with
+/// `EventFilter::all().window(WindowId 17)`; emit a quiet for window 18
+/// (skipped) then one for window 17; assert the first item is the window-17
+/// quiet, proving the other was filtered locally.
+#[tokio::test]
+async fn typed_quiet_is_locally_filtered() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let mut kinds = subscribe_frames(
+        &mut server,
+        &client,
+        EventFilter::kinds([EventKind::Quiet]),
+        11,
+    )
+    .await;
+
+    server
+        .emit_event(
+            "surface_commit",
+            81,
+            5000,
+            json!({ "window_id": 17, "commit_seq": 3, "damage": [] }),
+        )
+        .await;
+    server
+        .emit_event(
+            "quiet",
+            82,
+            5010,
+            json!({ "window_id": 17, "quiet_ms": 250 }),
+        )
+        .await;
+
+    match next_frame(&mut kinds)
+        .await
+        .expect("the quiet event is typed")
+    {
+        AgpEvent::Quiet(quiet) => {
+            assert_eq!(quiet.window_id, Some(WindowId(17)));
+            assert_eq!(quiet.quiet_ms, 250);
+        }
+        other => panic!("expected only AgpEvent::Quiet, got {other:?}"),
+    }
+
+    // A fresh subscription only sees events published after it exists.
+    let mut window = subscribe_frames(
+        &mut server,
+        &client,
+        EventFilter::all().window(WindowId(17)),
+        12,
+    )
+    .await;
+
+    server
+        .emit_event(
+            "quiet",
+            83,
+            5020,
+            json!({ "window_id": 18, "quiet_ms": 250 }),
+        )
+        .await;
+    server
+        .emit_event(
+            "quiet",
+            84,
+            5030,
+            json!({ "window_id": 17, "quiet_ms": 250 }),
+        )
+        .await;
+
+    match next_frame(&mut window)
+        .await
+        .expect("the window-17 quiet event is typed")
+    {
+        AgpEvent::Quiet(quiet) => {
+            assert_eq!(
+                quiet.window_id,
+                Some(WindowId(17)),
+                "the window-18 quiet was filtered out locally"
+            );
+        }
+        other => panic!("expected AgpEvent::Quiet for window 17, got {other:?}"),
+    }
+}
+
+/// `EventStream` remains a `RuntimeEvent`-only view.
+///
+/// Subscribe with `subscribe_events(EventFilter::all())`; emit a 'quiet' frame
+/// and then a 'surface_commit'; assert the first yielded item is the
+/// `RuntimeEvent::SurfaceCommit` — the typed quiet frame is skipped, not
+/// delivered (use `subscribe_frames` to observe it).
+#[tokio::test]
+async fn event_stream_skips_quiet_frames() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+    let mut stream = subscribe(&mut server, &client, EventFilter::all(), 7).await;
+
+    server
+        .emit_event(
+            "quiet",
+            91,
+            6000,
+            json!({ "window_id": 17, "quiet_ms": 250 }),
+        )
+        .await;
+    server
+        .emit_event(
+            "surface_commit",
+            92,
+            6010,
+            json!({ "window_id": 17, "commit_seq": 9, "damage": [] }),
+        )
+        .await;
+
+    match next_event(&mut stream)
+        .await
+        .expect("the surface_commit event is typed")
+    {
+        RuntimeEvent::SurfaceCommit {
+            seq,
+            ts_ms,
+            commit_seq,
+            ..
+        } => {
+            assert_eq!(seq, 92, "the quiet frame was skipped by EventStream");
+            assert_eq!(ts_ms, 6010);
+            assert_eq!(commit_seq, 9);
+        }
+        other => panic!("expected RuntimeEvent::SurfaceCommit, got {other:?}"),
+    }
+}
+
+/// A malformed `quiet` payload falls back to `AgpEvent::Other`.
+///
+/// Emit a 'quiet' frame whose data cannot deserialise into `QuietEvent`
+/// (`quiet_ms` is a string); assert `AgpEvent::Other` preserves the wire name
+/// and the raw data verbatim instead of failing the event path (protocol §7
+/// forward compatibility).
+#[tokio::test]
+async fn malformed_quiet_payload_falls_back_to_other() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+    let mut stream = subscribe_frames(&mut server, &client, EventFilter::all(), 13).await;
+
+    let data = json!({ "window_id": 17, "quiet_ms": "soon" });
+    server.emit_event("quiet", 95, 7000, data.clone()).await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("a malformed quiet payload is not an error")
+    {
+        AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data: got,
+        } => {
+            assert_eq!(name, "quiet");
+            assert_eq!(seq, 95);
+            assert_eq!(ts_ms, 7000);
+            assert_eq!(got, data, "the raw payload is preserved");
+        }
+        other => panic!("expected AgpEvent::Other for a malformed quiet, got {other:?}"),
+    }
+}
+
+/// `QuietEvent` is serde round-trippable through the client re-export.
+///
+/// Serialise a window quiet and a runtime-wide quiet; assert the exact JSON
+/// shape (`{"window_id": <n|null>, "quiet_ms": <n>}`) and that deserialising
+/// it back yields an equal value.
+#[test]
+fn quiet_event_serde_round_trip() {
+    let window = QuietEvent {
+        window_id: Some(WindowId(17)),
+        quiet_ms: 250,
+    };
+    let value = serde_json::to_value(&window).expect("serialise a window quiet");
+    assert_eq!(value, json!({ "window_id": 17, "quiet_ms": 250 }));
+    let back: QuietEvent = serde_json::from_value(value).expect("deserialise a window quiet");
+    assert_eq!(back, window);
+
+    let runtime = QuietEvent {
+        window_id: None,
+        quiet_ms: 100,
+    };
+    let value = serde_json::to_value(&runtime).expect("serialise a runtime-wide quiet");
+    assert_eq!(value, json!({ "window_id": null, "quiet_ms": 100 }));
+    let back: QuietEvent = serde_json::from_value(value).expect("deserialise a runtime-wide quiet");
+    assert_eq!(back, runtime);
 }

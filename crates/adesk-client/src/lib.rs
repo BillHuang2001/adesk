@@ -67,7 +67,7 @@
 //! | `error.rs` | [`ClientError`], [`Result`] |
 //! | `transport.rs` | connection, request ids, pending map, reader/writer tasks |
 //! | `wire.rs` | the only module naming `adesk-proto` frame types |
-//! | `events.rs` | [`EventFilter`], [`EventKind`], [`AgpEvent`], the three streams |
+//! | `events.rs` | [`EventFilter`], [`EventKind`], [`AgpEvent`] (incl. typed [`QuietEvent`]), the three streams |
 //! | `image.rs` | [`ImageFormat`], [`decode_image`] |
 //! | `api/*.rs` | one module per `docs/protocol.md` §5 section: methods + types |
 
@@ -82,8 +82,8 @@ mod image;
 mod transport;
 mod wire;
 
-// --- shared wire payload (re-exported so consumers never depend on adesk-proto) ---
-pub use adesk_proto::ImagePayload;
+// --- shared wire payloads (re-exported so consumers never depend on adesk-proto) ---
+pub use adesk_proto::{ImagePayload, QuietEvent};
 
 // --- core handle, options, errors ---
 pub use client::{

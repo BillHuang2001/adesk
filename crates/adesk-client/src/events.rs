@@ -11,7 +11,7 @@
 //! | Type | Item | Use |
 //! |---|---|---|
 //! | [`EventStream`] | `Result<RuntimeEvent, ClientError>` | agent-facing runtime events |
-//! | [`AgpEventStream`] | `Result<AgpEvent, ClientError>` | every event kind, incl. forward-compatible `Other` |
+//! | [`AgpEventStream`] | `Result<AgpEvent, ClientError>` | every event kind, incl. typed `quiet` and forward-compatible `Other` |
 //! | [`InspectStream`] | `Result<InspectFrame, ClientError>` | `inspect_subscribe` frames |
 //!
 //! Dropping any stream cancels its subscription: a best-effort
@@ -28,10 +28,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::transport::EventReceiver;
-use crate::{ImagePayload, Result};
+use crate::{ImagePayload, QuietEvent, Result};
 
 /// AGP event kind — the 9 `adesk_core::EventKind` values plus the two
-/// subscription-only kinds (`surface_damage`, `quiet`) from protocol §5.6.
+/// protocol-only kinds from §5.6: `surface_damage` (a filter alias that is
+/// never emitted as a frame) and `quiet` (emitted with a typed payload).
 ///
 /// Used both as the `subscribe_events` filter (`kinds`) and for local
 /// filtering of delivered frames.
@@ -57,7 +58,7 @@ pub enum EventKind {
     PopupAppeared,
     /// An xdg-popup was unmapped.
     PopupDisappeared,
-    /// Subscription-only: the observer decided a window went quiet (§5.6).
+    /// The observer decided a window (or the whole runtime) went quiet (§5.6).
     Quiet,
     /// The app registry spawned a process.
     AppLaunched,
@@ -160,8 +161,9 @@ impl EventFilter {
 fn event_kind(event: &AgpEvent) -> Option<EventKind> {
     match event {
         AgpEvent::Runtime(runtime) => Some(EventKind::from(runtime.kind())),
-        // Known-but-untyped frames (`quiet`, `surface_damage`, future kinds):
-        // the wire name is the only kind information available.
+        AgpEvent::Quiet(_) => Some(EventKind::Quiet),
+        // Known-but-untyped frames (`surface_damage`, future kinds): the wire
+        // name is the only kind information available.
         AgpEvent::Other { name, .. } => serde_json::from_value(Value::String(name.clone())).ok(),
         AgpEvent::InspectFrame(_) => None,
     }
@@ -171,6 +173,7 @@ fn event_kind(event: &AgpEvent) -> Option<EventKind> {
 fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
     match event {
         AgpEvent::Runtime(runtime) => runtime.window_id(),
+        AgpEvent::Quiet(quiet) => quiet.window_id,
         AgpEvent::Other { data, .. } => data.get("window_id").and_then(Value::as_u64).map(WindowId),
         AgpEvent::InspectFrame(_) => None,
     }
@@ -179,11 +182,12 @@ fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
 /// Map one decoded wire event onto the crate's event vocabulary.
 ///
 /// Called by the reader task. The nine core kinds become
-/// [`AgpEvent::Runtime`]; `inspect_frame` becomes [`AgpEvent::InspectFrame`]
-/// when its `data.image` fits [`ImagePayload`]; everything else — the
-/// subscription-only kinds `surface_damage`/`quiet` and any kind this client
-/// version does not know (protocol §7) — is preserved verbatim as
-/// [`AgpEvent::Other`].
+/// [`AgpEvent::Runtime`]; `quiet` becomes [`AgpEvent::Quiet`] when its `data`
+/// fits [`QuietEvent`]; `inspect_frame` becomes [`AgpEvent::InspectFrame`] when
+/// its `data.image` fits [`ImagePayload`]; everything else — the
+/// subscription-only alias `surface_damage`, a payload that does not fit its
+/// typed variant, and any kind this client version does not know (protocol §7)
+/// — is preserved verbatim as [`AgpEvent::Other`].
 pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
     let crate::wire::RawEvent {
         name,
@@ -207,8 +211,19 @@ pub(crate) fn agp_event_from_raw(raw: crate::wire::RawEvent) -> AgpEvent {
                 },
             }
         }
-        // Protocol-only kinds: no `RuntimeEvent` counterpart (see CONTEXT.md).
-        "surface_damage" | "quiet" => AgpEvent::Other {
+        // `quiet` is emitted with a typed payload (§5.6); a payload this client
+        // cannot read falls back to the raw frame (protocol §7).
+        "quiet" => match serde_json::from_value::<QuietEvent>(data.clone()) {
+            Ok(quiet) => AgpEvent::Quiet(quiet),
+            Err(_) => AgpEvent::Other {
+                name,
+                seq,
+                ts_ms,
+                data,
+            },
+        },
+        // A subscription-only filter alias: no frame carries it.
+        "surface_damage" => AgpEvent::Other {
             name,
             seq,
             ts_ms,
@@ -264,6 +279,13 @@ pub struct InspectFrame {
 pub enum AgpEvent {
     /// One of the 9 runtime events, typed by `adesk-core`.
     Runtime(RuntimeEvent),
+    /// A typed `quiet` event (protocol §5.6): the observer saw no counted
+    /// surface commit for the window (or the whole runtime) for `quiet_ms`.
+    ///
+    /// The payload is the shared wire type ([`QuietEvent`]); unlike
+    /// [`RuntimeEvent`] and [`InspectFrame`] it carries no envelope
+    /// `seq`/`ts_ms`.
+    Quiet(QuietEvent),
     /// An `inspect_frame` produced by `inspect_subscribe`.
     InspectFrame(InspectFrame),
     /// An event the client does not model (forward compatibility, protocol §7).
@@ -285,8 +307,10 @@ pub enum AgpEvent {
 ///
 /// Items are `Err(ClientError::Lagged { .. })` if this subscriber fell behind,
 /// then `Err(ClientError::Closed)` (or `Protocol`) once when the connection
-/// ends, then `None`. Non-core frames (e.g. `inspect_frame`) are skipped — use
-/// [`AgpEventStream`] to see them.
+/// ends, then `None`. This is a [`RuntimeEvent`]-only view: frames without a
+/// typed core event (`quiet`, `inspect_frame`, unknown future kinds) are
+/// skipped even when the filter selects them — use [`AgpEventStream`]
+/// (`subscribe_frames`) to observe those.
 pub struct EventStream {
     /// Per-connection event fan-out (shared with all streams).
     events: EventReceiver,
@@ -338,7 +362,8 @@ impl Stream for EventStream {
                     if let AgpEvent::Runtime(runtime) = event {
                         return Poll::Ready(Some(Ok(runtime)));
                     }
-                    // `inspect_frame` / unknown kinds have no typed core event.
+                    // `quiet` / `inspect_frame` / unknown kinds have no typed
+                    // core event.
                 }
             }
         }
@@ -353,7 +378,7 @@ impl Drop for EventStream {
     }
 }
 
-/// Stream of **all** AGP event frames (`subscribe_frames`), including
+/// Stream of **all** AGP event frames (`subscribe_frames`), including `quiet`,
 /// `inspect_frame` and unknown future kinds.
 pub struct AgpEventStream {
     /// Per-connection event fan-out.
