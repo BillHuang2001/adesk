@@ -113,6 +113,18 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - This crate exposes only `*Params`/`*Result` structs; ergonomic request builders (`CaptureRequest`, `CaptureRegionRequest`, `ObserveRequest`, `WaitFor*Request`) live in `adesk-client` and serialize into these params.
 - `ErrorCode` recoverability is not specified anywhere (`docs/protocol.md` §6 lists the 13 wire names only); `ProtoError::error_code` maps everything except `UnknownMethod`/`VersionMismatch` to `InvalidRequest`.
 
+## Performance Characteristics (per-frame hot path)
+
+Every frame is on the hot path: the server encodes each response/event (`connection.rs` write loop) and decodes each request, the client does the reverse.
+- Decode always builds a full `serde_json::Value` DOM first (`codec.rs:59`), then `Frame::from_value` re-parses the params/`data` subtree into typed structs with `serde_json::from_value` (`methods.rs:246`, `event.rs:442`) — a DOM pass plus a typed pass per frame.
+- The decode helpers borrow out of the parsed object and then deep-clone the subtree instead of moving it: params (`frame.rs:440`), response `result` (`frame.rs:224`) / `error` (`frame.rs:226`), event `data` (`frame.rs:341`). `frame.rs` has no other clone of note.
+- Encode is typed → `Value` → `String` (double serialization) in three places: `ResponseFrame::result` → `ResultPayload::new` → `serde_json::to_value` (`frame.rs:78,132`); `Method::serialize` → `params_value` → `to_value` (`methods.rs:261,205`); `EventFrame::serialize` → `EventPayload::to_data` → `to_value` (`event.rs:289,474`).
+- `EventPayload::to_data` runs once per event *per subscriber*: the server builds the frame once then clones it per subscriber (`adesk-server/src/subscriptions.rs:153`) and each connection re-encodes its clone (`connection.rs:99`).
+- `ObserveResult::serialize` (`methods/capture.rs:142`) builds three `Value`s (observation, image, whole) then serializes the third; the image `Value` copies the whole base64 `data` string.
+- `ResultPayload::decode` (`frame.rs:87`) clones the `Value` (serde `from_value` is by-value); destructuring the tuple field avoids the clone.
+- `EventFrame::from_runtime` (`event.rs:284`) clones `title`/`app_id`/`damage` out of the core event; `ImagePayload` base64 encode/decode (`image.rs:69,81,92`) is one copy each way.
+- Wire-order caveat: `serde_json` is built without `preserve_order` (deps: no `indexmap`), so every `Value`-built object has alphabetically sorted keys; replacing a `Value` step with direct typed serialization emits declaration order — identical JSON, different bytes. `docs/protocol.md` fixes no key order and the tests compare with `serde_json::Value` equality.
+
 ## Status
 
 - `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
