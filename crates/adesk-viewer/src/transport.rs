@@ -10,6 +10,13 @@ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Result, ViewerError};
 
+/// Default maximum length of one NDJSON line, in bytes (32 MiB).
+///
+/// The `docs/viewer.md` §1 cap: comfortably above any single encoded frame, and
+/// the default both the [`ViewerServer`](crate::server::ViewerServer) session and
+/// the [`ViewerClient`](crate::client::ViewerClient) use for both directions.
+pub const DEFAULT_MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
+
 /// Reads one `\n`-terminated NDJSON line (`docs/viewer.md` §1).
 ///
 /// Returns the line **without** its terminator, or `Ok(None)` on a clean EOF
