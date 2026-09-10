@@ -144,6 +144,7 @@ Event loop:
 - `Display::new()`, `backend().poll_fd()`, `dispatch_clients(&mut self, &mut State) -> io::Result<usize>`, `flush_clients()`.
 - `ListeningSocketSource::{new_auto, with_name, socket_name() -> &OsStr}`; `Event = UnixStream`, `Metadata = ()`, `Ret = ()`, `Error = io::Error`; `ListeningSocket` requires a writable `XDG_RUNTIME_DIR`.
 - calloop 0.14.4: `EventLoop::run(timeout, data, cb)` is 3-arg; `Generic` callbacks return `Result<PostAction, io::Error>`; `calloop::channel::Event::{Msg, Closed}`; `Channel<T>` has `Ret = ()`; `Sender<T>: Send + Sync` (this is what makes `CompositorHandle: Send + Sync`); `LoopSignal::stop()`.
+- `calloop::channel` is an unbounded `std::sync::mpsc` plus a ping fd; `Channel::process_events` drains up to `min(capacity+1, 1024)` queued messages per wake and invokes the callback once per message, so commands stay FIFO and a command's whole effect (state change, events, reply) is complete before the next command is served.
 - Startup order is part of the contract: display → bind socket → create globals → register the three sources → publish readiness. Binding before globals means the reported name is already connectable.
 
 ### Crate-local decisions
