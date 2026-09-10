@@ -527,8 +527,8 @@ mod tests {
     /// appended by `window_elements` (which calls `popup_surfaces`), so they ride
     /// along with their owner automatically. Asserting that needs a real
     /// `WlSurface` plus `PopupManager` state — reachable only from
-    /// `adesk-testkit` — so it is documented here and covered by the queued
-    /// `tests/integration_plan.md` scenarios, which assert real pixels.
+    /// `adesk-testkit` — so it is documented here and covered by `tests/popups.rs`,
+    /// which asserts the popup's own pixels inside its owner's frame.
     #[test]
     fn output_composition_selects_only_the_active_window() {
         // Candidates in creation order: [inactive, active, inactive].
@@ -554,8 +554,8 @@ mod tests {
     /// `headless.rs`'s `pixman_output_without_windows_is_a_clear_frame` and
     /// `pixman_output_with_overlays_but_no_windows_is_still_a_clear_frame` assert
     /// the resulting pixels. The pixel-level proof with a *tracked but inactive*
-    /// window needs a real `WlSurface` (`adesk-testkit`, see
-    /// `tests/integration_plan.md`); here the scene-level fact is asserted.
+    /// window needs a real `WlSurface` (`adesk-testkit`) and is provided by
+    /// `tests/output_composition.rs`; here the scene-level fact is asserted.
     #[test]
     fn output_scene_without_a_visible_window_is_empty() {
         let mut renderer = pixman();

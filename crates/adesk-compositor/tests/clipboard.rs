@@ -37,9 +37,11 @@
 //!
 //! # Timing
 //!
-//! Nothing sleeps or retries. `roundtrip()` flushes and waits for one reader cycle of server
-//! activity — a flush, not a `wl_display.sync` barrier — and every asynchronous observation
-//! is a bounded wait on the event that proves it.
+//! Nothing sleeps or retries. `roundtrip()` is a flush plus one buffered notification of the
+//! peer's own reader — not a `wl_display.sync` barrier, because a notification left over from
+//! an earlier read satisfies it immediately — so it orders nothing against a command sent on
+//! the compositor's command channel. That ordering comes from [`publish`]'s commit barrier,
+//! and every other asynchronous observation is a bounded wait on the event that proves it.
 //!
 //! # What the runtime never sees
 //!
@@ -110,10 +112,10 @@ struct Peer {
 
 /// Creates a client, maps its toplevel and resolves the runtime's id for the window.
 ///
-/// The first buffer commit maps the surface (and allocates the window id); the round trip
-/// after it flushes the commit and waits for the server activity it causes (the map's focus
-/// transfer reaches this connection only once the commit is processed), so the id read back
-/// below names an observed window rather than a hoped-for one.
+/// The first buffer commit maps the surface (and allocates the window id), and the snapshot
+/// read back below is the evidence for it: the record for this app id has to be listed and
+/// mapped, so the id names a window the runtime really reports. `roundtrip()` only flushes and
+/// drains this client's own reader (module docs), so it is not what proves the commit landed.
 async fn map_peer(runtime: &TestRuntime, app_id: &str, title: &str) -> Result<Peer> {
     let mut client = runtime.wayland_client()?;
     let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;
@@ -228,17 +230,48 @@ async fn give_input_serial(runtime: &TestRuntime, peer: &Peer, position: Positio
     )
 }
 
-/// Publishes `payload` from `peer`, then proves the compositor processed the publication.
+/// Publishes `payload` from `peer` and blocks until the compositor has **dispatched** the
+/// publication, while `peer` still holds the keyboard focus `set_selection` needs.
 ///
 /// `set_selection` returning `Ok` only means the requests reached the socket — whether the
 /// compositor *accepts* them is not reportable — and Smithay accepts a selection only from
-/// the client that holds keyboard focus when the request is dispatched. The round trip after
-/// the publication is what removes the race between that request (the peer's Wayland
-/// connection) and the activation commands (the compositor's command channel): the sync
-/// callback is answered only after every earlier request of that client was handled.
-async fn publish(peer: &mut Peer, mime: &str, payload: &[u8]) -> Result<()> {
+/// the client that holds keyboard focus when the request is dispatched. The request travels
+/// `peer`'s Wayland connection while a focus change travels the compositor's command channel,
+/// so the two need ordering; `roundtrip()` cannot supply it (module docs).
+///
+/// The barrier is a commit on the publishing connection plus the `SurfaceCommit` runtime event
+/// it produces: one connection's requests are dispatched in order, so observing the commit
+/// proves every earlier request of `peer` — the `set_selection` included — was already
+/// dispatched. `expected_commit_seq` is the per-window commit counter that commit must reach
+/// ([`map_peer`] commits the mapping frame, so the first barrier commit is `2`).
+async fn publish(
+    peer: &Peer,
+    events: &mut EventAssert,
+    mime: &str,
+    payload: &[u8],
+    expected_commit_seq: u64,
+) -> Result<()> {
     peer.client.set_selection(mime, payload.to_vec())?;
-    peer.client.roundtrip().await
+    peer.window.commit_pending()?;
+    let committed = events
+        .wait_for(
+            DEADLINE,
+            "a surface commit after the selection was published",
+            |event| {
+                matches!(
+                    event,
+                    RuntimeEvent::SurfaceCommit { window_id, commit_seq, .. }
+                        if *window_id == peer.id && *commit_seq >= expected_commit_seq
+                )
+            },
+        )
+        .await?;
+    assert_eq!(
+        committed.window_id(),
+        Some(peer.id),
+        "the barrier commit belongs to the publishing window"
+    );
+    Ok(())
 }
 
 /// Bounded teardown: the Wayland connections first (their reader threads join inside
@@ -253,7 +286,9 @@ async fn teardown(peers: Vec<Peer>, runtime: TestRuntime) -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    let (mut owner, reader) = two_peers(&runtime).await?;
+    // Tap before the publication: the barrier commit's `SurfaceCommit` event cannot be replayed.
+    let mut events = EventAssert::tap(&runtime);
+    let (owner, reader) = two_peers(&runtime).await?;
 
     assert_eq!(
         reader.client.selection_offer_count(),
@@ -264,7 +299,7 @@ async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
     // The owner is the focused client (it mapped last) and answers `set_selection` with a
     // serial from a real input event.
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
-    publish(&mut owner, TEXT_MIME, FIRST_PAYLOAD).await?;
+    publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
 
     // Nothing was offered to the reader yet: Smithay announces a selection only to the
     // client that currently holds the data-device focus, and that is the owner.
@@ -292,10 +327,12 @@ async fn reader_receives_the_offer_and_reads_the_exact_bytes() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    let (mut owner, reader) = two_peers(&runtime).await?;
+    // Tap before the first publication: the barrier commit's event cannot be replayed.
+    let mut events = EventAssert::tap(&runtime);
+    let (owner, reader) = two_peers(&runtime).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
-    publish(&mut owner, TEXT_MIME, FIRST_PAYLOAD).await?;
+    publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
     activate(&runtime, reader.id).await?;
 
     // First publication, as seen by the reader: offered and readable, byte for byte.
@@ -309,7 +346,7 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
     // Supersede. The owner takes the keyboard focus back first — Smithay accepts a selection
     // only from the focused client — and publishes a different payload.
     activate(&runtime, owner.id).await?;
-    publish(&mut owner, TEXT_MIME, SECOND_PAYLOAD).await?;
+    publish(&owner, &mut events, TEXT_MIME, SECOND_PAYLOAD, 3).await?;
     // Then the reader is focused again, where the *new* selection must surface as a new offer.
     activate(&runtime, reader.id).await?;
 
@@ -337,10 +374,12 @@ async fn second_set_selection_supersedes_the_first_offer() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    let (mut owner, reader) = two_peers(&runtime).await?;
+    // Tap before the publication: the barrier commit's event cannot be replayed.
+    let mut events = EventAssert::tap(&runtime);
+    let (owner, reader) = two_peers(&runtime).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
-    publish(&mut owner, TEXT_MIME, FIRST_PAYLOAD).await?;
+    publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
     activate(&runtime, reader.id).await?;
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
 
@@ -367,10 +406,12 @@ async fn unadvertised_mime_type_reads_as_none() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
-    let (mut owner, mut reader) = two_peers(&runtime).await?;
+    // Tap before the first publication: the barrier commit's event cannot be replayed.
+    let mut events = EventAssert::tap(&runtime);
+    let (owner, reader) = two_peers(&runtime).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
-    publish(&mut owner, TEXT_MIME, FIRST_PAYLOAD).await?;
+    publish(&owner, &mut events, TEXT_MIME, FIRST_PAYLOAD, 2).await?;
     activate(&runtime, reader.id).await?;
 
     // The reader is now the selection target: it holds the keyboard focus (activation) and a
@@ -385,7 +426,7 @@ async fn focus_moves_to_the_reader_and_it_publishes_back() -> Result<()> {
     // Reverse direction: as the focused client the reader can publish too. Its own real input
     // serial comes from a pointer move onto its surface, which is the focused window now.
     give_input_serial(&runtime, &reader, Position::normalized(0.25, 0.25)).await?;
-    publish(&mut reader, TEXT_MIME, READER_PAYLOAD).await?;
+    publish(&reader, &mut events, TEXT_MIME, READER_PAYLOAD, 2).await?;
 
     // Focus back to the owner: the reader's selection is announced to it, and the direction
     // of the transfer is reversed.
@@ -412,10 +453,10 @@ async fn no_runtime_event_carries_clipboard_payload() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
     // Tap before anything happens: the event broadcast does not replay.
     let mut events = EventAssert::tap(&runtime);
-    let (mut owner, reader) = two_peers(&runtime).await?;
+    let (owner, reader) = two_peers(&runtime).await?;
 
     give_input_serial(&runtime, &owner, Position::normalized(0.5, 0.5)).await?;
-    publish(&mut owner, TEXT_MIME, SECRET.as_bytes()).await?;
+    publish(&owner, &mut events, TEXT_MIME, SECRET.as_bytes(), 2).await?;
     activate(&runtime, reader.id).await?;
     reader.client.wait_for_selection_offer(1, DEADLINE)?;
     assert_eq!(
@@ -425,13 +466,14 @@ async fn no_runtime_event_carries_clipboard_payload() -> Result<()> {
     );
 
     // The publication itself produces no runtime event, so prove the tap is live *after* it by
-    // waiting for the commit that follows (the mapping commit was commit 1).
+    // waiting for the commit that follows it (the mapping commit was 1 and `publish`'s barrier
+    // commit 2, so this frame is 3).
     owner.window.commit_frame(FillPattern::default())?;
     let after = events
         .wait_for(
             DEADLINE,
             "a surface commit after the selection was published",
-            |event| matches!(event, RuntimeEvent::SurfaceCommit { commit_seq, .. } if *commit_seq >= 2),
+            |event| matches!(event, RuntimeEvent::SurfaceCommit { commit_seq, .. } if *commit_seq >= 3),
         )
         .await?;
     assert_eq!(after.window_id(), Some(owner.id));
