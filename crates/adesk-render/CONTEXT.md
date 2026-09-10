@@ -144,7 +144,6 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `render_scene` has no "nothing to render" path: an empty `Scene` (zero nodes) or nodes with empty damage still renders `Ok` as a full-size frame of the clear color (test `pixman_empty_scene_renders_clear_color`).
   Only genuine backend/import/readback failures are `Err`; callers that want "no content" to be an error must check `Scene::is_empty()` themselves.
 - A validated `RenderConfig` guarantees a non-empty frame: `render_scene` never returns a `0x0` image (`validate` rejects empty `source`/`crop` and crop non-containment); the standalone pure `crop` helper's `0x0` output (disjoint/empty rect) is rejected by `encode_png` as `InvalidImage`.
-- `RenderError::UnsupportedFormat` is mapped to `render_failed` but no code path in this crate constructs it.
 - `render_scene` returns `RenderedFrame::damage` as raw clipped rects (no coalescing); `adesk-compositor` applies `Region::simplified()` before replying.
   The rects stay in scene/window coordinates even when `crop`/`max_dimension` shrink the image, so a cropped capture's `changed_regions` can reference coordinates outside the returned image.
 - GL readback rows are already top-down in scene space; do NOT feed `TextureMapping::flipped()` into `image_from_readback` in this pipeline — it would mirror every GL capture (see Design Decisions).
