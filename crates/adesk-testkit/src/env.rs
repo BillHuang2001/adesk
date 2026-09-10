@@ -14,7 +14,7 @@
 //! *test process* has at launch time.
 //!
 //! [`TestRuntime::start_with`](crate::TestRuntime::start_with) therefore serializes every
-//! env mutation on the process-wide [`lock_process_env`] guard and always scopes the
+//! env mutation on the process-wide `lock_process_env` guard and always scopes the
 //! process env to the runtime's own [`TestEnv`] across `Server::start`, so a compositor can
 //! never bind into another runtime's — or the ambient, possibly read-only — runtime dir.
 //! When [`TestRuntimeConfig::apply_env`](crate::TestRuntimeConfig::apply_env) is `true` the

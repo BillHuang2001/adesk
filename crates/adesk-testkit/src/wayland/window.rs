@@ -72,8 +72,8 @@ fn commit_buffer(
 /// Re-attaches the buffer of the last commit and commits it again without damaging
 /// anything.
 ///
-/// Shared by [`TestWindow::commit_pending`] and [`TestPopup::commit_pending`] users (a
-/// resize re-commits the pixels already on screen, so the damage hint is empty).
+/// Backs [`TestWindow::commit_pending`] (a resize re-commits the pixels already on
+/// screen, so the damage hint is empty).
 fn recommit_buffer(surface: &WlSurface, state: &WindowSlot, conn: &Connection) -> Result<()> {
     let mut window = lock_window(state);
     if window.destroyed {

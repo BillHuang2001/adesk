@@ -69,7 +69,8 @@
 //! bounded phases, each getting the full `timeout`: (1) wait for a selection offer to exist,
 //! and (2) read the bytes to EOF. Worst case is therefore `2 * timeout`, and the failing
 //! phase is named in the error (`"read_selection selection offer"` vs `"read_selection
-//! bytes"`). [`DEFAULT_SELECTION_TIMEOUT`] is what [`read_selection`] and the serial wait in
+//! bytes"`). [`DEFAULT_SELECTION_TIMEOUT`] is what
+//! [`read_selection`](WaylandTestClient::read_selection) and the serial wait in
 //! `set_selection` use.
 //!
 //! ## Data-device focus (the delivery invariant)

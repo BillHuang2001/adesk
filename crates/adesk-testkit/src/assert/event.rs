@@ -291,7 +291,7 @@ impl EventAssert {
     /// the first event for which `pred` returns `true` is returned. Events that do not match
     /// are kept in `seen`. Errors from `try_recv` abort the wait and are returned unchanged.
     /// When the queue is empty the wait suspends on `broadcast::Receiver::recv()` rather than
-    /// polling. At the deadline it returns [`crate::wait::timeout_error`]`(what, timeout)`,
+    /// polling. At the deadline it returns `crate::wait::timeout_error(what, timeout)`,
     /// i.e. [`TestkitError::Timeout`]; `what` must name the
     /// awaited condition (for example `"window_created for org.example.demo"`). The whole
     /// wait is bounded by the single deadline; it never restarts.
@@ -328,7 +328,7 @@ impl EventAssert {
     /// [`TestkitError::Timeout`] message. The leak is bounded
     /// by the number of waits that actually time out — a test that reaches it has already
     /// failed — and keeps a single timeout shape across the harness
-    /// ([`crate::wait::timeout_error`]).
+    /// (`crate::wait::timeout_error`).
     pub async fn wait_for_expected(
         &mut self,
         expected: &Expected,

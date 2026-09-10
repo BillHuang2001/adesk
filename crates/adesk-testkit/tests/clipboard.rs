@@ -38,6 +38,15 @@
 //! activated with `activate_window` before it reads: that focus change is what makes the
 //! compositor announce the selection to it (data-device focus tracks keyboard focus).
 //!
+//! # A publication is ordered, never assumed
+//!
+//! The publication and the focus change travel different channels (the client's Wayland
+//! socket, the AGP command channel), so a test that publishes and then awaits
+//! `activate_window` races them: a publication dispatched after the focus moved is dropped
+//! silently and the selection never exists. Every publication therefore goes through
+//! [`publish`], which proves the compositor dispatched it (a commit on the publishing
+//! connection plus its `SurfaceCommit` runtime event) *before* the test moves the focus.
+//!
 //! # What this file deliberately does not do
 //!
 //! Nothing here launches an application (`apply_env(false)`: the runtime releases the
@@ -135,8 +144,9 @@ struct Peer {
 /// Creates a client, maps its toplevel and resolves the runtime's id for the window.
 ///
 /// The first buffer commit maps the surface (and allocates the window id); the roundtrip
-/// proves the compositor processed it before the id is read over AGP, so every later
-/// assertion works against an observed window rather than a hoped-for one.
+/// drains this client's own reader cycle, and the `list_windows` query that follows is what
+/// proves the compositor processed the commit — the window is read back from runtime state,
+/// never hoped for.
 async fn map_peer(runtime: &TestRuntime, agp: &Client, app_id: &str, title: &str) -> Result<Peer> {
     let mut client = runtime.wayland_client()?;
     let window = client.create_toplevel(ToplevelSpec::new(app_id, title, Size::new(320, 200)))?;
@@ -188,6 +198,51 @@ async fn give_input_serial(agp: &Client, peer: &Peer, tiled: Rect) -> Result<()>
         "pointer enter on the publishing window",
         |event| matches!(event, PointerEvent::Enter { .. }),
     )?;
+    Ok(())
+}
+
+/// Publishes `payload` from `owner` and blocks until the compositor has *dispatched* the
+/// publication, while `owner` still holds the keyboard focus `set_selection` needs.
+///
+/// `set_selection` only puts the requests on the wire (`Ok(())` means "on the wire", not
+/// "accepted"), and `roundtrip()` is not a barrier — it flushes and waits for one cycle of
+/// *this* client's reader queue, never for the compositor to dispatch. So an awaited AGP
+/// `activate_window` issued right after a publication races it across two independent
+/// channels: Smithay silently drops a `set_selection` whose client no longer holds the
+/// keyboard focus, and the publication then never exists — the next focused client is
+/// offered nothing (or the *previous* selection is re-announced to it).
+///
+/// The barrier is a commit on the publishing connection plus the `SurfaceCommit` runtime
+/// event it produces: one connection's requests are dispatched in order, so observing the
+/// commit proves the earlier `set_selection` was already dispatched. `expected_commit_seq`
+/// is the per-window commit counter that commit must reach ([`map_peer`] commits the
+/// mapping frame, so the first barrier commits `2`).
+async fn publish(
+    owner: &Peer,
+    events: &mut EventAssert,
+    payload: &[u8],
+    expected_commit_seq: u64,
+) -> Result<()> {
+    owner.client.set_selection(TEXT_MIME, payload)?;
+    owner.window.commit_pending()?;
+    let committed = events
+        .wait_for(
+            DEADLINE,
+            "a surface commit after the selection was published",
+            |event| {
+                matches!(
+                    event,
+                    RuntimeEvent::SurfaceCommit { window_id, commit_seq, .. }
+                        if *window_id == owner.id && *commit_seq >= expected_commit_seq
+                )
+            },
+        )
+        .await?;
+    assert_eq!(
+        committed.window_id(),
+        Some(owner.id),
+        "the barrier commit belongs to the publishing window"
+    );
     Ok(())
 }
 
@@ -275,13 +330,16 @@ async fn teardown(peers: Vec<Peer>, agp: Client, runtime: TestRuntime) -> Result
 #[tokio::test]
 async fn selection_round_trip_between_two_clients() -> Result<()> {
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    // Tap before the publication: the barrier commit's event must be observed, and a
+    // broadcast channel does not replay.
+    let mut events = EventAssert::tap(&runtime);
     let agp = runtime.client().await?;
     let (owner, reader) = two_peers(&runtime, &agp).await?;
 
     // The owner is the focused client (it mapped last) and gets a real input serial, so the
     // compositor has every reason to accept the publication.
     give_input_serial(&agp, &owner, runtime.tiled_rect()).await?;
-    owner.client.set_selection(TEXT_MIME, FIRST_PAYLOAD)?;
+    publish(&owner, &mut events, FIRST_PAYLOAD, 2).await?;
 
     // The reader becomes the focused client — the one the compositor announces the selection
     // to (data-device focus tracks keyboard focus).
@@ -306,11 +364,12 @@ async fn selection_round_trip_between_two_clients() -> Result<()> {
 async fn second_set_selection_invalidates_the_first_offer() -> Result<()> {
     const TEST: &str = "second_set_selection_invalidates_the_first_offer";
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let mut events = EventAssert::tap(&runtime);
     let agp = runtime.client().await?;
     let (owner, reader) = two_peers(&runtime, &agp).await?;
 
     give_input_serial(&agp, &owner, runtime.tiled_rect()).await?;
-    owner.client.set_selection(TEXT_MIME, FIRST_PAYLOAD)?;
+    publish(&owner, &mut events, FIRST_PAYLOAD, 2).await?;
     agp.activate_window(reader.id).await?;
     let delivery = selection_delivery(&reader.client, TEST)?;
 
@@ -328,7 +387,7 @@ async fn second_set_selection_invalidates_the_first_offer() -> Result<()> {
 
     // Supersede: the owner takes the keyboard focus back and publishes a new selection...
     agp.activate_window(owner.id).await?;
-    owner.client.set_selection(TEXT_MIME, SECOND_PAYLOAD)?;
+    publish(&owner, &mut events, SECOND_PAYLOAD, 3).await?;
     // ... and the reader is focused again, where the *new* selection must surface.
     agp.activate_window(reader.id).await?;
 
@@ -355,12 +414,13 @@ async fn second_set_selection_invalidates_the_first_offer() -> Result<()> {
 async fn unadvertised_mime_fails_cleanly() -> Result<()> {
     const TEST: &str = "unadvertised_mime_fails_cleanly";
     let runtime = TestRuntime::start_with(clipboard_config()).await?;
+    let mut events = EventAssert::tap(&runtime);
     let agp = runtime.client().await?;
     let (owner, reader) = two_peers(&runtime, &agp).await?;
 
     // The owner advertises exactly one mime type; the reader asks for a different one.
     give_input_serial(&agp, &owner, runtime.tiled_rect()).await?;
-    owner.client.set_selection(TEXT_MIME, FIRST_PAYLOAD)?;
+    publish(&owner, &mut events, FIRST_PAYLOAD, 2).await?;
     agp.activate_window(reader.id).await?;
 
     if selection_delivery(&reader.client, TEST)? {

@@ -11,8 +11,8 @@
 //!
 //! The bound `wl_seat` is what makes *injection* observable: the client creates a
 //! `wl_pointer` and a `wl_keyboard` as soon as the seat advertises those capabilities, and
-//! every event they deliver is appended to a history the reader thread owns (see
-//! [`input`]). A test reads it with [`WaylandTestClient::pointer_events`] /
+//! every event they deliver is appended to a history the reader thread owns (see the
+//! `input` module). A test reads it with [`WaylandTestClient::pointer_events`] /
 //! [`WaylandTestClient::keyboard_events`] or blocks on it with
 //! [`WaylandTestClient::wait_for_pointer_event`] /
 //! [`WaylandTestClient::wait_for_keyboard_event`] (plus the `wait_for_pointer_button` /
@@ -234,12 +234,12 @@ impl WaylandTestClient {
     ///    `min(server, interface_max)`; a missing global is
     ///    [`TestkitError::Unsupported`].
     /// 5. `data_device_manager.get_data_device(seat, qhandle, ())` creates the client's
-    ///    `wl_data_device` (the clipboard object, see [`clipboard`]) and it is handed to
+    ///    `wl_data_device` (the clipboard object, see the `clipboard` module) and it is handed to
     ///    `ClientState::new` *before* the reader thread starts, so no offer/selection event
     ///    can arrive before there is state to record it in.
     /// 6. Spawn the reader thread described in the module docs with a clone of `state`,
     ///    the event queue and an `UnboundedSender<PumpEvent>`, then wait (bounded by
-    ///    [`ROUNDTRIP_TIMEOUT`]) for the real `wl_shm.format` events to arrive. A runtime
+    ///    `ROUNDTRIP_TIMEOUT`) for the real `wl_shm.format` events to arrive. A runtime
     ///    that never advertises `ARGB8888` is
     ///    [`TestkitError::Unsupported`]: every buffer the
     ///    harness commits is `Argb8888`, so a silent downgrade would corrupt every pixel
@@ -338,7 +338,7 @@ impl WaylandTestClient {
     ///
     /// The history is append-only until [`Self::clear_input_events`], and recording happens
     /// on the reader thread, so events are present even if no pump was ever called. The
-    /// values are exactly what the protocol delivered (see [`input`] for the recording
+    /// values are exactly what the protocol delivered (see the `input` module for the recording
     /// rules).
     pub fn pointer_events(&self) -> Vec<PointerEvent> {
         lock_client(&self.state).pointer_events.clone()
@@ -354,7 +354,7 @@ impl WaylandTestClient {
     ///
     /// Both histories are emptied; the latest input serial is deliberately *kept*, because
     /// a serial belongs to the seat's input stream rather than to the recorded history
-    /// (see [`input`]). A test uses this to scope an assertion to the actions it is about
+    /// (see the `input` module). A test uses this to scope an assertion to the actions it is about
     /// to perform.
     pub fn clear_input_events(&self) {
         let mut state = lock_client(&self.state);
@@ -660,8 +660,8 @@ impl WaylandTestClient {
 
     /// Flushes pending requests and waits for one full reader cycle.
     ///
-    /// `conn.flush()` then the next [`PumpEvent`] with an internal
-    /// [`ROUNDTRIP_TIMEOUT`] bound; [`TestkitError::Timeout`] with `what = "wayland
+    /// `conn.flush()` then the next `PumpEvent` with an internal
+    /// `ROUNDTRIP_TIMEOUT` bound; [`TestkitError::Timeout`] with `what = "wayland
     /// roundtrip"` on expiry and [`TestkitError::ConnectionClosed`] on EOF. The read
     /// happens on the reader thread, never here, so this can be called from async tests
     /// without blocking the executor.
@@ -695,7 +695,7 @@ impl WaylandTestClient {
     /// Closes the connection and joins the reader thread with a bounded wait.
     ///
     /// Marks `closed`, `socket.shutdown(Shutdown::Both)` (the reader's blocking wait then
-    /// fails with EOF and the thread sends [`PumpEvent::Closed`] and exits), takes the
+    /// fails with EOF and the thread sends `PumpEvent::Closed` and exits), takes the
     /// reader handle and joins it inside
     /// `tokio::time::timeout(CLOSE_TIMEOUT, tokio::task::spawn_blocking(...))`;
     /// [`TestkitError::Timeout`] with `what = "wayland reader thread"` if it does not exit.

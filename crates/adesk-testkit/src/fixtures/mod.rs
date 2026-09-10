@@ -194,7 +194,7 @@ impl FixtureDir {
 pub struct DesktopEntryFixture {
     /// `Name` (the displayed name).
     pub name: String,
-    /// `Exec` argument vector, serialized by [`exec_arg`] so the registry's tokenizer returns
+    /// `Exec` argument vector, serialized by `exec_arg` so the registry's tokenizer returns
     /// it unchanged.
     pub exec: Vec<String>,
     /// `Icon` name or path.
@@ -314,7 +314,7 @@ impl DesktopEntryFixture {
     /// ```
     ///
     /// The text ends with a trailing newline and contains no blank lines. `Exec` arguments are
-    /// single-space separated and quoted by [`exec_arg`], so the registry's tokenizer returns
+    /// single-space separated and quoted by `exec_arg`, so the registry's tokenizer returns
     /// them unchanged; every other value is verbatim (`Categories` items must not contain `;`).
     pub fn to_desktop_file(&self) -> String {
         let mut text = String::from("[Desktop Entry]\nType=Application\n");
