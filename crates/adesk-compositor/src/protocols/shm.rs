@@ -37,8 +37,8 @@ impl BufferHandler for State {
         // Both backends implement `Renderer::cleanup_texture_cache`; it drops the
         // cache entries whose client buffer/dmabuf is gone.
         match &mut self.renderer {
-            HeadlessRenderer::Gl(renderer) => sweep(renderer.cleanup_texture_cache()),
-            HeadlessRenderer::Pixman(renderer) => sweep(renderer.cleanup_texture_cache()),
+            HeadlessRenderer::Gl { renderer, .. } => sweep(renderer.cleanup_texture_cache()),
+            HeadlessRenderer::Pixman { renderer, .. } => sweep(renderer.cleanup_texture_cache()),
         }
     }
 }

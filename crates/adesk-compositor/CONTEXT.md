@@ -137,10 +137,10 @@ Seat and input:
 Rendering:
 - Headless GL: `EGLSurfacelessDisplay` (`smithay::backend::egl::native`), `unsafe EGLDisplay::new(native)`, `EGLContext::new(&display)`, `unsafe EGLContext::make_current()`, `unsafe GlesRenderer::new(context)`; pixman: `PixmanRenderer::new()`.
 - `GlesRenderer` is `!Send` (fits the single-thread model); `PixmanRenderer` also implements `ImportDma`; GL readback is y-flipped (`GlesMapping::flipped() == true`) and GL readback rows arrive top-down, so the image conversion must not double-flip.
-- There is **no unified offscreen abstraction** (GL uses `Offscreen<GlesTexture>`, pixman `Offscreen<Image>`), which is why `HeadlessRenderer` is an enum with per-backend render paths; the GL variant is boxed (`Gl(Box<GlesRenderer>)`) to keep the enum small.
+- There is **no unified offscreen abstraction** (GL uses `Offscreen<GlesTexture>`, pixman `Offscreen<Image>`), which is why `HeadlessRenderer` is an enum with per-backend render paths; the GL variant is boxed (`Gl { renderer: Box<GlesRenderer>, pool: TargetPool<GlTarget> }`) to keep the enum small, and each variant carries its own `TargetPool` so a backend's offscreen targets are only ever reused by the same backend.
 - `render_elements_from_surface_tree` walks the whole surface tree (subsurfaces yes, **popups no**); popups come from the static `PopupManager::popups_for_surface(&WlSurface)` yielding `(PopupKind, Point)` and are collected separately.
 - `adesk-render`'s `Scene` is bottom-to-top; `OutputDamageTracker::render_output` wants front-to-back — the render crate handles the ordering, so this crate only builds `Scene` nodes.
-- The window/output paths render through `adesk_render::{create_target, render_scene}`; this crate never uses Smithay's `OutputDamageTracker`.
+- The window/output paths render through `adesk_render::{TargetPool, render_scene}` — a per-backend target pool `acquire`s (or allocates) the offscreen target and reuses it on repeat captures of the same size; this crate never uses Smithay's `OutputDamageTracker`.
 - `HeadlessRenderer::render_output(output_size, windows, region, max_dimension)` — an empty window list is a valid clear frame (this is why `output_size` is passed explicitly).
 
 Event loop:
@@ -251,9 +251,9 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 - The owner walk (`WmBridge::window_for_surface`) and the offset walk (`State::window_offset`) are deliberately *not* fused: their stop conditions differ (the owner walk continues past a node with no renderer view state, while a subsurface of a popup stops at the popup for offsets), so fusing them would change offsets/damage.
 - Per-observation lookups are O(1) and clone no `WindowInfo`: `render_window` reads one rect via `WmBridge::window_geometry`, and `render_output` resolves `wm.active_window()` and builds a 0/1-element `OutputWindow` list instead of iterating every tracked window's root surface.
 - `State::inject_key` does no per-event keysym or keycode resolution: `InputInjector::new` caches the `Shift_L`/`ISO_Level3_Shift` keycodes (`shift_keycode`/`level3_keycode`, `Option<u32>` so a keymap without them keeps the lazy `invalid_request`), and the modifier list is built on the stack rather than in a per-call `Vec`.
-- Dominant per-observation cost: every `RenderWindow`/`RenderOutput` allocates a fresh offscreen target (`HeadlessRenderer::render_window`/`render_output` → `adesk_render::create_target`) of the window/output size (≈4 MiB for 1280×800), clears and redraws every scene node, reads back the **entire** target, and only then crops/downscales (`adesk_render::render_scene`). No target or frame is reused between demands, and a small `region` crop does not shrink the readback.
+- Per-observation cost: each `RenderWindow`/`RenderOutput` clears and redraws every scene node and reads back only the requested sub-rectangle (`adesk_render::render_scene`, crop-sized `copy_framebuffer`); the offscreen target itself is no longer reallocated per capture — it is `acquire`d from the backend's `adesk_render::TargetPool`, which retains one target per exact source size (≈4 MiB at 1280×800), so repeat captures of the same window/output reuse the same buffer instead of allocating a fresh one. A size the pool does not hold (or one it evicted, cap 4) still allocates; a target whose render failed is dropped, never reused.
 - `run.rs` calls `display.flush_clients()` after every command (including `QueryState`/`ReserveSeq`/`NoteLaunch`, which queue no seat bytes) and after every display-fd dispatch.
-- Deliberately NOT optimized (class-(b); each changes caching/rendering semantics and needs a design decision, not a drive-by edit): render-target pooling/reuse across observations, skipping the render when no commit landed since the last demand, and damage-scissored rendering.
+- Deliberately NOT optimized (class-(b); each changes caching/rendering semantics and needs a design decision, not a drive-by edit): skipping the render when no commit landed since the last demand, and damage-scissored rendering.
 
 ## Known Issues
 
@@ -263,7 +263,7 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 ## Dependencies
 
-- Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`create_target`/`render_scene`/readback/image conversion`); dev-dependency `adesk-testkit` (in-process runtime, Wayland test client, image assertions — used only by the crate-local integration suites).
+- Internal: `adesk-core` (domain types, `RuntimeEvent`), `adesk-wm` (window model + policy), `adesk-render` (`Scene`/`TargetPool`/`render_scene`/readback/image conversion`); dev-dependency `adesk-testkit` (in-process runtime, Wayland test client, image assertions — used only by the crate-local integration suites).
 - External (all via root `[workspace.dependencies]`): `smithay 0.7` with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow`; `calloop 0.14`; `tokio 1` (sync/rt/time/net — used in `src`, not only tests); `thiserror 2`; `tracing 0.1`.
 - System (Nix dev shell only): libxkbcommon + xkeyboard-config (`XKB_CONFIG_ROOT`), pixman, libEGL/GLES (llvmpipe), libwayland, libdrm/gbm, libudev.
 - Builds must go through `./scripts/dev.sh`; bare `cargo` cannot link outside the shell.

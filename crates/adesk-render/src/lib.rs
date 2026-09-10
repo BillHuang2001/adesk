@@ -51,6 +51,7 @@ pub mod error;
 pub mod image;
 pub mod output;
 pub mod pipeline;
+pub mod pool;
 pub mod scene;
 
 pub use config::{RenderConfig, DEFAULT_CLEAR_COLOR, READBACK_FORMAT, TARGET_FORMAT};
@@ -59,4 +60,5 @@ pub use error::{RenderError, Result};
 pub use image::{crop, downscale, encode_png, fit_dimensions, image_from_readback};
 pub use output::{create_target, OffscreenTarget, RenderedFrame};
 pub use pipeline::render_scene;
+pub use pool::TargetPool;
 pub use scene::{Scene, SceneNode};

@@ -26,7 +26,7 @@ use std::rc::Rc;
 use adesk_core::{Rect, Region, Size as CoreSize};
 use adesk_render::{
     create_target, render_scene, RenderConfig, RenderError, RenderedFrame, Scene, SceneNode,
-    TARGET_FORMAT,
+    TargetPool, TARGET_FORMAT,
 };
 use smithay::backend::egl::native::EGLSurfacelessDisplay;
 use smithay::backend::egl::{EGLContext, EGLDisplay};
@@ -542,6 +542,56 @@ fn pixman_repeated_renders_are_stable() {
 }
 
 // ---------------------------------------------------------------------------
+// Target reuse (pool) — a reused target must never leak stale pixels
+// ---------------------------------------------------------------------------
+
+/// Renders `scene` through `pool` at `config`'s size, releasing the target back
+/// into the pool exactly as `adesk-compositor` does on a successful capture.
+fn render_through_pool(
+    renderer: &mut PixmanRenderer,
+    pool: &mut TargetPool<PixmanTarget>,
+    scene: &Scene<TestElement>,
+    config: &RenderConfig,
+) -> RenderedFrame {
+    let mut target = pool
+        .acquire(renderer, config.target_size())
+        .expect("pooled target");
+    let frame = render_scene(renderer, &mut target, scene, config).expect("render");
+    pool.release(target);
+    frame
+}
+
+#[test]
+fn reused_target_does_not_leak_pixels_into_a_node_free_frame() {
+    let fixture = canonical_fixture();
+    let mut renderer = PixmanRenderer::new().expect("pixman renderer");
+    let mut pool = TargetPool::<PixmanTarget>::new();
+
+    // First pass: the canonical scene covers the whole target with node pixels.
+    let first = render_through_pool(&mut renderer, &mut pool, &fixture.scene, &fixture.config);
+    assert_canonical(&fixture, &first);
+
+    // Second pass: same size, same pool, but a node-free (clear-only) scene. The
+    // reused target must come back entirely clear — the pipeline clears the whole
+    // target before drawing, so no pixel from the first pass may survive.
+    let empty = Scene::<TestElement>::new(42);
+    let second = render_through_pool(&mut renderer, &mut pool, &empty, &fixture.config);
+
+    assert_eq!(second.size(), CoreSize::new(8, 8));
+    assert_eq!(second.commit_seq, 42);
+    assert!(second.damage.is_empty(), "an empty scene draws nothing");
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(
+                pixel(&second, x, y),
+                CLEAR,
+                "stale pixel leaked at ({x},{y}) through a reused target"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GL renderer (gated: no GPU in CI, llvmpipe only)
 // ---------------------------------------------------------------------------
 
@@ -672,4 +722,49 @@ fn gl_renders_canonical_scene() {
         "GL test ran: surfaceless EGL + GlesRenderer matched the software path \
          exactly (identical pixels)"
     );
+}
+
+/// GL twin of `reused_target_does_not_leak_pixels_into_a_node_free_frame`: a
+/// `GlesRenderbuffer` returned to the pool and reused for a clear-only pass must
+/// not leak the previous frame's pixels either.
+#[test]
+fn gl_reused_target_does_not_leak_pixels_into_a_node_free_frame() {
+    let Some((_display, mut renderer)) = gl_renderer() else {
+        return;
+    };
+
+    let fixture = canonical_fixture();
+    let mut pool = TargetPool::<GlesRenderbuffer>::new();
+
+    let mut target = match pool.acquire(&mut renderer, fixture.config.target_size()) {
+        Ok(target) => target,
+        Err(err) => {
+            eprintln!("skipping GL test: GL renderbuffer target unavailable: {err}");
+            return;
+        }
+    };
+    let first = render_scene(&mut renderer, &mut target, &fixture.scene, &fixture.config)
+        .expect("GL render");
+    pool.release(target);
+    assert_eq!(pixel(&first, 0, 0), RED8, "first pass drew the scene");
+
+    let empty = Scene::<TestElement>::new(0);
+    let mut target = pool
+        .acquire(&mut renderer, fixture.config.target_size())
+        .expect("pooled GL target");
+    let second = render_scene(&mut renderer, &mut target, &empty, &fixture.config)
+        .expect("GL clear render");
+    pool.release(target);
+
+    for y in 0..8 {
+        for x in 0..8 {
+            assert_eq!(
+                pixel(&second, x, y),
+                CLEAR,
+                "stale GL pixel leaked at ({x},{y}) through a reused target"
+            );
+        }
+    }
+
+    eprintln!("GL test ran: a reused GlesRenderbuffer produced a clean clear frame");
 }

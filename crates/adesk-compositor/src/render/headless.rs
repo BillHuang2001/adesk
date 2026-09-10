@@ -6,9 +6,11 @@
 //! never moved to another thread.
 //!
 //! Pixel production itself belongs to `adesk-render`: this module builds the
-//! [`RenderConfig`], asks [`elements`] for the scene, and hands
-//! both to [`adesk_render::render_scene`], which allocates the offscreen target,
-//! draws, reads back, crops and downscales. Nothing here touches raw pixels.
+//! [`RenderConfig`], asks [`elements`] for the scene, and hands both — plus a
+//! per-backend [`TargetPool`] — to [`adesk_render::render_scene`], which draws,
+//! reads back, crops and downscales. Nothing here touches raw pixels. The pool
+//! retains one offscreen target per source size so repeated captures of the same
+//! window/output stop re-allocating a target every time.
 //!
 //! # Facts this module depends on
 //!
@@ -20,8 +22,9 @@
 //!   uses `Offscreen<GlesRenderbuffer>`, the pixman path
 //!   `Offscreen<pixman::Image<'static, 'static>>` (Smithay *does* re-export
 //!   pixman's `Image` as `smithay::reexports::pixman::Image`, so no extra
-//!   dependency is needed). Both are created through
-//!   [`adesk_render::create_target`] and rendered through
+//!   dependency is needed). Both targets are acquired from a
+//!   [`adesk_render::TargetPool`] (which allocates through
+//!   [`adesk_render::create_target`] on a miss) and rendered through
 //!   [`adesk_render::render_scene`], which is why the two backends share one
 //!   generic implementation below.
 //! * **GL readback rows are already top-down in scene order.** `adesk-render`
@@ -43,7 +46,7 @@
 //! falls back to pixman with a warning. The result is reported by `ping`.
 
 use adesk_core::{Rect, Size};
-use adesk_render::{create_target, render_scene, RenderConfig, RenderError, Scene};
+use adesk_render::{render_scene, RenderConfig, RenderError, Scene, TargetPool};
 use smithay::{
     backend::{
         allocator::{format::FormatSet, Format},
@@ -82,10 +85,22 @@ type PixmanTarget = PixmanImage<'static, 'static>;
 /// [`dmabuf_formats`](HeadlessRenderer::dmabuf_formats), which asks the concrete
 /// backend.
 pub(crate) enum HeadlessRenderer {
-    /// EGL/GLES renderer built on a surfaceless EGL display (boxed: it is ~6 KiB).
-    Gl(Box<GlesRenderer>),
-    /// pixman software renderer (always available, no GPU required).
-    Pixman(PixmanRenderer),
+    /// EGL/GLES renderer built on a surfaceless EGL display (boxed: it is ~6 KiB),
+    /// with its offscreen-target reuse pool.
+    Gl {
+        /// The GLES renderer.
+        renderer: Box<GlesRenderer>,
+        /// Cached offscreen targets for repeated captures of the same size.
+        pool: TargetPool<GlTarget>,
+    },
+    /// pixman software renderer (always available, no GPU required), with its
+    /// offscreen-target reuse pool.
+    Pixman {
+        /// The software renderer.
+        renderer: PixmanRenderer,
+        /// Cached offscreen targets for repeated captures of the same size.
+        pool: TargetPool<PixmanTarget>,
+    },
 }
 
 impl HeadlessRenderer {
@@ -98,13 +113,25 @@ impl HeadlessRenderer {
     ///   builds the pixman renderer.
     pub(crate) fn create(kind: RendererKind) -> crate::Result<HeadlessRenderer> {
         match kind {
-            RendererKind::Pixman => Ok(HeadlessRenderer::Pixman(create_pixman()?)),
-            RendererKind::Gl => Ok(HeadlessRenderer::Gl(Box::new(create_gl()?))),
+            RendererKind::Pixman => Ok(HeadlessRenderer::Pixman {
+                renderer: create_pixman()?,
+                pool: TargetPool::new(),
+            }),
+            RendererKind::Gl => Ok(HeadlessRenderer::Gl {
+                renderer: Box::new(create_gl()?),
+                pool: TargetPool::new(),
+            }),
             RendererKind::Auto => match create_gl() {
-                Ok(renderer) => Ok(HeadlessRenderer::Gl(Box::new(renderer))),
+                Ok(renderer) => Ok(HeadlessRenderer::Gl {
+                    renderer: Box::new(renderer),
+                    pool: TargetPool::new(),
+                }),
                 Err(error) => {
                     tracing::warn!(error = %error, "GL renderer unavailable, falling back to pixman");
-                    Ok(HeadlessRenderer::Pixman(create_pixman()?))
+                    Ok(HeadlessRenderer::Pixman {
+                        renderer: create_pixman()?,
+                        pool: TargetPool::new(),
+                    })
                 }
             },
         }
@@ -114,8 +141,8 @@ impl HeadlessRenderer {
     /// AGP `ping` result (`"gl"` / `"pixman"`).
     pub(crate) fn name(&self) -> RendererName {
         match self {
-            HeadlessRenderer::Gl(_) => RendererName::Gl,
-            HeadlessRenderer::Pixman(_) => RendererName::Pixman,
+            HeadlessRenderer::Gl { .. } => RendererName::Gl,
+            HeadlessRenderer::Pixman { .. } => RendererName::Pixman,
         }
     }
 
@@ -131,8 +158,8 @@ impl HeadlessRenderer {
     /// converts through `IntoIterator<Item = Format>`.
     pub(crate) fn dmabuf_formats(&self) -> Vec<Format> {
         let formats: FormatSet = match self {
-            HeadlessRenderer::Gl(renderer) => renderer.dmabuf_formats(),
-            HeadlessRenderer::Pixman(renderer) => renderer.dmabuf_formats(),
+            HeadlessRenderer::Gl { renderer, .. } => renderer.dmabuf_formats(),
+            HeadlessRenderer::Pixman { renderer, .. } => renderer.dmabuf_formats(),
         };
         formats.into_iter().collect()
     }
@@ -156,8 +183,12 @@ impl HeadlessRenderer {
     ) -> crate::Result<RenderedFrame> {
         let config = render_config(geometry.size(), region, max_dimension);
         match self {
-            HeadlessRenderer::Gl(renderer) => render_window_gl(renderer, surface, &config),
-            HeadlessRenderer::Pixman(renderer) => render_window_pixman(renderer, surface, &config),
+            HeadlessRenderer::Gl { renderer, pool } => {
+                render_window_gl(renderer, pool, surface, &config)
+            }
+            HeadlessRenderer::Pixman { renderer, pool } => {
+                render_window_pixman(renderer, pool, surface, &config)
+            }
         }
     }
 
@@ -180,8 +211,12 @@ impl HeadlessRenderer {
     ) -> crate::Result<RenderedFrame> {
         let config = render_config(output_size, region, max_dimension);
         match self {
-            HeadlessRenderer::Gl(renderer) => render_output_gl(renderer, windows, &config),
-            HeadlessRenderer::Pixman(renderer) => render_output_pixman(renderer, windows, &config),
+            HeadlessRenderer::Gl { renderer, pool } => {
+                render_output_gl(renderer, pool, windows, &config)
+            }
+            HeadlessRenderer::Pixman { renderer, pool } => {
+                render_output_pixman(renderer, pool, windows, &config)
+            }
         }
     }
 }
@@ -246,13 +281,15 @@ fn render_config(source: Size, region: Option<Rect>, max_dimension: Option<u32>)
     config
 }
 
-/// Shared render pass: allocate the backend target, render the scene, convert
-/// the pipeline frame into the compositor's reply payload.
+/// Shared render pass: acquire a backend target from `pool`, render the scene,
+/// return the target to the pool (on success only), and convert the pipeline
+/// frame into the compositor's reply payload.
 ///
 /// `T` is the backend's offscreen target type; the caller picks it, everything
 /// else is renderer-independent.
 fn render_scene_frame<R, T, E>(
     renderer: &mut R,
+    pool: &mut TargetPool<T>,
     scene: &Scene<E>,
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame>
@@ -264,13 +301,25 @@ where
     // Validate before allocating: an empty source or a crop outside the source is
     // a client mistake (`invalid_request`), not a renderer failure.
     config.validate().map_err(render_error)?;
-    let mut target = create_target::<R, T>(renderer, config.target_size()).map_err(render_error)?;
-    let frame = render_scene(renderer, &mut target, scene, config).map_err(render_error)?;
-    Ok(RenderedFrame::new(
-        frame.image,
-        frame.commit_seq,
-        frame.damage.simplified(),
-    ))
+    // A cached target of the same source size is reused; otherwise one is
+    // allocated. The pipeline clears the whole target before drawing, so reuse
+    // is byte-identical to a fresh allocation (see `adesk_render::TargetPool`).
+    let mut target = pool
+        .acquire(renderer, config.target_size())
+        .map_err(render_error)?;
+    match render_scene(renderer, &mut target, scene, config) {
+        Ok(frame) => {
+            // Only a target that completed a full, successful clear-and-draw
+            // pass is safe to cache; a failed render drops it here.
+            pool.release(target);
+            Ok(RenderedFrame::new(
+                frame.image,
+                frame.commit_seq,
+                frame.damage.simplified(),
+            ))
+        }
+        Err(error) => Err(render_error(error)),
+    }
 }
 
 /// Maps a pipeline failure onto the compositor error that carries the right AGP
@@ -288,10 +337,11 @@ fn render_error(error: RenderError) -> CompositorError {
 /// GL path for [`HeadlessRenderer::render_window`].
 fn render_window_gl(
     renderer: &mut GlesRenderer,
+    pool: &mut TargetPool<GlTarget>,
     surface: &WlSurface,
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_window_frame::<_, GlTarget>(renderer, surface, config)
+    render_window_frame::<_, GlTarget>(renderer, pool, surface, config)
 }
 
 /// pixman path for [`HeadlessRenderer::render_window`].
@@ -301,19 +351,21 @@ fn render_window_gl(
 /// pipeline failure surfaces as [`CompositorError::Render`] — never a panic.
 fn render_window_pixman(
     renderer: &mut PixmanRenderer,
+    pool: &mut TargetPool<PixmanTarget>,
     surface: &WlSurface,
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_window_frame::<_, PixmanTarget>(renderer, surface, config)
+    render_window_frame::<_, PixmanTarget>(renderer, pool, surface, config)
 }
 
 /// GL path for [`HeadlessRenderer::render_output`].
 fn render_output_gl(
     renderer: &mut GlesRenderer,
+    pool: &mut TargetPool<GlTarget>,
     windows: &[OutputWindow],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_output_frame::<_, GlTarget>(renderer, windows, config)
+    render_output_frame::<_, GlTarget>(renderer, pool, windows, config)
 }
 
 /// pixman path for [`HeadlessRenderer::render_output`].
@@ -322,15 +374,17 @@ fn render_output_gl(
 /// output (including the clear frame with no windows) works without a GPU.
 fn render_output_pixman(
     renderer: &mut PixmanRenderer,
+    pool: &mut TargetPool<PixmanTarget>,
     windows: &[OutputWindow],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_output_frame::<_, PixmanTarget>(renderer, windows, config)
+    render_output_frame::<_, PixmanTarget>(renderer, pool, windows, config)
 }
 
 /// Backend-independent window render: collect the window's scene and render it.
 fn render_window_frame<R, T>(
     renderer: &mut R,
+    pool: &mut TargetPool<T>,
     surface: &WlSurface,
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame>
@@ -340,12 +394,13 @@ where
     R::Error: Send + Sync + 'static,
 {
     let scene = elements::window_scene(renderer, surface);
-    render_scene_frame(renderer, &scene, config)
+    render_scene_frame(renderer, pool, &scene, config)
 }
 
 /// Backend-independent output render: collect the composition and render it.
 fn render_output_frame<R, T>(
     renderer: &mut R,
+    pool: &mut TargetPool<T>,
     windows: &[OutputWindow],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame>
@@ -355,7 +410,7 @@ where
     R::Error: Send + Sync + 'static,
 {
     let scene: Scene<OutputRenderElements<R>> = elements::output_scene(renderer, windows);
-    render_scene_frame(renderer, &scene, config)
+    render_scene_frame(renderer, pool, &scene, config)
 }
 
 #[cfg(test)]
@@ -437,10 +492,12 @@ mod tests {
     #[test]
     fn invalid_window_crop_is_an_invalid_request() {
         let mut renderer = create_pixman().expect("pixman renderer");
+        let mut pool = TargetPool::new();
         let scene = Scene::<OutputRenderElements<PixmanRenderer>>::new(0);
         let config = render_config(Size::new(10, 10), Some(Rect::new(50, 50, 4, 4)), None);
-        let error = render_scene_frame::<_, PixmanTarget, _>(&mut renderer, &scene, &config)
-            .expect_err("a crop outside the window is rejected");
+        let error =
+            render_scene_frame::<_, PixmanTarget, _>(&mut renderer, &mut pool, &scene, &config)
+                .expect_err("a crop outside the window is rejected");
         assert!(matches!(error, CompositorError::InvalidRequest(_)));
         assert_eq!(error.code(), adesk_core::ErrorCode::InvalidRequest);
     }
