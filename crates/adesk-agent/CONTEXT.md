@@ -38,7 +38,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 ### Artifact & scaffolding
 - `RunReport` (`src/report.rs`) — `to_json_pretty()`, `write(path)` for `--report`.
 - `testing::ScriptedClient` + `ScriptedResponse` + `ClientCall`/`ClientMethod` (`src/testing.rs`, `feature = "test-support"` or `cfg(test)`).
-- `adesk-agent` binary (`src/main.rs`) — clap CLI: `--socket`, `--provider mock|openai`, `--task`, `--scenario`, `--max-steps`, `--report`, `--model`, `--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`; env `ADESK_SOCKET`, `ADESK_AGENT_*`; exit 0 success / 1 task or expectation failure / 2 config error.
+- `adesk-agent` binary (`src/main.rs`) — clap CLI: `--socket`, `--provider mock|dummy|openai`, `--task`, `--scenario`, `--max-steps`, `--report`, `--model`, `--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`, plus the dummy-provider knobs `--dummy-mode fixed|random` (`ADESK_AGENT_DUMMY_MODE`), `--dummy-seed <N>` (`ADESK_AGENT_DUMMY_SEED`), `--dummy-finish-probability <F>` (`ADESK_AGENT_DUMMY_FINISH_PROBABILITY`), `--dummy-step-budget <N>` (`ADESK_AGENT_DUMMY_STEP_BUDGET`); env `ADESK_SOCKET`, `ADESK_AGENT_*`; exit 0 success / 1 task or expectation failure / 2 config error.
 
 ## Constraints
 - Dependencies come only from root `[workspace.dependencies]`; never add inline versions.
