@@ -27,8 +27,7 @@ Assertions panic with detailed messages (`assert_eq!` semantics); everything els
 
 ## Known Issues
 
-- `TestkitError::ImageMismatch` (declared in `../error.rs`) is never constructed: pixel comparisons panic instead while PNG writes return `TestkitError::Io`.
-
+- None.
 ## Routing Table
 
 Leaf module: `image.rs` (pixels), `event.rs` (event streams).
