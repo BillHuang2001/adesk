@@ -137,6 +137,8 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `RenderError::UnsupportedFormat` is never constructed (it is only listed in `code()`); `RenderError::UnsupportedBuffer`/`ImportFailed` are constructed only inside the dead `import_buffer`.
 - Unreferenced `pub` accessors: `SceneNode::{element_mut, set_location, set_damage, into_element}`, `Scene::extend`, `OffscreenTarget::{texture, into_inner}`, `RenderConfig::with_clear_color` (tests only). `encode_png` is used by this crate's tests only.
 - `adesk-server/src/images.rs` re-implements PNG encoding and stride repacking that duplicate `src/image.rs` (`encode_png` + private `tight_rgba`); it does not call `adesk_render::encode_png`.
+- `encode_png` + `tight_rgba` is the natural single home for the "stride-repack then PNG-encode an `ImageBuffer`" capability, but that capability is independently re-implemented in `adesk-server/src/images.rs` (`encode_png` + `tightly_packed`), `adesk-viewer/src/capture.rs` (`tight_rgba8` + `save_buffer_with_format`) and (test-only) `adesk-testkit`'s `ImageAssert::save_png`; `adesk-server` already depends on `adesk-render`, so it could delegate instead of duplicating.
+- adesk-render has no image *comparison*/diff/mean helper: pattern/solid checks, tolerance-aware diffs and region means live only in `adesk-testkit`'s `ImageAssert`; render_backend's local `pixel()` (tests/render_backend.rs:217) is the only bounds-checked accessor here and is test-local.
 
 ## Notes for Agents
 

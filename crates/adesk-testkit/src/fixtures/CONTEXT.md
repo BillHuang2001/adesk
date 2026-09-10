@@ -21,6 +21,12 @@ Everything a test needs to pretend an application is installed and launch it: `.
 - Every process wait is deadline-bounded; `TestApp::exit` kills on deadline and returns the resulting (signal) status, so callers must assert `status.success()`.
 - Integration tests of this package may also use `env!("CARGO_BIN_EXE_adesk-test-app")`.
 
+## Notes for Agents
+
+- No exec-path override exists: `TestAppSpec::desktop_entry` (`mod.rs:477`) and `TestApp::spawn` (`mod.rs:523`) both hardcode `helper_bin_path(HELPER_APP)` with `HELPER_APP = "adesk-test-app"` (`mod.rs:67`); `TestAppSpec` has no program-path setter and no env var overrides the program.
+  The only reuse seam for a downstream crate that wants to point a fixture at its own binary is to bypass `TestAppSpec::desktop_entry`/`TestApp::spawn` and build a `DesktopEntryFixture` by hand (`exec` is a public field, `mod.rs:199`) written via `FixtureDir::write_entry`/`write_raw`.
+- `TestAppSpec::cli_args` (`mod.rs:451`) is the single encoder of the helper CLI grammar; the matching decoder lives in the `adesk-test-app` binary (`src/bin/adesk-test-app.rs`), not in this module.
+
 ## Routing Table
 
 Leaf module: `mod.rs`.
