@@ -13,8 +13,8 @@
 use std::time::Instant;
 
 use adesk_core::{
-    AppId, Button, ButtonState, KeyState, LaunchId, OverlayKind, Position, Rect, Region,
-    RuntimeEvent, Size, WindowId,
+    AppId, Button, ButtonState, KeyState, LaunchId, Position, Rect, Region, RuntimeEvent, Size,
+    WindowId,
 };
 use adesk_wm::WmAction;
 use smithay::{
@@ -736,7 +736,7 @@ impl State {
         Ok(frame)
     }
 
-    /// Compose the whole virtual output, optionally with debug overlays.
+    /// Compose the whole virtual output.
     ///
     /// Only the active window is a candidate
     /// [`OutputWindow`](crate::render::OutputWindow): composition is the
@@ -747,7 +747,6 @@ impl State {
     /// stays `0`.
     pub(crate) fn render_output(
         &mut self,
-        overlays: &[OverlayKind],
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> Result<RenderedFrame> {
@@ -765,7 +764,7 @@ impl State {
         }
         let output_size = self.output_size();
         self.renderer
-            .render_output(output_size, &windows, overlays, region, max_dimension)
+            .render_output(output_size, &windows, region, max_dimension)
     }
 
     /// Point-in-time window/focus/sequence snapshot for `QueryState`.

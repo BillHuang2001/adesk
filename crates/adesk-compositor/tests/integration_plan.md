@@ -185,8 +185,8 @@ exists to log or to put in an event.
 ## 7. Single visible toplevel composition — `tests/output_composition.rs`
 
 - `composition_renders_only_the_active_window` — two clients map toplevels with distinct opaque
-  fills. Activating one and capturing the composed output (`RuntimeCommand::RenderOutput` with
-  overlays disabled) matches the ACTIVE window's fill on *every* pixel and differs from the
+  fills. Activating one and capturing the composed output (`RuntimeCommand::RenderOutput`)
+  matches the ACTIVE window's fill on *every* pixel and differs from the
   inactive window's own `RenderWindow` frame — rendered first as non-vacuity, which proves the
   excluded pixels really exist and that observing them neither activates them nor emits an event.
   `QueryState` proves exactly one `Active`/one `Inactive` at each capture; the roles are then

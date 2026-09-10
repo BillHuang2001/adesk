@@ -42,7 +42,7 @@
 //! `Gl` must succeed, `Pixman` always works headless, `Auto` prefers GL and
 //! falls back to pixman with a warning. The result is reported by `ping`.
 
-use adesk_core::{OverlayKind, Rect, Size};
+use adesk_core::{Rect, Size};
 use adesk_render::{create_target, render_scene, RenderConfig, RenderError, Scene};
 use smithay::{
     backend::{
@@ -161,8 +161,8 @@ impl HeadlessRenderer {
         }
     }
 
-    /// Compose the whole virtual output: the single **visible** window plus
-    /// optional debug overlays, then crop/downscale/read back.
+    /// Compose the whole virtual output: the single **visible** window, then
+    /// crop/downscale/read back.
     ///
     /// `output_size` is the virtual output's pixel size and sizes the target, so
     /// a candidate list with no active window is a **valid clear frame**, not an
@@ -171,26 +171,17 @@ impl HeadlessRenderer {
     /// `region` and `max_dimension` are output-relative. `commit_seq` of the
     /// resulting frame is `0`: an output composition is not tied to a single
     /// window's commit counter.
-    ///
-    /// `overlays` are debug-only markers; see
-    /// [`elements::overlay_elements`](super::elements) for what each
-    /// [`OverlayKind`] paints.
     pub(crate) fn render_output(
         &mut self,
         output_size: Size,
         windows: &[OutputWindow],
-        overlays: &[OverlayKind],
         region: Option<Rect>,
         max_dimension: Option<u32>,
     ) -> crate::Result<RenderedFrame> {
         let config = render_config(output_size, region, max_dimension);
         match self {
-            HeadlessRenderer::Gl(renderer) => {
-                render_output_gl(renderer, windows, overlays, &config)
-            }
-            HeadlessRenderer::Pixman(renderer) => {
-                render_output_pixman(renderer, windows, overlays, &config)
-            }
+            HeadlessRenderer::Gl(renderer) => render_output_gl(renderer, windows, &config),
+            HeadlessRenderer::Pixman(renderer) => render_output_pixman(renderer, windows, &config),
         }
     }
 }
@@ -320,10 +311,9 @@ fn render_window_pixman(
 fn render_output_gl(
     renderer: &mut GlesRenderer,
     windows: &[OutputWindow],
-    overlays: &[OverlayKind],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_output_frame::<_, GlTarget>(renderer, windows, overlays, config)
+    render_output_frame::<_, GlTarget>(renderer, windows, config)
 }
 
 /// pixman path for [`HeadlessRenderer::render_output`].
@@ -333,10 +323,9 @@ fn render_output_gl(
 fn render_output_pixman(
     renderer: &mut PixmanRenderer,
     windows: &[OutputWindow],
-    overlays: &[OverlayKind],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame> {
-    render_output_frame::<_, PixmanTarget>(renderer, windows, overlays, config)
+    render_output_frame::<_, PixmanTarget>(renderer, windows, config)
 }
 
 /// Backend-independent window render: collect the window's scene and render it.
@@ -358,7 +347,6 @@ where
 fn render_output_frame<R, T>(
     renderer: &mut R,
     windows: &[OutputWindow],
-    overlays: &[OverlayKind],
     config: &RenderConfig,
 ) -> crate::Result<RenderedFrame>
 where
@@ -366,7 +354,7 @@ where
     R::TextureId: Clone + 'static,
     R::Error: Send + Sync + 'static,
 {
-    let scene: Scene<OutputRenderElements<R>> = elements::output_scene(renderer, windows, overlays);
+    let scene: Scene<OutputRenderElements<R>> = elements::output_scene(renderer, windows);
     render_scene_frame(renderer, &scene, config)
 }
 
@@ -420,23 +408,8 @@ mod tests {
     fn pixman_output_without_windows_is_a_clear_frame() {
         let mut renderer = pixman();
         let frame = renderer
-            .render_output(Size::new(4, 3), &[], &[], None, None)
+            .render_output(Size::new(4, 3), &[], None, None)
             .expect("empty output composition must render");
-        assert_clear_frame(&frame, 4, 3);
-    }
-
-    #[test]
-    fn pixman_output_with_overlays_but_no_windows_is_still_a_clear_frame() {
-        let mut renderer = pixman();
-        let frame = renderer
-            .render_output(
-                Size::new(4, 3),
-                &[],
-                &[OverlayKind::Focus, OverlayKind::Damage],
-                None,
-                None,
-            )
-            .expect("overlays without windows draw nothing");
         assert_clear_frame(&frame, 4, 3);
     }
 
@@ -444,13 +417,7 @@ mod tests {
     fn pixman_output_applies_crop_and_downscale() {
         let mut renderer = pixman();
         let frame = renderer
-            .render_output(
-                Size::new(16, 8),
-                &[],
-                &[],
-                Some(Rect::new(2, 1, 8, 4)),
-                Some(4),
-            )
+            .render_output(Size::new(16, 8), &[], Some(Rect::new(2, 1, 8, 4)), Some(4))
             .expect("crop and downscale must apply to the output composition");
         // 8x4 crop, longest edge capped at 4 -> 4x2.
         assert_eq!(frame.size(), Size::new(4, 2));
@@ -461,7 +428,7 @@ mod tests {
     fn empty_output_size_is_an_invalid_request() {
         let mut renderer = pixman();
         let error = renderer
-            .render_output(Size::ZERO, &[], &[], None, None)
+            .render_output(Size::ZERO, &[], None, None)
             .expect_err("a 0x0 output cannot be rendered");
         assert!(matches!(error, CompositorError::InvalidRequest(_)));
         assert_eq!(error.code(), adesk_core::ErrorCode::InvalidRequest);
@@ -510,7 +477,7 @@ mod tests {
             return;
         };
         let frame = renderer
-            .render_output(Size::new(4, 3), &[], &[], None, None)
+            .render_output(Size::new(4, 3), &[], None, None)
             .expect("empty output composition must render on GL too");
         // The GL readback is consumed top-down in scene order by adesk-render, so
         // the frame must be identical to the software clear frame.

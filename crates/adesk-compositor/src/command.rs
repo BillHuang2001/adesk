@@ -10,9 +10,7 @@
 //! layer can map failures straight to an `ErrorCode`; `QueryState` is infallible and
 //! `Shutdown` acknowledges with `()`.
 
-use adesk_core::{
-    AppId, Button, ButtonState, KeyState, LaunchId, OverlayKind, Position, Rect, WindowId,
-};
+use adesk_core::{AppId, Button, ButtonState, KeyState, LaunchId, Position, Rect, WindowId};
 use tokio::sync::oneshot;
 
 use crate::input::KeyCode;
@@ -39,10 +37,8 @@ pub enum RuntimeCommand {
         /// Frame or failure.
         reply: oneshot::Sender<adesk_core::Result<RenderedFrame>>,
     },
-    /// Compose the whole virtual output, optionally with debug overlays.
+    /// Compose the whole virtual output.
     RenderOutput {
-        /// Debug overlays to draw (empty = plain composition).
-        overlays: Vec<OverlayKind>,
         /// Optional output-relative crop rectangle.
         region: Option<Rect>,
         /// Optional bound for the longest output side.

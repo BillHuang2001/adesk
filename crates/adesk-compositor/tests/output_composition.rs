@@ -34,8 +34,7 @@
 //! - **Geometry comes from the window model**, never a hard-coded `1280x800`:
 //!   [`TestRuntime::output_size`] and [`TestRuntime::tiled_rect`].
 //! - **`RenderOutput` is this suite's capture mechanism.** It is a command, not a frame loop:
-//!   an empty `overlays` list is plain composition (no debug markers, which would repaint
-//!   pixels), and the reply is the composed frame itself — the crate-local, already decoded
+//!   the reply is the composed frame itself — the crate-local, already decoded
 //!   equivalent of the server's `inspect_capture`, with no AGP client, no image decoding and
 //!   no screenshot loop.
 //!
@@ -43,7 +42,7 @@
 //!
 //! The plan's ground rule is that `RenderOutput` is used by `output_composition.rs` to prove
 //! output-level composition while the other suites assert on `RenderWindow`; this suite is
-//! that user. It drives `RuntimeCommand::RenderOutput` with `overlays: vec![]`, `region: None`
+//! that user. It drives `RuntimeCommand::RenderOutput` with `region: None`
 //! and `max_dimension: None`.
 
 use adesk_core::{Rect, WindowId, WindowState};
