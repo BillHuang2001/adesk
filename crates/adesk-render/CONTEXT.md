@@ -50,7 +50,7 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 
 ## Constraints
 
-- Dependencies come only from root `[workspace.dependencies]`: `adesk-core`, `smithay` (features `wayland_frontend,desktop,renderer_pixman,renderer_glow`), `image` (png), `thiserror`, `tracing`.
+- Dependencies come only from root `[workspace.dependencies]`: `adesk-core`, `smithay` (features `wayland_frontend,desktop,renderer_pixman,renderer_glow`), `image` (png), `thiserror`.
 - Never depend on `adesk-compositor`, `adesk-wm`, `adesk-observer` or any I/O crate; never construct a renderer, an EGL display or a wayland display here.
 - `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`; no `unwrap`/`expect`/panics on request paths — every failure is a `RenderError`.
 - Coordinates: scene coordinates are window-relative pixels; `RenderConfig::source` maps to target `(0,0)`; `RenderedFrame::damage` is scene-relative.
@@ -146,5 +146,5 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 
 - `adesk-core` — `ImageBuffer`, `Rect`, `Region`, `Size`, `ErrorCode`, `Error` (never fork these types).
 - `smithay` 0.7 with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow` (pulls `wayland-server`, `wayland-protocols`, `pixman`, `glow`, `gl_generator`, `drm-fourcc`).
-- `image` 0.25 (png only), `thiserror` 2, `tracing` 1.
+- `image` 0.25 (png only), `thiserror` 2.
 - System libraries (pixman, EGL/GLES, libwayland) come from the Nix dev shell; build through `./scripts/dev.sh`.
