@@ -260,13 +260,23 @@ fn render_pixman(scene: &Scene<TestElement>, config: &RenderConfig) -> RenderedF
 fn sub_rect_readback_equals_full_frame_crop() {
     let scene = scene();
     // A no-crop render of the whole source: the point of comparison for damage.
-    let no_crop = render_pixman(&scene, &RenderConfig::new(SOURCE).with_clear_color(CLEAR));
+    let no_crop = render_pixman(
+        &scene,
+        &RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(SOURCE)
+        },
+    );
 
     for crop in crops() {
-        let config_a = RenderConfig::new(SOURCE)
-            .with_crop(crop)
-            .with_clear_color(CLEAR);
-        let config_b = RenderConfig::new(crop).with_clear_color(CLEAR);
+        let config_a = RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(SOURCE).with_crop(crop)
+        };
+        let config_b = RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(crop)
+        };
 
         // (a) sub-rectangle readback, (b) unchanged whole-frame readback.
         let frame_a = render_pixman(&scene, &config_a);
@@ -315,12 +325,19 @@ fn full_source_crop_matches_plain_render() {
     // `crop == source` is the boundary case: it must be indistinguishable from a
     // plain render of the source.
     let scene = scene();
-    let plain = render_pixman(&scene, &RenderConfig::new(SOURCE).with_clear_color(CLEAR));
+    let plain = render_pixman(
+        &scene,
+        &RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(SOURCE)
+        },
+    );
     let cropped = render_pixman(
         &scene,
-        &RenderConfig::new(SOURCE)
-            .with_crop(SOURCE)
-            .with_clear_color(CLEAR),
+        &RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(SOURCE).with_crop(SOURCE)
+        },
     );
 
     assert_eq!(cropped.size(), CoreSize::new(8, 8));
@@ -375,10 +392,14 @@ fn gl_sub_rect_readback_equals_pixman_reference() {
 
     let scene = scene();
     for crop in crops() {
-        let config_a = RenderConfig::new(SOURCE)
-            .with_crop(crop)
-            .with_clear_color(CLEAR);
-        let config_b = RenderConfig::new(crop).with_clear_color(CLEAR);
+        let config_a = RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(SOURCE).with_crop(crop)
+        };
+        let config_b = RenderConfig {
+            clear_color: CLEAR,
+            ..RenderConfig::new(crop)
+        };
 
         // The pixman reference for both configurations.
         let reference_a = render_pixman(&scene, &config_a);
