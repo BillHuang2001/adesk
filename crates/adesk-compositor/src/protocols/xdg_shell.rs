@@ -10,7 +10,9 @@
 //! - `new_popup` sends the initial `xdg_popup.configure` from the positioner geometry and
 //!   *then* registers the popup: a popup may not commit a buffer before the compositor
 //!   has configured it, and the geometry recorded as the popup's window-relative origin
-//!   has to be the one the configure confirmed.
+//!   has to be the one the configure confirmed. The popup is registered with ADesk's
+//!   window model *and* with Smithay's [`PopupManager`](smithay::desktop::PopupManager),
+//!   which is where the composition path reads popups from.
 //! - `grab` records the popup grab. v1 semantics: a grab is *bookkeeping only* — the
 //!   headless runtime has no physical pointer, so there is no pointer-leave that could
 //!   dismiss a popup. `State` sends `popup_done` when a runtime-native operation
@@ -62,7 +64,18 @@ impl XdgShellHandler for State {
             Err(error) => tracing::debug!(%error, "initial popup configure rejected"),
         }
         self.on_popup_created(&surface);
+        // Register the popup with Smithay's popup tree: Smithay's element walker skips
+        // popups, so the render path reads them from this tree
+        // (`PopupManager::popups_for_surface`) — without this the popup would be tracked
+        // in ADesk's window model but never composed into its owner.
+        if let Err(error) = self
+            .popup_manager
+            .track_popup(smithay::desktop::PopupKind::Xdg(surface.clone()))
+        {
+            tracing::debug!(%error, "popup tracking rejected");
+        }
     }
+
     fn grab(&mut self, surface: PopupSurface, _seat: wl_seat::WlSeat, _serial: Serial) {
         // Recorded, never enforced by the seat (see the module docs).
         self.wm.note_popup_grab(&surface);
