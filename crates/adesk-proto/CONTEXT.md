@@ -87,6 +87,8 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `ProtoError::error_code()` maps `UnknownMethod` → `ErrorCode::UnknownMethod`, `VersionMismatch` → `ProtocolVersionMismatch` and everything else → `InvalidRequest`.
 - `CaptureResult` and `InspectCaptureResult` derive `PartialEq` but not `Eq` because `ImagePayload::scale` is `f64`.
 - Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+- The `quiet_ms=250` default is scoped to `WaitForQuietParams`; `Condition::Quiet { quiet_ms }` has no serde default, so an `observe`/`until` of `{"type":"quiet"}` without `quiet_ms` fails as `InvalidParams`, and no field on `ObserveParams`/`WaitForChangeParams` can carry a quiet threshold for a non-quiet condition.
+- `QuietEvent.quiet_ms` is required when decoding `quiet` event data (`window_id` is optional).
 - `ImagePayload::from_rgba8` rejects dimension/byte-count overflow and length mismatch with `Malformed`; `to_rgba8_buffer` is strict — non-`Rgba8` format, `stride != width*4` (including `stride: null`), or length mismatch is an error.
 - Base64 encoding is infallible in `base64` 0.22; `ProtoError::Base64` is reachable only on decode paths.
 
