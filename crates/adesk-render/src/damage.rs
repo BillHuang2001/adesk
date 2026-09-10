@@ -22,7 +22,7 @@ pub fn coalesce_damage(region: &Region, bounds: &Rect, min_area: u32) -> Region 
     // Clip into one scratch buffer: `bounds` is non-empty here and `Region`
     // never stores empty rects, so every `intersect` result is non-empty.
     let mut rects = Vec::with_capacity(region.len());
-    for rect in region.iter() {
+    for rect in region.rects() {
         if let Some(part) = rect.intersect(bounds) {
             rects.push(part);
         }
@@ -44,12 +44,12 @@ pub fn coalesce_damage(region: &Region, bounds: &Rect, min_area: u32) -> Region 
     // `min_area == 0` keeps every coalesced rect, so the common path returns
     // the coalesced region as is. Only rebuild (one further allocation) when a
     // rect is actually below the threshold.
-    if min_area == 0 || !out.iter().any(|rect| rect.area() < min_area as u64) {
+    if min_area == 0 || !out.rects().iter().any(|rect| rect.area() < min_area as u64) {
         return out;
     }
 
     let mut filtered = Region::empty();
-    for rect in out.iter() {
+    for rect in out.rects() {
         if rect.area() >= min_area as u64 {
             filtered.push(*rect);
         }
@@ -105,7 +105,7 @@ impl DamageAccumulator {
         // Clip straight into `pending`. This is exactly what
         // `damage.clip(&self.bounds)` does per rect, but without allocating (and
         // then copying) a throwaway `Region`.
-        for rect in damage.iter() {
+        for rect in damage.rects() {
             if let Some(part) = rect.intersect(&self.bounds) {
                 self.pending.push(part);
             }
