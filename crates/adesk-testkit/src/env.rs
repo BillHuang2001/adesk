@@ -31,7 +31,7 @@
 //! its own test binary).
 //!
 //! The Wayland test client does *not* depend on the process env: it connects to an
-//! absolute socket path ([`TestEnv::wayland_socket_path`]).
+//! absolute socket path under the runtime directory.
 
 use std::ffi::OsString;
 use std::os::unix::fs::PermissionsExt;
@@ -119,11 +119,6 @@ impl TestEnv {
     /// The Wayland socket name to set as `WAYLAND_DISPLAY`.
     pub fn wayland_display(&self) -> &str {
         &self.display
-    }
-
-    /// Absolute path of the compositor's Wayland socket.
-    pub fn wayland_socket_path(&self) -> PathBuf {
-        self.runtime_dir.join(&self.display)
     }
 
     /// Absolute path of the AGP Unix socket.

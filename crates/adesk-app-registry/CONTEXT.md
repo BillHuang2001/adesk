@@ -20,7 +20,7 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 
 ### Launch seam (`src/launch.rs`)
 - `LaunchRecord { launch_id: LaunchId, app_id: AppId, pid: Option<i32>, started_at_ms: u64 }`.
-- `LaunchEnv { wayland_display: Option<String>, xdg_runtime_dir: Option<String>, extra: Vec<(String, String)> }` + `new`, `from_process`, `with_wayland_display`, `with_xdg_runtime_dir`, `with_var`, `overrides() -> Vec<(String, String)>`.
+- `LaunchEnv { wayland_display: Option<String>, xdg_runtime_dir: Option<String>, extra: Vec<(String, String)> }` + `new`, `with_wayland_display`, `with_xdg_runtime_dir`, `with_var`, `overrides() -> Vec<(String, String)>`.
 - `SpawnCommand { program, args, env }` + `new`, `with_arg`, `with_env`; `SpawnedProcess { pid }` + `new`.
 - `trait ProcessSpawner: Send + Sync + Debug { fn spawn(&self, &SpawnCommand) -> Result<SpawnedProcess, SpawnError> }`; `CommandSpawner` is the production `std::process::Command` implementation.
 - `SpawnError::{Io { program, source }, Other(String)}`.
@@ -32,7 +32,7 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - `TerminalSpec::{new, with_args, from_env, from_env_value, program, prefix_args, wrap}`; consts `DEFAULT_TERMINAL = "x-terminal-emulator"`, `TERMINAL_ENV = "TERMINAL"`, `EXEC_SEPARATOR = "-e"`.
 
 ### Correlation (`src/correlate.rs`)
-- `Correlator::{new, with_timeout, timeout, record_launch, correlate, expire, pending}`; `WindowCandidate { window_id, pid, app_id, title }`; `CorrelationOutcome::{Correlated(Correlation), Uncorrelated}`; `CorrelationEvidence::{Pid, StartupWmClass, AppIdOrTitleSubstring}`; `DEFAULT_CORRELATION_TIMEOUT = 10s`.
+- `Correlator::{new, with_timeout, record_launch, correlate, pending}`; `WindowCandidate { window_id, pid, app_id, title }`; `CorrelationOutcome::{Correlated(Correlation), Uncorrelated}`; `CorrelationEvidence::{Pid, StartupWmClass, AppIdOrTitleSubstring}`; `DEFAULT_CORRELATION_TIMEOUT = 10s`.
 
 ### Parsing, ids, XDG, TryExec, clock, errors
 - `parse_str(&str) -> Result<RawEntry, ParseError>`; `RawEntry::{get, localized}`; `DesktopEntry::{from_raw, is_listable, to_app_info}`; `EntryError::{MissingType, NotApplication(String), MissingName}`; `ParseError::MissingGroup`.
@@ -47,7 +47,7 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - Sync only; no tokio, no async, no Smithay.
 - `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]`; no panics on request paths.
 - Dependencies: `adesk-core`, `thiserror`, `tracing` (dev: `tempfile`); versions only from the root `[workspace.dependencies]`.
-- Files stay under the ~1000-line threshold (largest: `src/parser.rs`, 793 lines); split along module boundaries rather than growing a file.
+- Files stay under the ~1000-line threshold (largest: `src/registry.rs`, 580 lines); split along module boundaries rather than growing a file.
 - Public API is what this file documents; keep internals `pub(crate)`.
 
 ## Routing Table
@@ -99,16 +99,16 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - Construct once at startup and share: `let clock: Arc<dyn Clock> = Arc::new(MonotonicClock::new()); let registry = Arc::new(AppRegistry::with_options(RegistryOptions::xdg().with_clock(clock.clone()))); let report = registry.scan()?;` and keep one `Correlator::new(clock)` on the event pump.
 - `list_apps {query?, include_hidden?}` → `registry.list(query.as_deref(), include_hidden)`, respond `{"apps": [...]}`.
 - `get_app {app_id}` → `registry.get(&AppId::from(id))`; `None` → `adesk_core::Error::unknown_app(&id)` (AGP `unknown_app`).
-- `launch_app {app_id, args?}` → `registry.launch(&app_id, &args, &LaunchEnv::from_process())`; respond `{"launch_id", "app_id", "pid"}` (`pid` may be null); errors go through `Error::code()` / `Into<adesk_core::Error>`.
+- `launch_app {app_id, args?}` → build `LaunchEnv::new()` with `with_wayland_display`/`with_xdg_runtime_dir` from the compositor, then `registry.launch(&app_id, &args, &env)`; respond `{"launch_id", "app_id", "pid"}` (`pid` may be null); errors go through `Error::code()` / `Into<adesk_core::Error>`.
 - After a successful launch the server MUST (a) emit `AppLaunched { launch_id, app_id, pid }` on the event broadcast, and (b) call `correlator.record_launch(record.clone(), &app_info)` with the `AppInfo` from `registry.get`.
 - On `WindowCreated`, build `WindowCandidate { window_id, pid, app_id, title }` and call `correlator.correlate`; on `Correlated` stamp the window's `app_id` (and announce it); on `Uncorrelated` leave `app_id: null` and log — never guess.
 - `scan()` does blocking filesystem I/O and `launch()` spawns a process: call them from the server's tokio context (e.g. startup for `scan`, `spawn_blocking` if a rescan is ever exposed), never from the compositor thread.
 - Child reaping is the server's responsibility: `CommandSpawner` returns the pid without waiting, so the server should reap (`tokio::process` child, or a `waitpid(WNOHANG)` task) to avoid zombie accumulation.
-- `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` must be set on the launched process (use `LaunchEnv::from_process()` or explicit values matching the compositor's socket), otherwise GUI clients cannot connect.
+- `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` must be set on the launched process (build them into `LaunchEnv` from the compositor's socket), otherwise GUI clients cannot connect.
 
 ## Test Strategy
 
-- Unit tests live inline (`#[cfg(test)] mod tests`) for pure logic: `xdg::search_dirs_with`, `parser` escapes/localized names, `app_id` table, `exec` token/field-code tables, `terminal` env splitting, `try_exec` PATH search, `launch::LaunchEnv::overrides`, `CommandSpawner` command construction (`std::process::Command::get_envs`/`get_args`, no real spawn), `correlate` tiers, and the registry's pure-logic pieces (option builders, `Send + Sync`).
+- Unit tests live inline (`#[cfg(test)] mod tests`) for pure logic with no integration counterpart: `xdg::search_dirs_with`, `terminal` env splitting, `try_exec` PATH search, `launch::LaunchEnv::overrides`, `CommandSpawner` command construction (`std::process::Command::get_envs`/`get_args`, no real spawn), and the registry's pure-logic pieces (option builders, `Send + Sync`).
 - Integration tests live in `./tests/`, one file per concern, sharing `./tests/support/mod.rs` (recording mock `ProcessSpawner`, fake `Clock`, tempdir `.desktop` fixture writer, `AppInfo`/`LaunchRecord`/`WindowCandidate` builders):
   - `tests/parser.rs` (31) — happy path, localized `Name[fr]`/`Name[fr_FR]`, escapes, comments, duplicate keys, missing group, non-Application `Type`, boolean parsing.
   - `tests/exec.rs` (30) — quoting/escape table, `%f %F %u %U %i %c %k %%`, deprecated removal, unknown codes, empty quoted argument, unterminated quote.
@@ -116,14 +116,15 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
   - `tests/registry.rs` (18) — tempdir scan/list/get, recursive subdirs, hidden/no_display filtering + `include_hidden`, precedence shadowing, query matching, launch argv/terminal/TryExec/env with the mock spawner, launch error paths (unknown app, no Exec, DBus without Exec, invalid Exec, spawn failure), monotonic launch ids, `started_at_ms` from the fake clock.
   - `tests/correlate.rs` (20) — pid → `StartupWMClass` → substring ordering, most-recent tie-break, timeout expiry, `Uncorrelated` reporting, multiple windows per launch.
 - No test spawns a real process, needs a display, GPU, network, or an installed application; fixtures are written to `tempfile::tempdir()` (the single exception is `launch::command_spawner_reports_missing_program_as_io_error`, which attempts an OS spawn of a guaranteed-missing path and asserts the ENOENT `SpawnError::Io`).
-- Coverage overlap (audit): the inline `#[cfg(test)]` modules in `src/{app_id,exec,parser,correlate}.rs` (11 + 40 + 31 + 23 of the 163 lib tests) are duplicated — often verbatim — by `tests/{app_id,exec,parser,correlate}.rs`, which are supersets (they add the on-disk pipeline and public-API proof). The other 56 lib tests (`clock`, `launch`, `terminal`, `try_exec`, `xdg`, `registry`) have no integration counterpart and are the sole coverage for those modules.
-- No `#[ignore]`d tests exist anywhere in the crate, and no test mutates the process environment; the few ambient reads (`RegistryOptions::xdg` locale, `LaunchEnv::from_process`, `TerminalSpec::from_env`, `search_dirs`) are snapshot-and-compare, so the suite is parallel-safe with no shared mutable globals.
-- Validation (always through the dev shell): `./scripts/dev.sh cargo test -p adesk-app-registry` (163 lib + 112 integration + 1 doctest = 276 passing, 0 ignored), `./scripts/dev.sh cargo clippy -p adesk-app-registry --all-targets --no-deps -- -D warnings` (clean), `./scripts/dev.sh cargo fmt --all --check` (clean workspace-wide), `./scripts/dev.sh cargo check --workspace --all-targets` (clean).
+- The integration files are the authoritative spec for `app_id`, `exec`, `parser` and `correlate`; their inline `#[cfg(test)]` modules were removed as strict-subset duplication, and the few inline-only assertions (correlate `pid`-evidence `app_id`, lower-tier fall-through, empty-needle rejection, the default-10s window and insertion-order pruning; parser raw pass-through plus key-generic/localized-only lookup) were folded into the integration files.
+- The remaining 55 lib tests live inline in the modules with no integration counterpart (`clock` 4, `launch` 13, `registry` 2, `terminal` 14, `try_exec` 11, `xdg` 11) and are the sole coverage for those modules.
+- No `#[ignore]`d tests exist anywhere in the crate, and no test mutates the process environment; the few ambient reads (`RegistryOptions::xdg` locale, `TerminalSpec::from_env`, `search_dirs`) are snapshot-and-compare, so the suite is parallel-safe with no shared mutable globals.
+- Validation (always through the dev shell): `./scripts/dev.sh cargo test -p adesk-app-registry` (55 lib + 112 integration + 1 doctest = 168 passing, 0 ignored), `./scripts/dev.sh cargo clippy -p adesk-app-registry --all-targets --no-deps -- -D warnings` (clean), `./scripts/dev.sh cargo fmt --all --check` (clean workspace-wide), `./scripts/dev.sh cargo check --workspace --all-targets` (clean).
 
 ## Dependencies
 
 - Internal: `adesk-core` (`AppId`, `AppInfo`, `LaunchId`, `WindowId`, `ErrorCode`, `Error`).
-- External: `thiserror` (error enums), `tracing` (scan/launch diagnostics, never pixel data); dev-only `tempfile` (inline and integration fixtures).
+- External: `thiserror` (error enums), `tracing` (scan/launch diagnostics, never pixel data); dev-only `tempfile` (integration fixtures).
 - System: none beyond ordinary filesystem/`PATH` access — no display, GPU, network, or Wayland socket needed for this crate's tests.
 
 ## Notes for Agents
@@ -134,14 +135,13 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - `adesk-testkit` provides `.desktop` fixtures (`FixtureDir`, `TestApp`) and a helper process for end-to-end tests; this crate's own tests use `tempfile` directly and never spawn real processes.
 - `RawEntry`, `DesktopEntry` and the `ProcessSpawner`/`Clock` traits are public so tests and `adesk-testkit` can build fixtures without reimplementing parsing or launch plumbing.
 - `tests/support/mod.rs` carries a module-level `#![allow(dead_code)]` because it is compiled into five test binaries and each uses a subset of its helpers.
-- The same allow also hides four genuinely unused items that no test calls and that can be pruned: `RecordingSpawner::failing`, `FakeClock::now`, `<RecordingSpawner as Default>::default` and `<FakeClock as Default>::default`; `entry_text` and `parse` are not dead (they are used by the other helpers in the module).
 - `AppRegistry::launch` rejects an empty `argv` before building the command, so both `NoExec` arms inside the command construction (the `TerminalSpec::wrap` `None` case and the `argv.split_first()` `None` case) are unreachable defensive code, not real failure paths — do not chase coverage for them.
 - `Error::Io`, `Error::InvalidEntry` and `Error::InvalidArgument` exist for API completeness but are never constructed by this crate: `scan()` reports per-file problems as `ScanIssue`s (it only returns `Ok`), and `launch()` can only fail with `UnknownApp`, `TryExecNotFound`, `NoExec`, `InvalidExec` or `Spawn`.
 
 ## Status
 
 Every item documented above is implemented and exercised by the suites in Test Strategy:
-- No `todo!()` in the crate, no crate-level `allow` attributes, and every file under the ~1000-line threshold (largest: `src/parser.rs`, 793 lines).
-- `cargo test -p adesk-app-registry`: 163 lib + 112 integration + 1 doctest = 276 passing, 0 ignored.
+- No `todo!()` in the crate, no crate-level `allow` attributes, and every file under the ~1000-line threshold (largest: `src/registry.rs`, 580 lines).
+- `cargo test -p adesk-app-registry`: 55 lib + 112 integration + 1 doctest = 168 passing, 0 ignored.
 - `cargo clippy -p adesk-app-registry --all-targets --no-deps -- -D warnings`, `cargo fmt --all --check`, `cargo check --workspace --all-targets` and `cargo doc -p adesk-app-registry --no-deps --document-private-items` are all clean (no warnings).
 - Consumed by `adesk-server` (AGP dispatch, `AppLaunched` emission, correlation on the event pump) and `adesk-testkit` (`RunningServer::registry`).

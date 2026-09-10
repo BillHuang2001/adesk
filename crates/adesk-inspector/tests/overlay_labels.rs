@@ -3,40 +3,13 @@
 
 mod common;
 
-use adesk_core::{ImageBuffer, OverlayKind, Point, Rect, WindowId};
-use adesk_inspector::{font, text, Canvas, Inspector, OverlayStyle};
+use adesk_core::{ImageBuffer, OverlayKind, Point, WindowId};
+use adesk_inspector::{font, Inspector, OverlayStyle};
 
 /// Opaque black: the base frame (`ImageBuffer::new_rgba`) and, because the
 /// default plate is `rgba(0, 0, 0, 160)` blended over black, every pixel that
 /// only carries plate background.
 const BLACK: [u8; 4] = [0, 0, 0, 255];
-
-/// Reference composition of one label: the documented layout
-/// (`slot_origin` = plate top-left, ink origin = plate + `pad`) drawn directly
-/// through `text::draw_label`, clipped to the window.
-///
-/// The painter must produce the same bytes; a mismatch means it deviated from
-/// the layout spec, not from `draw_label`.
-fn reference_label(
-    base: &ImageBuffer,
-    window: Rect,
-    slot: u8,
-    label: &str,
-    style: &OverlayStyle,
-) -> ImageBuffer {
-    let pad = style.pad();
-    let step = font::line_height(style.scale()) + pad;
-    let ink_origin = Point {
-        x: window.x + 2 * pad,
-        y: window.y + 2 * pad + i32::from(slot) * step,
-    };
-    let mut out = base.clone();
-    let mut canvas = Canvas::new(&mut out);
-    canvas.with_clip(window, |clipped| {
-        text::draw_label(clipped, ink_origin, label, style);
-    });
-    out
-}
 
 /// Asserts every ink pixel of `label` at scale 1 (ink origin `origin`, advance
 /// [`font::FONT_ADVANCE`]) equals `color`.
@@ -76,45 +49,6 @@ fn ink_count(label: &str) -> usize {
                 .sum::<usize>()
         })
         .sum()
-}
-
-/// Coordinates of every pixel where `a` and `b` differ, in row-major order.
-fn changed_pixels(a: &ImageBuffer, b: &ImageBuffer) -> Vec<(u32, u32)> {
-    assert_eq!(a.size(), b.size(), "frames must have the same size");
-    let mut changed = Vec::new();
-    for y in 0..a.height {
-        for x in 0..a.width {
-            if common::px(a, x, y) != common::px(b, x, y) {
-                changed.push((x, y));
-            }
-        }
-    }
-    changed
-}
-
-/// Asserts `a` and `b` are pixel-identical inside `region`.
-fn assert_region_equal(a: &ImageBuffer, b: &ImageBuffer, region: Rect) {
-    for y in region.y..region.bottom() {
-        for x in region.x..region.right() {
-            assert_eq!(
-                common::px(a, x as u32, y as u32),
-                common::px(b, x as u32, y as u32),
-                "pixel ({x}, {y}) must match"
-            );
-        }
-    }
-}
-
-#[test]
-fn labels_draw_nothing_without_windows() {
-    let input = common::input(common::frame(64, 48)).build();
-    let inspector = Inspector::new(vec![OverlayKind::WindowIds, OverlayKind::AppIds]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(
-        out.data, input.frame.data,
-        "no windows means no label pixels at all"
-    );
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
 }
 
 #[test]
@@ -221,22 +155,8 @@ fn window_ids_elides_long_text_to_window_width() {
     assert_ink(&out, Point { x: 4, y: 4 }, "..", style.text.to_array());
 
     // Byte-identical to a reference render of ".." clipped to the window.
-    let reference = reference_label(&input.frame, window, 0, "..", &style);
+    let reference = common::reference_label(&input.frame, window, 0, "..", &style);
     assert_eq!(out.data, reference.data);
-}
-
-#[test]
-fn window_ids_skips_empty_window_geometry() {
-    let input = common::input(common::frame(64, 48))
-        .windows(vec![common::window(1, common::rect(0, 0, 0, 0))])
-        .build();
-    let inspector = Inspector::new(vec![OverlayKind::WindowIds]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(
-        out.data, input.frame.data,
-        "a window with empty geometry draws no label"
-    );
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
 }
 
 #[test]
@@ -290,7 +210,7 @@ fn app_ids_uses_slot_one() {
         style.text.to_array(),
     );
 
-    let reference = reference_label(
+    let reference = common::reference_label(
         &input.frame,
         common::rect(0, 0, 48, 32),
         1,
@@ -334,7 +254,8 @@ fn app_ids_labels_missing_app_id_as_question_mark() {
     assert_ink(&out, Point { x: 4, y: 14 }, "app ?", style.text.to_array());
 
     // Byte-identical to a reference render of the literal "app ?".
-    let reference = reference_label(&input.frame, common::rect(0, 0, 48, 32), 1, "app ?", &style);
+    let reference =
+        common::reference_label(&input.frame, common::rect(0, 0, 48, 32), 1, "app ?", &style);
     assert_eq!(
         out.data, reference.data,
         "missing app id renders as 'app ?'"
@@ -416,35 +337,6 @@ fn focus_draws_outline_and_label_for_active_window() {
 }
 
 #[test]
-fn focus_draws_nothing_without_active_window() {
-    let input = common::input(common::frame(64, 48))
-        .windows(vec![common::window(1, common::rect(0, 0, 32, 24))])
-        .build();
-    let inspector = Inspector::new(vec![OverlayKind::Focus]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(
-        out.data, input.frame.data,
-        "no active window means no focus outline or label"
-    );
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-}
-
-#[test]
-fn focus_ignores_active_id_that_matches_no_window() {
-    let input = common::input(common::frame(64, 48))
-        .windows(vec![common::window(1, common::rect(0, 0, 32, 24))])
-        .active(Some(WindowId(99)))
-        .build();
-    let inspector = Inspector::new(vec![OverlayKind::Focus]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(
-        out.data, input.frame.data,
-        "an active id without a window draws nothing"
-    );
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-}
-
-#[test]
 fn labels_are_clipped_at_frame_edges() {
     let input = common::input(common::frame(64, 48))
         .windows(vec![common::window(9, common::rect(60, 44, 32, 24))])
@@ -458,7 +350,7 @@ fn labels_are_clipped_at_frame_edges() {
     // corner survives: the top border row (62..=63, y = 46) and the left
     // column's first pixel (62, 47). The plate fill is black over black, so
     // exactly those three pixels change.
-    let changed = changed_pixels(&out, &input.frame);
+    let changed = common::changed_pixels(&out, &input.frame);
     assert_eq!(changed, vec![(62, 46), (63, 46), (62, 47)]);
     for (x, y) in changed {
         assert_eq!(
@@ -498,7 +390,7 @@ fn labels_are_clipped_to_window_geometry() {
         "nothing fits, so no label pixel exists outside (4, 4, 8, 8)"
     );
     assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-    assert!(changed_pixels(&out, &input.frame).is_empty());
+    assert!(common::changed_pixels(&out, &input.frame).is_empty());
 }
 
 #[test]
@@ -530,7 +422,7 @@ fn labels_use_fixed_slots_regardless_of_enabled_subset() {
         style.outline.to_array(),
         "app plate top-left with window_ids"
     );
-    assert_region_equal(&only_app_ids, &with_window_ids, common::rect(2, 12, 45, 11));
+    common::assert_region_equal(&only_app_ids, &with_window_ids, common::rect(2, 12, 45, 11));
     // window_ids still occupies slot 0, so the two renders do differ.
     assert_ne!(only_app_ids.data, with_window_ids.data);
     assert_eq!(

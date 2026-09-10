@@ -11,8 +11,7 @@
 //!   [`TestkitError::Timeout`]; there is no unbounded
 //!   `recv()` in the harness. Negative assertions
 //!   ([`EventAssert::expect_none`]) intentionally consume their whole timeout.
-//! - **Ordering is explicit.** [`EventAssert::wait_ordered`] waits for a sequence under a
-//!   single deadline; [`EventAssert::assert_seen_order`] checks recorded history.
+//! - **Ordering is explicit.** [`EventAssert::assert_seen_order`] checks recorded history.
 //!
 //! Subscribe *before* triggering the action under test: a broadcast channel does not
 //! replay, so an [`EventAssert`] created afterwards can never see earlier events.
@@ -339,49 +338,6 @@ impl EventAssert {
         })
         .await?
         .ok_or_else(|| crate::wait::timeout_error(leak_describe(expected), timeout))
-    }
-
-    /// Waits for `expected` events to be received **in order**, skipping others.
-    ///
-    /// Keeps a cursor into `expected`; for every received event appends it to
-    /// [`EventAssert::seen`] and, when it matches `expected[cursor]`, advances the cursor.
-    /// Events that match no pending expectation are skipped but still recorded. Once the
-    /// whole sequence is satisfied, returns the matched events in order. The *whole* sequence
-    /// shares one deadline — it does not restart per element, so
-    /// `wait_ordered(&[a, b], 5s)` can never take 10 s. On expiry, returns
-    /// [`TestkitError::Timeout`] for the element that never
-    /// arrived, with `what` built from its [`Expected::describe`] exactly as in
-    /// [`EventAssert::wait_for_expected`]. An empty `expected` returns `Ok(vec![])`
-    /// immediately.
-    pub async fn wait_ordered(
-        &mut self,
-        expected: &[Expected],
-        timeout: Duration,
-    ) -> Result<Vec<RuntimeEvent>> {
-        if expected.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut matched = Vec::with_capacity(expected.len());
-        let mut cursor = 0usize;
-        let complete = self
-            .pump(timeout, |event| {
-                if expected[cursor].matches(event) {
-                    matched.push(event.clone());
-                    cursor += 1;
-                    if cursor == expected.len() {
-                        return Some(());
-                    }
-                }
-                None
-            })
-            .await?;
-        match complete {
-            Some(()) => Ok(matched),
-            None => Err(crate::wait::timeout_error(
-                leak_describe(&expected[cursor]),
-                timeout,
-            )),
-        }
     }
 
     /// Asserts that no event matching `expected` arrives within `timeout`.

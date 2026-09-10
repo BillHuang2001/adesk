@@ -13,18 +13,12 @@ use adesk_core::{AppId, Rect, WindowId, WindowInfo, WindowState};
 /// the right window. The window model only compares keys; it never interprets
 /// the value. The inner value is private on purpose: no crate may depend on
 /// how the compositor names surfaces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SurfaceKey(u64);
 
 impl SurfaceKey {
     /// Creates a key from the compositor's raw surface identifier.
     pub const fn new(raw: u64) -> SurfaceKey {
-        SurfaceKey(raw)
-    }
-}
-
-impl From<u64> for SurfaceKey {
-    fn from(raw: u64) -> SurfaceKey {
         SurfaceKey(raw)
     }
 }
@@ -98,7 +92,7 @@ impl WindowRecord {
 /// everything else comes from the client's `xdg_toplevel` (`app_id`, `title`),
 /// the `wl_client` (`pid`) and the compositor's global event counter
 /// (`created_seq`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct MapRequest {
     /// Surface tree that is being mapped.
     pub surface_key: SurfaceKey,
@@ -134,7 +128,7 @@ impl MapRequest {
 ///
 /// Fields are crate-internal on purpose; the compositor goes through
 /// [`crate::WindowManager`].
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct WindowModel {
     /// Tracked windows in creation order (`WindowManager::windows` order).
     pub(crate) records: Vec<WindowRecord>,
@@ -180,7 +174,6 @@ mod tests {
 
     #[test]
     fn surface_key_is_constructible_and_displayable() {
-        assert_eq!(SurfaceKey::new(42), SurfaceKey::from(42_u64));
         assert_eq!(SurfaceKey::new(42).to_string(), "surface#42");
         assert_ne!(SurfaceKey::new(1), SurfaceKey::new(2));
     }

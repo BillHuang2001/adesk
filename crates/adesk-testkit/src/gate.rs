@@ -9,15 +9,12 @@ use adesk_compositor::RendererKind;
 
 use crate::error::{Result, TestkitError};
 
-/// Environment variable that enables GPU/EGL tests (`"1"` or `"true"`).
+/// Environment variable that enables GPU/EGL tests (set it to `"1"`).
 pub const GL_ENV_VAR: &str = "ADESK_TEST_GL";
 
 /// Whether GL tests are enabled for this process (`ADESK_TEST_GL=1`).
 pub fn gl_enabled() -> bool {
-    matches!(
-        std::env::var(GL_ENV_VAR).as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE")
-    )
+    matches!(std::env::var(GL_ENV_VAR).as_deref(), Ok("1"))
 }
 
 /// Returns `Ok(())` when GL tests are enabled, otherwise a skip-shaped error.

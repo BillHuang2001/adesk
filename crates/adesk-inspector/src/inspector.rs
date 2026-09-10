@@ -46,12 +46,6 @@ impl Inspector {
         }
     }
 
-    /// Replaces the drawing style.
-    pub fn with_style(mut self, style: OverlayStyle) -> Inspector {
-        self.style = style;
-        self
-    }
-
     /// The normalized overlay set this inspector draws.
     pub fn overlays(&self) -> &[OverlayKind] {
         &self.overlays
@@ -64,7 +58,7 @@ impl Inspector {
 
     /// Composes `input`'s frame and returns a new frame of the same size.
     pub fn render(&self, input: &InspectionInput) -> Result<ImageBuffer> {
-        let mut out = ImageBuffer::new_rgba(input.frame.width, input.frame.height);
+        let mut out = input.frame.clone();
         tracing::debug!(
             width = input.frame.width,
             height = input.frame.height,

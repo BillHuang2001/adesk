@@ -89,7 +89,7 @@ pub use runtime::{
     expected_window_geometry, TestRuntime, TestRuntimeConfig, DEFAULT_EVENT_CHANNEL_CAPACITY,
     DEFAULT_OUTPUT_SIZE, DEFAULT_SHUTDOWN_TIMEOUT,
 };
-pub use wait::{block_until, poll_until, wait_until, wait_until_async, DEFAULT_POLL_INTERVAL};
+pub use wait::{block_until, wait_until, DEFAULT_POLL_INTERVAL};
 pub use wayland::{
     AxisKind, ButtonState, ConfiguredSize, KeyState, KeyboardEvent, ModifiersState, PointerEvent,
     PopupSpec, PumpStats, TestPopup, TestWindow, ToplevelSpec, WaylandTestClient, BTN_LEFT,

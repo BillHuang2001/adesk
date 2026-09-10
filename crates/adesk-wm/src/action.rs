@@ -12,7 +12,7 @@ use adesk_core::{Rect, WindowId};
 /// Actions carry no timestamps, no sequence numbers and no event data: the
 /// compositor assigns `seq`/`ts_ms` when it turns an action into a
 /// [`adesk_core::RuntimeEvent`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WmAction {
     /// Configure `id` to `rect`.
     ///

@@ -19,13 +19,6 @@ use crate::spec::ViewerExposure;
 #[serde(transparent)]
 pub struct MachineId(pub String);
 
-impl MachineId {
-    /// Borrows the id as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
 impl fmt::Display for MachineId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
@@ -44,31 +37,12 @@ impl From<&str> for MachineId {
     }
 }
 
-impl From<MachineId> for String {
-    fn from(value: MachineId) -> Self {
-        value.0
-    }
-}
-
-impl AsRef<str> for MachineId {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
 /// Human/agent-facing machine name, unique within a manager.
 ///
 /// The registry maps this to the backend-assigned `MachineId`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct MachineName(pub String);
-
-impl MachineName {
-    /// Borrows the name as a string slice.
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
 
 impl fmt::Display for MachineName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -85,18 +59,6 @@ impl From<String> for MachineName {
 impl From<&str> for MachineName {
     fn from(value: &str) -> Self {
         Self(value.to_owned())
-    }
-}
-
-impl From<MachineName> for String {
-    fn from(value: MachineName) -> Self {
-        value.0
-    }
-}
-
-impl AsRef<str> for MachineName {
-    fn as_ref(&self) -> &str {
-        &self.0
     }
 }
 
@@ -187,19 +149,14 @@ mod tests {
     #[test]
     fn machine_id_display_and_conversions() {
         let id = MachineId::from("machine-1");
-        assert_eq!(id.as_str(), "machine-1");
-        assert_eq!(id.as_ref(), "machine-1");
         assert_eq!(id.to_string(), "machine-1");
-        let owned: String = id.clone().into();
-        assert_eq!(owned, "machine-1");
-        assert_eq!(MachineId::from(owned), id);
+        assert_eq!(MachineId::from(String::from("machine-1")), id);
+        assert_ne!(MachineId::from("a"), MachineId::from("b"));
     }
 
     #[test]
     fn machine_name_display_and_conversions() {
         let name = MachineName::from("adesk");
-        assert_eq!(name.as_str(), "adesk");
-        assert_eq!(name.as_ref(), "adesk");
         assert_eq!(name.to_string(), "adesk");
         assert_eq!(MachineName::from(String::from("adesk")), name);
         assert_ne!(MachineName::from("a"), MachineName::from("b"));

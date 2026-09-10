@@ -9,13 +9,17 @@ use adesk_core::WindowId;
 /// may legitimately observe an event after the window was destroyed); this
 /// error exists for command paths that must answer the AGP `unknown_window`
 /// code, see [`crate::WindowManager::require_window`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Error {
     /// The window id is not tracked by the manager.
     #[error("unknown window {0}")]
     UnknownWindow(WindowId),
 }
 
+/// Umbrella mapping mandated by `docs/core-api.md` §errors: every crate-local
+/// error type implements `From<LocalError> for adesk_core::Error`. This is the
+/// `?`-conversion path for callers that return [`adesk_core::Error`]; it is kept
+/// as shipped library API even though no in-workspace caller exercises it.
 impl From<Error> for adesk_core::Error {
     fn from(err: Error) -> adesk_core::Error {
         match err {

@@ -71,11 +71,6 @@ impl FillPattern {
         FillPattern::GradientH { from, to }
     }
 
-    /// A vertical gradient.
-    pub const fn gradient_v(from: [u8; 4], to: [u8; 4]) -> FillPattern {
-        FillPattern::GradientV { from, to }
-    }
-
     /// The expected RGBA pixel at `(x, y)` for an image of `size`.
     ///
     /// Exact semantics (do not "improve" it):

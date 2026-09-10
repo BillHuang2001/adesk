@@ -49,17 +49,11 @@ struct SpawnerState {
 
 /// [`ProcessSpawner`] mock: records every command, spawns nothing.
 ///
-/// The default outcome succeeds with [`SPAWN_PID`]; switch to a failure with
-/// [`RecordingSpawner::failing`] or [`RecordingSpawner::set_outcome`].
+/// The default outcome succeeds with [`SPAWN_PID`]; switch the outcome with
+/// [`RecordingSpawner::set_outcome`] or [`RecordingSpawner::fail_with`].
 #[derive(Debug)]
 pub struct RecordingSpawner {
     state: Mutex<SpawnerState>,
-}
-
-impl Default for RecordingSpawner {
-    fn default() -> RecordingSpawner {
-        RecordingSpawner::new()
-    }
 }
 
 impl RecordingSpawner {
@@ -74,16 +68,6 @@ impl RecordingSpawner {
             state: Mutex::new(SpawnerState {
                 commands: Vec::new(),
                 outcome: SpawnOutcome::Succeed(pid),
-            }),
-        }
-    }
-
-    /// Fails every spawn with [`SpawnError::Other`].
-    pub fn failing(message: impl Into<String>) -> RecordingSpawner {
-        RecordingSpawner {
-            state: Mutex::new(SpawnerState {
-                commands: Vec::new(),
-                outcome: SpawnOutcome::Fail(message.into()),
             }),
         }
     }
@@ -150,7 +134,7 @@ impl ProcessSpawner for RecordingSpawner {
 // --- clock mock ------------------------------------------------------------
 
 /// [`Clock`] whose value only changes when the test changes it.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct FakeClock {
     now_ms: AtomicU64,
 }
@@ -171,11 +155,6 @@ impl FakeClock {
     /// Jumps to an absolute value (may go backwards on purpose).
     pub fn set(&self, now_ms: u64) {
         self.now_ms.store(now_ms, Ordering::SeqCst);
-    }
-
-    /// Current value; identical to [`Clock::now_ms`].
-    pub fn now(&self) -> u64 {
-        self.now_ms.load(Ordering::SeqCst)
     }
 }
 

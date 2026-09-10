@@ -29,7 +29,7 @@
 //! let _report = registry.scan().expect("scan application directories");
 //! let apps = registry.list(Some("firefox"), false);
 //! if let Some(app) = registry.get(&AppId::from("org.mozilla.firefox")) {
-//!     let record = registry.launch(&app.id, &[], &LaunchEnv::from_process())?;
+//!     let record = registry.launch(&app.id, &[], &LaunchEnv::new())?;
 //!     println!("launched {} (pid {:?})", record.app_id, record.pid);
 //!     let _ = apps;
 //! }

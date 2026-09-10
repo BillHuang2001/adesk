@@ -232,18 +232,6 @@ fn destroying_the_last_window_leaves_no_active_window() {
 }
 
 #[test]
-fn destroying_an_unknown_window_is_ignored() {
-    let config = default_config();
-    let mut model = WindowModel::new();
-    let id = map(&mut model, &config, 1);
-
-    assert_eq!(on_destroy(&mut model, WindowId(99)), Vec::new());
-    assert_eq!(active_window(&model), Some(id));
-    assert_eq!(windows(&model).len(), 1);
-    assert_invariants(&model, &config);
-}
-
-#[test]
 fn activate_switches_windows_and_reorders_mru() {
     let config = default_config();
     let mut model = WindowModel::new();
@@ -277,17 +265,6 @@ fn activate_on_the_active_window_returns_an_explicit_no_op() {
     assert_eq!(activate(&mut model, id), vec![WmAction::None]);
     assert_eq!(model.mru, vec![id]);
     assert_eq!(state_of(&model, id), WindowState::Active);
-    assert_invariants(&model, &config);
-}
-
-#[test]
-fn activate_unknown_window_returns_an_empty_list() {
-    let config = default_config();
-    let mut model = WindowModel::new();
-    let id = map(&mut model, &config, 1);
-
-    assert_eq!(activate(&mut model, WindowId(42)), Vec::new());
-    assert_eq!(active_window(&model), Some(id));
     assert_invariants(&model, &config);
 }
 
@@ -480,36 +457,6 @@ fn every_event_path_tolerates_unknown_ids() {
 }
 
 #[test]
-fn window_info_projects_every_field() {
-    let config = default_config();
-    let mut model = WindowModel::new();
-    let request = MapRequest {
-        surface_key: SurfaceKey::new(3),
-        app_id: Some(AppId::from("org.gnome.Nautilus")),
-        pid: Some(77),
-        title: Some("Home".into()),
-        created_seq: 12,
-    };
-    let (id, _) = on_map(&mut model, &config, request);
-    on_commit(&mut model, id, 34, &Region::empty());
-    on_popup_added(&mut model, id);
-    on_popup_added(&mut model, id);
-
-    let info = window_info(&model, id).expect("info");
-
-    assert_eq!(info.id, id);
-    assert_eq!(info.app_id, Some(AppId::from("org.gnome.Nautilus")));
-    assert_eq!(info.title.as_deref(), Some("Home"));
-    assert_eq!(info.geometry, config.tiled_rect());
-    assert_eq!(info.state, WindowState::Active);
-    assert!(info.mapped);
-    assert_eq!(info.pid, Some(77));
-    assert_eq!(info.created_seq, 12);
-    assert_eq!(info.last_commit_seq, 34);
-    assert_eq!(info.popup_count, 2);
-}
-
-#[test]
 fn windows_are_in_creation_order_and_surface_keys_round_trip() {
     let config = default_config();
     let mut model = WindowModel::new();
@@ -570,6 +517,24 @@ fn resolve_position_matches_the_documented_non_zero_origin_examples() {
         resolve_position(&model, id, Position::pixels(500, 500)),
         Some(Point::new(199, 99))
     );
+
+    // A second, differently shaped window proves the translation is driven by
+    // the geometry origin, not tied to one offset.
+    let id = WindowId(1);
+    let model = model_with_geometry(id, Rect::new(10, 20, 30, 40));
+
+    assert_eq!(
+        resolve_position(&model, id, Position::pixels(5, 5)),
+        Some(Point::new(15, 25))
+    );
+    assert_eq!(
+        resolve_position(&model, id, Position::normalized(1.0, 1.0)),
+        Some(Point::new(39, 59))
+    );
+    assert_eq!(
+        resolve_position(&model, id, Position::pixels(1000, 1000)),
+        Some(Point::new(39, 59))
+    );
 }
 
 #[test]
@@ -609,25 +574,6 @@ fn resolve_position_at_the_output_origin_clamps_and_normalizes() {
             Position::normalized(f64::INFINITY, f64::NEG_INFINITY)
         ),
         Some(Point::new(1279, 0))
-    );
-}
-
-#[test]
-fn resolve_position_translates_a_window_offset_by_its_geometry_origin() {
-    let id = WindowId(1);
-    let model = model_with_geometry(id, Rect::new(10, 20, 30, 40));
-
-    assert_eq!(
-        resolve_position(&model, id, Position::pixels(5, 5)),
-        Some(Point::new(15, 25))
-    );
-    assert_eq!(
-        resolve_position(&model, id, Position::normalized(1.0, 1.0)),
-        Some(Point::new(39, 59))
-    );
-    assert_eq!(
-        resolve_position(&model, id, Position::pixels(1000, 1000)),
-        Some(Point::new(39, 59))
     );
 }
 

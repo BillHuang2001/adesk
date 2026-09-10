@@ -5,7 +5,7 @@ mod common;
 
 use std::sync::Mutex;
 
-use adesk_core::{ImageBuffer, OverlayKind, Size};
+use adesk_core::{ImageBuffer, OverlayKind, Size, WindowId};
 use adesk_inspector::{
     blend_over, Error, InspectionInput, InspectionRequest, InspectionSource, Inspector, Result,
 };
@@ -52,21 +52,81 @@ fn marked_frame(width: u32, height: u32) -> ImageBuffer {
     frame
 }
 
+/// Every overlay must leave the frame byte-identical when the state it renders
+/// is absent (no windows, no active window, no cursor, no commit, no damage),
+/// and an empty overlay set must copy the frame verbatim. Each case still
+/// asserts full-frame equivalence, so sharing the harness weakens nothing.
 #[test]
-fn empty_overlays_return_the_frame_unchanged() {
-    let input = common::input(common::filled_frame(16, 16, [7, 8, 9, 255]))
-        .damage(vec![common::rect(0, 0, 4, 4)])
-        .build();
-    let inspector = Inspector::new(vec![]);
-    let out = inspector
-        .render(&input)
-        .expect("empty overlay set must render");
-    assert_eq!(out.size(), input.frame.size());
-    assert_eq!(
-        out.data, input.frame.data,
-        "an empty overlay set must copy the frame verbatim, even with damage present"
-    );
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
+fn overlays_draw_nothing_without_their_data() {
+    let cases: Vec<(&str, Vec<OverlayKind>, InspectionInput)> = vec![
+        (
+            "empty overlay set",
+            vec![],
+            common::input(common::filled_frame(16, 16, [7, 8, 9, 255]))
+                .damage(vec![common::rect(0, 0, 4, 4)])
+                .build(),
+        ),
+        (
+            "window_ids + app_ids without windows",
+            vec![OverlayKind::WindowIds, OverlayKind::AppIds],
+            common::input(common::frame(64, 48)).build(),
+        ),
+        (
+            "window_ids with an empty window geometry",
+            vec![OverlayKind::WindowIds],
+            common::input(common::frame(64, 48))
+                .windows(vec![common::window(1, common::rect(0, 0, 0, 0))])
+                .build(),
+        ),
+        (
+            "focus without an active window",
+            vec![OverlayKind::Focus],
+            common::input(common::frame(64, 48))
+                .windows(vec![common::window(1, common::rect(0, 0, 32, 24))])
+                .build(),
+        ),
+        (
+            "focus with an active id that matches no window",
+            vec![OverlayKind::Focus],
+            common::input(common::frame(64, 48))
+                .windows(vec![common::window(1, common::rect(0, 0, 32, 24))])
+                .active(Some(WindowId(99)))
+                .build(),
+        ),
+        (
+            "damage with empty rects",
+            vec![OverlayKind::Damage],
+            common::input(common::frame(32, 32))
+                .damage(vec![common::rect(4, 4, 0, 8), common::rect(4, 4, 8, 0)])
+                .build(),
+        ),
+        (
+            "cursor without a cursor position",
+            vec![OverlayKind::Cursor],
+            common::input(common::frame(16, 16)).build(),
+        ),
+        (
+            "commit_timing without a commit",
+            vec![OverlayKind::CommitTiming],
+            common::input(common::frame(96, 48)).build(),
+        ),
+    ];
+
+    for (name, overlays, input) in cases {
+        let out = Inspector::new(overlays)
+            .render(&input)
+            .unwrap_or_else(|error| panic!("{name}: render failed: {error}"));
+        assert_eq!(out.size(), input.frame.size(), "{name}: frame size");
+        assert_eq!(
+            out.data, input.frame.data,
+            "{name}: the frame must be copied verbatim"
+        );
+        assert_eq!(
+            common::diff_bytes(&out, &input.frame),
+            0,
+            "{name}: not a single byte may differ"
+        );
+    }
 }
 
 #[test]

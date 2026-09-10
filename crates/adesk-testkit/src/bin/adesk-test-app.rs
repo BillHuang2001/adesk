@@ -6,7 +6,7 @@
 //! # CLI grammar
 //!
 //! ```text
-//! adesk-test-app --app-id <ID> [--title <TITLE>] [--size <W>x<H>] [--fill <PATTERN>] [--exit-after <MS>]
+//! adesk-test-app --app-id <ID> [--title <TITLE>] [--size <W>x<H>] [--fill <PATTERN>] [--exit-after <MS>] [--exit-on-close]
 //! ```
 //!
 //! - `--app-id <ID>` (required): the `xdg_toplevel` app id and, unless `--title` overrides
@@ -16,10 +16,13 @@
 //! - `--fill <PATTERN>`: buffer fill, decoded with [`FillPattern::from_cli_arg`]
 //!   (`solid:RRGGBB[AA]`, `checker:SIZE:RRGGBB[AA]:RRGGBB[AA]`, `gradient-h:...`,
 //!   `gradient-v:...`); default [`FillPattern::default`].
-//! - `--exit-after <MS>`: exit on its own after `MS` milliseconds; default: wait for the
-//!   `exit` command on stdin.
+//! - `--exit-after <MS>`: exit on its own after `MS` milliseconds; default: keep pumping
+//!   until the `exit` command on stdin, `--exit-on-close`, or a lost connection.
+//! - `--exit-on-close`: exit when the compositor requests close (`xdg_toplevel.close`);
+//!   default: ignore the request and keep pumping. This flag takes no value.
 //!
-//! Flags may appear in any order; a repeated flag's last occurrence wins.
+//! Flags may appear in any order; a repeated flag's last occurrence wins. Every flag except
+//! `--exit-on-close` takes exactly one value.
 //!
 //! # Behavior
 //!
@@ -27,7 +30,8 @@
 //! 2. create an `xdg_toplevel` with the app id and title and commit it;
 //! 3. wait (bounded 10 s) for the first `xdg_surface.configure`, then `ack_configure` and
 //!    commit one SHM frame filled with `--fill` at `--size`;
-//! 4. pump events until `exit\n` arrives on stdin or `--exit-after` elapses;
+//! 4. pump events until `exit\n` arrives on stdin, `--exit-after` elapses, or `--exit-on-close`
+//!    is set and the compositor requests close;
 //! 5. destroy the surface, flush, disconnect and exit 0.
 //!
 //! A connect or protocol failure prints the error to stderr and exits 2. A usage error
@@ -38,7 +42,7 @@
 //!
 //! | Code | Meaning |
 //! |---|---|
-//! | 0 | clean exit (stdin `exit` command or `--exit-after`) |
+//! | 0 | clean exit (stdin `exit` command, `--exit-after`, or `--exit-on-close`) |
 //! | 2 | Wayland connect/protocol failure |
 //! | 64 | usage error |
 //!
@@ -52,11 +56,11 @@ use std::process::ExitCode;
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use adesk_testkit::{FillPattern, Size, TestkitError, ToplevelSpec, WaylandTestClient};
+use adesk_testkit::{FillPattern, Size, TestWindow, TestkitError, ToplevelSpec, WaylandTestClient};
 
 /// Usage line printed after a usage error (exit 64).
 const USAGE: &str = "usage: adesk-test-app --app-id <ID> [--title <TITLE>] [--size <W>x<H>] \
-                     [--fill <PATTERN>] [--exit-after <MS>]";
+                     [--fill <PATTERN>] [--exit-after <MS>] [--exit-on-close]";
 
 /// Exit code for a Wayland connect or protocol failure.
 const EXIT_PROTOCOL: u8 = 2;
@@ -79,8 +83,11 @@ const PUMP_SLICE: Duration = Duration::from_millis(50);
 /// The stdin command that makes the helper exit gracefully.
 const EXIT_COMMAND: &str = "exit";
 
-/// The flags the helper understands; every one of them takes exactly one value.
+/// The value-taking flags the helper understands; every one of them consumes exactly one value.
 const FLAGS: [&str; 5] = ["--app-id", "--title", "--size", "--fill", "--exit-after"];
+
+/// The valueless boolean flags the helper understands; their mere presence sets a `bool`.
+const BOOL_FLAGS: [&str; 1] = ["--exit-on-close"];
 
 /// Parsed command line; see the module docs for the grammar and defaults.
 #[derive(Debug, Clone)]
@@ -95,16 +102,19 @@ struct CliArgs {
     fill: FillPattern,
     /// `--exit-after`, `None` to wait for the stdin `exit` command.
     exit_after: Option<Duration>,
+    /// `--exit-on-close`: exit when the compositor requests close.
+    exit_on_close: bool,
 }
 
 impl CliArgs {
     /// Parses `args` (without `argv[0]`).
     ///
-    /// Semantics: every flag takes exactly one value (a missing value, a value that looks
-    /// like another flag, or a non-flag argument is an error); the last occurrence of a
-    /// repeated flag wins; an unknown flag is an error; `--app-id` is required. `--size`
-    /// requires `<W>x<H>` with two `u32`s (zero dimensions are allowed), `--exit-after`
-    /// requires a `u64` of milliseconds and `--fill` must decode via
+    /// Semantics: every flag except `--exit-on-close` takes exactly one value (a missing
+    /// value, a value that looks like another flag, or a non-flag argument is an error);
+    /// `--exit-on-close` is a valueless boolean whose presence sets the flag; the last
+    /// occurrence of a repeated flag wins; an unknown flag is an error; `--app-id` is
+    /// required. `--size` requires `<W>x<H>` with two `u32`s (zero dimensions are allowed),
+    /// `--exit-after` requires a `u64` of milliseconds and `--fill` must decode via
     /// [`FillPattern::from_cli_arg`]. The returned `Err` message is exactly what is printed
     /// before [`USAGE`].
     fn parse(mut args: impl Iterator<Item = String>) -> Result<CliArgs, String> {
@@ -113,8 +123,17 @@ impl CliArgs {
         let mut size: Option<Size> = None;
         let mut fill: Option<FillPattern> = None;
         let mut exit_after: Option<Duration> = None;
+        let mut exit_on_close = false;
 
         while let Some(flag) = args.next() {
+            if BOOL_FLAGS.contains(&flag.as_str()) {
+                match flag.as_str() {
+                    "--exit-on-close" => exit_on_close = true,
+                    // Not reachable: `BOOL_FLAGS` and this match cover the same set.
+                    _ => return Err(format!("unknown flag `{flag}`")),
+                }
+                continue;
+            }
             if !FLAGS.contains(&flag.as_str()) {
                 return Err(if flag.starts_with("--") {
                     format!("unknown flag `{flag}`")
@@ -154,6 +173,7 @@ impl CliArgs {
             size: size.unwrap_or(DEFAULT_SIZE),
             fill: fill.unwrap_or_default(),
             exit_after,
+            exit_on_close,
         })
     }
 }
@@ -238,7 +258,13 @@ fn run(args: &CliArgs) -> Result<(), String> {
         .enable_time()
         .build()
         .map_err(|e| format!("cannot build the tokio runtime: {e}"))?;
-    runtime.block_on(pump_until_exit(&mut client, args.exit_after, &exit_rx))?;
+    runtime.block_on(pump_until_exit(
+        &mut client,
+        &window,
+        args.exit_on_close,
+        args.exit_after,
+        &exit_rx,
+    ))?;
 
     // Teardown is best-effort: the compositor may already be gone, which is not a failure of
     // this helper. Diagnostics still reach stderr (the test inherits it) so a real protocol
@@ -301,15 +327,23 @@ fn exit_requested(rx: &Receiver<()>) -> bool {
 
 /// Pumps events in short slices until the exit condition is met.
 ///
-/// Exits on the stdin `exit` command, when `exit_after` elapses, and when the compositor
-/// closes the connection (nothing left to pump). Any other pump error is a protocol failure.
+/// Exits on the stdin `exit` command, when `exit_after` elapses, when `exit_on_close` is set
+/// and the compositor asked the window to close, and when the compositor closes the
+/// connection (nothing left to pump). Any other pump error is a protocol failure.
 async fn pump_until_exit(
     client: &mut WaylandTestClient,
+    window: &TestWindow,
+    exit_on_close: bool,
     exit_after: Option<Duration>,
     exit_rx: &Receiver<()>,
 ) -> Result<(), String> {
     let deadline = exit_after.map(|after| Instant::now() + after);
     loop {
+        if exit_on_close && window.close_requested() {
+            // The compositor asked us to close: leave the loop and run the ordinary teardown,
+            // exactly as a real application would.
+            return Ok(());
+        }
         if exit_requested(exit_rx) {
             return Ok(());
         }
@@ -352,6 +386,7 @@ mod tests {
         assert_eq!(args.size, Size::new(640, 480));
         assert_eq!(args.fill, FillPattern::default());
         assert_eq!(args.exit_after, None);
+        assert!(!args.exit_on_close, "--exit-on-close defaults to false");
     }
 
     #[test]
@@ -419,6 +454,29 @@ mod tests {
                 "value `{bad}` should report an --exit-after error, got: {err}"
             );
         }
+    }
+
+    #[test]
+    fn exit_on_close_is_a_valueless_boolean_flag() {
+        // Absent by default; the mere presence of the flag turns it on.
+        let args = parse(&["--app-id", "a"]).expect("valid");
+        assert!(!args.exit_on_close);
+        let args = parse(&["--app-id", "a", "--exit-on-close"]).expect("valid");
+        assert!(args.exit_on_close);
+
+        // Repeating it is harmless (a bool has no "last occurrence" other than itself).
+        let args = parse(&["--app-id", "a", "--exit-on-close", "--exit-on-close"]).expect("valid");
+        assert!(args.exit_on_close);
+
+        // It consumes no value: the argument that follows is parsed as its own flag.
+        let args = parse(&["--app-id", "a", "--exit-on-close", "--title", "t"]).expect("valid");
+        assert!(args.exit_on_close);
+        assert_eq!(args.title, "t");
+
+        // ... so a bare argument after it is still a usage error, proving no value was eaten.
+        let err = parse(&["--app-id", "a", "--exit-on-close", "stray"])
+            .expect_err("--exit-on-close must not consume the next argument");
+        assert_eq!(err, "unexpected argument `stray`");
     }
 
     #[test]
