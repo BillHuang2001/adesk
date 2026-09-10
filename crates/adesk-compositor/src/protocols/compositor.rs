@@ -2,7 +2,7 @@
 //!
 //! Besides the compositor state getter, Smithay requires per-client state: the
 //! transaction queue and scale override must live in the client's
-//! [`ClientData`](smithay::reexports::wayland_server::backend::ClientData) so they
+//! [`ClientData`] so they
 //! are dropped when that client disconnects. [`ClientState`] is that storage;
 //! `crate::run` inserts it for every new client.
 

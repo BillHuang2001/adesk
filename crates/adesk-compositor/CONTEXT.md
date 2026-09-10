@@ -93,10 +93,10 @@ Code rules:
 `src/render/`: `headless.rs` (`HeadlessRenderer`: create/name/dmabuf_formats/render_window/render_output), `elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`, `overlay_elements`, `rect_to_smithay`), `mod.rs` (`OutputWindow`).
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
-- `../adesk-core/` — domain types and `RuntimeEvent` (implemented).
-- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (implemented; consumed by `WmBridge`).
-- `../adesk-render/` — crop/downscale/readback/encoding and the `Scene` pipeline used by both render paths (implemented).
-- `../adesk-testkit/` — implemented integration harness the suites consume: in-process runtime, temp `XDG_RUNTIME_DIR`, Wayland test client (input and clipboard recorders), image assertions, event tap.
+- `../adesk-core/` — domain types and `RuntimeEvent`.
+- `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (consumed by `WmBridge`).
+- `../adesk-render/` — crop/downscale/readback/encoding and the `Scene` pipeline used by both render paths.
+- `../adesk-testkit/` — the integration harness the suites consume: in-process runtime, temp `XDG_RUNTIME_DIR`, Wayland test client (input and clipboard recorders), image assertions, event tap.
 
 ## Design Decisions
 
@@ -151,6 +151,7 @@ Event loop:
 - `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
 - `WindowId` allocation is entirely `adesk-wm`'s: `WindowModel::next_id` (a per-`WindowManager` `u64` field, no statics/atomics) starts at `1` and increments only in `policy::on_map`, so a fresh compositor assigns `WindowId(1)`, then `WindowId(2)`, ... to the first two *mapped* toplevels; registration and duplicate maps allocate nothing. Popups use a separate `SurfaceRegistry::next_popup_id` counter and surfaces a separate `SurfaceKey` counter, so only a toplevel map can consume a window id.
 - Title/app-id updates are metadata-only: `policy::on_title`/`policy::on_app_id` return no actions and neither path marks damage or re-configures — damage comes exclusively from surface commits.
+- Activation is focus-only: `policy::activate` returns `[WmAction::Activate]` and never `ConfigureWindow`, so a window is tiled exactly on map and on an output-size change (`policy::on_map`/`policy::on_output_size`) — activating an already mapped window sends no configure. `State::apply_activate` moves keyboard focus and the data-device focus together.
 - A late `xdg_toplevel.set_app_id` is written back into the window model: `WmBridge::app_id_changed` reads the toplevel metadata and delegates to `note_app_id`, which keeps the `app_ids` change detection and the launch-ledger refinement and writes a genuine change through `WindowManager::on_app_id`, so `WindowInfo.app_id`/`QueryState`/`list_windows` report the new value. Smithay applies `set_app_id` while dispatching the request (not at the next commit), so no commit is needed for the write-back to land.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding.
 - Output composition is the single-visible-toplevel projection: `State::render_output` collects every tracked window with a root surface into a *candidate* list of `OutputWindow`s (`active` marks the one `adesk-wm` tiles), and `elements::output_scene` draws exactly the first `active` candidate (`visible_index`) — tracked-but-inactive windows are never composed and two toplevels cannot stack. The composed window's popups ride along through `window_elements`, overlays are computed from the composed window alone, and no active candidate yields an empty scene (a clear frame). Window-level `render_window` still renders any window by id.
@@ -166,7 +167,7 @@ Event loop:
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;` to keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
-- Two `#[allow(dead_code)]` sites remain, both field-level lifetime handles: `State::output` and `State::xdg_decoration_state`. No crate-level allow attributes remain.
+- Two field-level `#[allow(dead_code)]` sites, both lifetime handles: `State::output` and `State::xdg_decoration_state`; there are no crate-level allow attributes.
 
 ### AGP command semantics (verified against the code)
 
@@ -207,7 +208,7 @@ Smoke tests (`tests/compositor_smoke.rs`; 3 tests, public API only, no `adesk-te
 - They bind a real Wayland socket, so each test installs a private `0700` temp `XDG_RUNTIME_DIR` (restored on drop) and holds a process-wide mutex for its whole body, because the env var is process-global and the tests share one binary.
 - This is required in this sandbox: `/run/user/1000` is a **read-only filesystem**, so the ambient `XDG_RUNTIME_DIR` cannot host a socket.
 
-Integration tests (implemented; driven through the `adesk-testkit` dev-dependency on a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap ordering with explicit deadlines and no sleeps): 20 tests in six files, and `tests/integration_plan.md` maps each scenario to its suite — the plan holds the §1–§7 specs and names the file per scenario group, while each suite's module doc names the scenario it implements.
+Integration tests (driven through the `adesk-testkit` dev-dependency on a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap ordering with explicit deadlines and no sleeps): 20 tests in six files, and `tests/integration_plan.md` maps each scenario to its suite — the plan holds the §1–§7 specs and names the file per scenario group, while each suite's module doc names the scenario it implements.
 - `tests/window_lifecycle.rs` (3): §1 a window appears with a tiling configure (event order, `QueryState`, `RenderWindow` pixels matching the committed pattern); §1 addendum a late `set_app_id` (set after the first commit) is written back into the window model and reported by `QueryState` (barrier: a commit on the same connection whose `surface_commit` event is awaited); §2 focus follows activation (activation/focus event order with the reply after both events, no re-configure on activation, unknown `WindowId` → `unknown_window`).
 - `tests/input_delivery.rs` (6): §3 the real seat path — a normalized `PointerMove` lands on the window model's point, press/release are two ordered `wl_pointer.button` events, `wl_pointer.axis` is negative-vertical and framed, `ctrl+c` is delivered as an ordered chord press with a reverse release, and a released chord or an injection with no focused window is `invalid_request` without panicking.
 - `tests/popups.rs` (2): §4 popup lifecycle — `popup_appeared`/`popup_disappeared` name the owner, the popup's pixels compose into the owner's `RenderWindow` under the window's one commit counter, and destroying the owner with a popup open reports the popup's disappearance first.
@@ -227,7 +228,6 @@ Validation recipe (all workspace members have manifests, so the crate builds in-
 ## Known Issues
 
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
-- `cargo fmt -p adesk-compositor -- --check` reports repo-wide rustfmt-version drift (import ordering, `assert_eq!` wrapping) — tooling drift, not code defects. Do not reformat unrelated files to chase it.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 
 ## Dependencies

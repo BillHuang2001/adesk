@@ -357,7 +357,10 @@ impl State {
         self.events.surface_commit(window_id, commit_seq, damage);
     }
 
-    /// Make a window active: reconfigure its tiling and move keyboard focus.
+    /// Make a window active: move keyboard focus and publish the activation.
+    ///
+    /// Activation never re-configures — a window is tiled on map and on an output-size
+    /// change — so activating an already mapped window changes focus only.
     ///
     /// Runtime-native: this mutates compositor state and moves seat focus, but never
     /// synthesizes input. An unknown id is an error and emits nothing; an already
@@ -698,7 +701,7 @@ impl State {
     /// The frame is stamped with the window's commit counter: the renderer has no
     /// window-manager access, so this state is the authority for the per-window
     /// counter that observations compare against. An unknown window is
-    /// [`CompositorError::UnknownWindow`](crate::error::CompositorError::UnknownWindow).
+    /// [`CompositorError::UnknownWindow`].
     pub(crate) fn render_window(
         &mut self,
         window_id: WindowId,

@@ -6,7 +6,7 @@
 //! never moved to another thread.
 //!
 //! Pixel production itself belongs to `adesk-render`: this module builds the
-//! [`RenderConfig`], asks [`elements`](super::elements) for the scene, and hands
+//! [`RenderConfig`], asks [`elements`] for the scene, and hands
 //! both to [`adesk_render::render_scene`], which allocates the offscreen target,
 //! draws, reads back, crops and downscales. Nothing here touches raw pixels.
 //!

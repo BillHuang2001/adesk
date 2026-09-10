@@ -1,6 +1,7 @@
 //! Serving one [`RuntimeCommand`] at a time.
 //!
-//! [`handle_command`] is the command side of the compositor thread's contract
+//! [`handle_command`](crate::run::dispatch::handle_command) is the command side of
+//! the compositor thread's contract
 //! (`docs/architecture.md` §3): it maps every command variant onto exactly one
 //! [`State`] method, sends the reply **immediately** after the call returns and
 //! never blocks. Commands are served in FIFO order by the `calloop` channel source,
