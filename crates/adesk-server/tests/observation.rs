@@ -2,7 +2,7 @@
 //!
 //! One real runtime per test ([`TestRuntime`]: pixman, 1280x720, empty app-dir
 //! list, no Wayland clients) driven by the typed [`adesk_client::Client`]. The
-//! two wire-shape cases use the harness's `RawClient`, because the SDK
+//! wire-shape cases use the harness's `RawClient`, because the SDK
 //! deliberately cannot express a `wait_for_*` that asks for pixels and cannot
 //! show what the server actually put on the wire.
 //!
@@ -13,9 +13,11 @@
 //! | `wait_for_quiet_reports_quiet_after_the_quiet_window` | the quiet condition resolves with `quiet: true` / `timed_out: false` |
 //! | `observe_until_timeout_reports_the_horizon` | `until = timeout` samples the horizon (see note below) |
 //! | `observe_until_change_times_out_on_a_quiet_runtime` | `until = change` on an idle runtime expires |
+//! | `observe_with_include_image_resolves_without_pixels` | `include_image = true` with no window to render attaches no image |
 //! | `wait_for_change_with_since_commit_far_ahead_times_out` | the `since_commit` filter drops every commit |
 //! | `unknown_after_action_is_invalid_request` | observer `UnknownAction` → AGP `invalid_request`, and the connection survives |
 //! | `waits_never_attach_an_image_on_the_wire` | `wait_for_change`/`wait_for_quiet` default `include_image = false` |
+//! | `observe_answers_a_null_image_when_pixels_were_requested` | §4 always carries `image` inside `observation`; with an image requested and nothing to render it is `null`, not omitted |
 //! | `observation_reports_the_watermark_fields` | the §4 `Observation` JSON shape (`seq`/`last_commit_seq` numbers, nullable flags) |
 //!
 //! ## Note: `until = timeout` reports `timed_out: false`
@@ -210,6 +212,50 @@ fn observe_until_change_times_out_on_a_quiet_runtime() {
     );
 }
 
+/// A requested image is attached only when there is a window to render.
+///
+/// §5.4 renders the observation's window *after* the wait resolved; an unscoped
+/// observation falls back to the active window and then to the keyboard focus
+/// (`src/dispatch/capture.rs`, `observation_image`). This runtime has neither
+/// (no Wayland client ever connects), so `include_image = true` resolves with
+/// the observation and no pixels — never a `render_failed` and never a
+/// synthesized window. This is the branch of §5.4 that only a runtime without a
+/// candidate window reaches; the image-*present* branch needs a real Wayland
+/// client and is covered by the `adesk-testkit` / `adesk-agent` E2E suites.
+#[test]
+fn observe_with_include_image_resolves_without_pixels() {
+    let runtime = TestRuntime::start();
+    let client = runtime.connect();
+
+    let result = expect_ok(
+        runtime.block_on_timeout(
+            client.observe(
+                ObserveRequest::timeout()
+                    .timeout_ms(150)
+                    .include_image(true),
+            ),
+        ),
+        "observe(include_image = true) on a runtime without windows",
+    );
+
+    assert!(
+        result.image.is_none(),
+        "no window exists and no active window or keyboard focus can be \
+         resolved, so there is nothing to render: {:?}",
+        result.image
+    );
+    assert!(
+        result.observation.window_id.is_none(),
+        "an unscoped observation must not invent a window to render: {:?}",
+        result.observation
+    );
+    assert_eq!(
+        result.observation.commits, 0,
+        "nothing committed while the wait was pending: {:?}",
+        result.observation
+    );
+}
+
 #[test]
 fn wait_for_change_with_since_commit_far_ahead_times_out() {
     let runtime = TestRuntime::start();
@@ -356,6 +402,55 @@ fn observation_reports_the_watermark_fields() {
         assert!(
             observation["title_changed"].is_boolean(),
             "`title_changed` is a bool: {response}"
+        );
+    });
+}
+
+/// An `observe` that asks for pixels carries an explicit `null` when there is
+/// nothing to render.
+///
+/// §4 always puts `image` inside the `observation` object — `null` when absent —
+/// so the field must be *present*, not dropped, when `include_image = true`
+/// found no window (`adesk-proto`'s `ObserveResult` serializer inserts the key
+/// unconditionally; `src/dispatch/capture.rs` answers `Ok(None)` there). A raw
+/// client is used because only the wire can distinguish "absent" from "null".
+#[test]
+fn observe_answers_a_null_image_when_pixels_were_requested() {
+    let runtime = TestRuntime::start();
+    let mut raw = runtime.connect_raw();
+
+    runtime.block_on_timeout(async {
+        raw.send_json(&json!({
+            "id": 1,
+            "method": "observe",
+            "params": {
+                "until": {"type": "timeout"},
+                "timeout_ms": 150,
+                "include_image": true,
+            },
+        }))
+        .await;
+        let response = raw
+            .expect_json_matching(REQUEST_TIMEOUT, |frame| frame["id"].as_u64() == Some(1))
+            .await;
+        assert!(
+            response.get("error").is_none(),
+            "observe(include_image = true) answered with an error frame: {response}"
+        );
+
+        let observation = &response["result"]["observation"];
+        assert!(
+            observation.is_object(),
+            "result.observation is missing: {response}"
+        );
+        assert!(
+            matches!(observation.get("image"), Some(Value::Null)),
+            "§4 always carries `image` inside `observation`; with pixels \
+             requested and no window to render it must be `null`: {response}"
+        );
+        assert!(
+            observation["window_id"].is_null(),
+            "§4 `window_id` is null for an unscoped observation: {response}"
         );
     });
 }
