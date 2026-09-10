@@ -40,6 +40,10 @@ All three files are implementation-complete and audited clean: zero executable i
 - `MockProvider`'s scripted latency is only simulated inside a tokio runtime; outside one it logs `tracing::warn!` and skips the sleep (`tokio::time::sleep` panics without a reactor).
 - `truncate(text, 0)` returns `"…"` (1 char) — the ellipsis is appended after taking 0 chars; unreachable from the real call sites, which pass 512/200.
 - `non_empty_env` maps a non-Unicode env var to `None` via `.ok()?`, i.e. an unreadable `ADESK_AGENT_API_KEY` looks like "no key".
+- `LlmProvider::supports_images()` has no non-test caller: the loop gates images on `LoopConfig::include_image`, never on the provider. The trait default and both overrides return `true`, so the method is currently a no-op probe (wire it into the loop or drop it before relying on it).
+- Never-wired surface: the binary (`main.rs::provider_config`) sets only `kind`/`model`/`base_url`/`api_key`, so `ProviderConfig::{temperature, max_tokens, timeout_ms, system_prompt, mock_script}` are always defaults there, and `MockProvider::from_json` has no CLI path. `ImageDetail::Low`/`High` and `OpenAiCompatProvider::config()` are likewise constructed/read only inside `#[cfg(test)]`.
+- The crate has no in-workspace consumers (`adesk-agent` is a leaf), so every `pub` item here is exercised only by this crate's own tests and the binary.
+- Duplicated small helpers inside the crate: the `AgentContext` test fixture is written out three times (`mod.rs` `context()`, `mock.rs` `ctx()`, `openai.rs` `context()`), and `truncate` exists three times with different elision markers (`openai.rs` `…`, `agent_loop.rs` `...`, `context.rs::truncate_detail` none).
 
 ## Test Strategy
 - Unit tests live inline in each file under `#[cfg(test)]`: 6 in `mod.rs`, 8 in `mock.rs`, 10 in `openai.rs` (24 of the crate's 44 lib unit tests).
