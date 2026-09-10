@@ -78,7 +78,7 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 - `serde_json` is declared in both `[dependencies]` and `[dev-dependencies]`; the dev-dependency entry is redundant (integration tests already see normal dependencies — `adesk-proto` has no `[dev-dependencies]` and its tests use `serde_json`).
 ## Status
 Implemented and green: `src/lib.rs`, `src/error.rs`, `src/types.rs`, `src/message.rs`, `src/codec.rs`.
-`./scripts/dev.sh cargo test -p adesk-viewer-proto` = 38 passed / 0 failed (23 `tests/wire.rs`, 14 `tests/codec.rs`, 1 doctest);
+`./scripts/dev.sh cargo test -p adesk-viewer-proto` = 36 passed / 0 failed (21 `tests/wire.rs`, 14 `tests/codec.rs`, 1 doctest), with the duplicated fixtures consolidated into the shared `tests/common/mod.rs` module.
 `cargo clippy -p adesk-viewer-proto --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer-proto --check` and
 `cargo doc -p adesk-viewer-proto --no-deps --document-private-items` are all clean (zero warnings).
 No `todo!()`/`unimplemented!()`, no crate-level `allow`, no panics on the decode path.
