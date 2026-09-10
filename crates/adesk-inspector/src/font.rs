@@ -50,11 +50,6 @@ pub struct Glyph {
 }
 
 impl Glyph {
-    /// Row bits at `y`, or `None` when out of range.
-    pub fn row(&self, y: usize) -> Option<u8> {
-        self.rows.get(y).copied()
-    }
-
     /// Whether column `x` of row `y` is ink.
     pub fn ink(&self, x: usize, y: usize) -> bool {
         if x >= FONT_WIDTH as usize {
