@@ -5,7 +5,7 @@
 End-to-end coverage of the AGP v1 server: a real runtime (`Server::start`) on a private temp socket,
 driven through `adesk-client` (typed) and raw NDJSON, with no display, GPU, network or installed application.
 These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + transport).
-Nine integration targets totalling 56 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
+Nine integration targets totalling 58 tests (alongside the lib's 129 in-module unit tests and the binary's 4) are green.
 They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond generous bounds.
 
 ## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
@@ -28,7 +28,7 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
 | `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; params that fail validation answer `invalid_request` and keep the connection open; error responses keep the connection open; malformed NDJSON closes only that connection — pinned for non-JSON, JSON non-object and id-less object lines (the §6 open/close boundary); concurrent + pipelined requests; blank lines ignored. |
 | `apps.rs` | §5.2 `list_apps` (query, include_hidden, invalid entries skipped, Exec-less entries), `get_app`, unknown app. |
 | `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix), keyboard methods without `window_id` answer `invalid_request` (no keyboard focus). |
-| `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire. |
+| `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire, `observe(include_image=true)` with no candidate window answering a `null` image (SDK result and raw wire). |
 | `capture.rs` | §5.4 `capture_window`/`capture_region` unknown-window errors (no client ever connects here, so no windows exist). |
 | `inspector.rs` | §5.7 `inspect_capture` PNG/dimensions/overlays/`max_dimension`; `inspect_subscribe` frame stream + unsubscribe; a stream whose renders start failing (compositor stopped out-of-band) deregisters itself. |
 | `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids; plus launch correlation: a synthetic `WindowCreated` injected into the compositor broadcast is fanned out with the correlator's `launch_id` while the raw broadcast stays `None`. |
@@ -56,7 +56,10 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
   `inspector.rs` therefore asserts ≤1 stray frame in a 500 ms grace window, then zero for 1.5 s.
   Do not tighten this back to "zero strays after the response" — that flakes on a correct server.
 - Window-creating E2E (tiling/focus/input delivery) is not covered here — it needs a Wayland
-  client, so it lives in the `adesk-testkit` / `adesk-agent` suites.
+  client, so it lives in the `adesk-testkit` / `adesk-agent` suites. The same applies to the
+  §5.4 image-*present* branch of `observe(include_image=true)`: `observation.rs` can only pin
+  the no-candidate `image: null` case; the rendering half is asserted in
+  `crates/adesk-testkit/tests/e2e_launch_observe.rs`.
 - §1 `seq` domain (`sequence.rs`): one global monotonic `seq` domain spans compositor- and
   server-emitted events (gaps allowed, reuse not). `app_launched` and `inspect_frame` reserve their
   number from the compositor's central counter (`RuntimeCommand::ReserveSeq`; server side
