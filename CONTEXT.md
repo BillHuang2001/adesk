@@ -130,7 +130,8 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 All 12 crates are implementation-complete: zero `todo!()` in the workspace, no skeleton-phase crate-level `allow` attributes left, and `docs/protocol.md` / `docs/architecture.md` / `docs/core-api.md` remain normative.
 `./scripts/dev.sh cargo check --workspace --all-targets` is green and `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean.
 `./scripts/dev.sh cargo test --workspace --no-fail-fast` = 1225 passed, 0 failed, 5 ignored across 92 test targets (independently re-verified; the 5 ignored are doc-code fences only — no behavioural skips).
-Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` (94) and `cargo test -p adesk-testkit --all-features` (49, also under `ADESK_TEST_GL=1`).
+Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` (94).
+`adesk-testkit` declares no Cargo features, so `--all-features` is a no-op; its default suite runs 66 tests + 3 doctests (3 ignored doc-code fences), and the GL path is gated by the `ADESK_TEST_GL=1` env var.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suite drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and an `adesk-testkit` exec-path override (downstream crates currently ship their own fixture binary, e.g. `crates/adesk-agent/examples/adesk-e2e-app.rs`).
 
