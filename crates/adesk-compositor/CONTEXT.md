@@ -204,7 +204,7 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 89 tests pass):
+Unit tests (colocated `#[cfg(test)]`; 80 tests pass):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, reserved seqs increase without emitting, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
@@ -239,7 +239,7 @@ Integration tests (driven through the `adesk-testkit` dev-dependency on a real i
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (89 lib + 20 integration + 3 smoke + 1 doc-test pass, 1 ignored doc-fence)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (80 lib + 20 integration + 3 smoke + 1 doc-test pass, 1 ignored doc-fence)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
