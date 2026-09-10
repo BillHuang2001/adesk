@@ -80,7 +80,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - **Waits**: request tasks call `wait_for_change`/`wait_for_quiet`/`observe` directly (they are `Send` futures, cancellation-safe). `Err(Error::UnknownWindow)` → AGP `unknown_window`; `Err(Error::UnknownAction)` → AGP `invalid_request`; otherwise the `Observation` is returned as-is. Timeouts are observations (`timed_out: true`), never `timeout` errors.
 - **Images**: when `include_image` is set, the server issues `RenderWindow` *after* the wait resolves and attaches the payload to `ObserveResult`.
 - **Queries**: `list_windows`-adjacent temporal data comes from `snapshot()`/`window_state()`; `ping`/inspector can use `watermark()`, `now_ms()`, `snapshot().journal_len`.
-- **`quiet` event subscriptions** (AGP §5.6) are a server loop over `wait_for_quiet` per subscription — the observer has no push API of its own.
+- **`quiet` event subscriptions** (AGP §5.6) are accepted by the server but never delivered today: it fans out only `RuntimeEvent`-derived kinds, and no per-subscription loop calls `wait_for_quiet`. The observer has no push API of its own — quiet is pull-only (`wait_for_quiet`/`observe` responses and `is_quiet` queries).
 ## Test Strategy
 - Unit tests live inline in modules for the pure pieces (filters, condition predicates, journal eviction, registry allocation, clock anchoring, service state machine) — `#[cfg(test)]`, 85 total; tokio needed only for the service/waiter tests.
 - Integration tests are the protocol-level scenarios in `./tests/`: `waits.rs` (10 specs), `filters.rs` (8), `concurrency.rs` (5), `resync.rs` (5), `actions.rs` (6). All bodies are implemented and green; no spec is ignored.
