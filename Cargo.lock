@@ -87,6 +87,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "adesk-machine"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "adesk-observer"
 version = "0.1.0"
 dependencies = [
@@ -161,6 +175,36 @@ dependencies = [
  "tracing",
  "wayland-client",
  "wayland-protocols",
+]
+
+[[package]]
+name = "adesk-viewer"
+version = "0.1.0"
+dependencies = [
+ "adesk-core",
+ "adesk-proto",
+ "adesk-viewer-proto",
+ "async-trait",
+ "clap",
+ "futures",
+ "image",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "adesk-viewer-proto"
+version = "0.1.0"
+dependencies = [
+ "adesk-core",
+ "adesk-proto",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
