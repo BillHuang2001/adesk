@@ -18,6 +18,7 @@ Current state: all suites implemented, green, none ignored.
 ## Constraints
 - Time moves only through the paused tokio clock: an explicit `tokio::time::advance`, or auto-advance to a parked waiter's deadline once every task is idle; events carry explicit `seq`/`ts_ms`.
 - Never un-ignore or relax a failing spec; a wrong implementation makes paused-time waits hang forever.
+- `actions.rs::record_action_captures_watermark_and_clock` is the only spec that runs on the real clock (plain `#[test]`, no paused runtime): its final `record.ts_ms == observer.now_ms()` equality compares two reads of the *real* monotonic clock, so a scheduling gap of ≥ 1 ms between them fails intermittently under load (`left: 0, right: 3` was observed once). The spec is frozen, so the flake is recorded in `../CONTEXT.md` (Known Issues) — do not edit the assertion.
 - Build/run only through the dev-shell wrapper: `./scripts/dev.sh cargo test -p adesk-observer` (bare cargo fails to link).
 
 ## Verified Results (current HEAD)

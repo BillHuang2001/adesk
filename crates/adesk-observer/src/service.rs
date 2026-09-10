@@ -838,6 +838,13 @@ pub(crate) fn wait_condition(condition: Condition) -> WaitCondition {
 
 #[cfg(test)]
 mod tests {
+    //! Tests that assert a clock-derived value (`now_ms()`, `record.ts_ms`,
+    //! `snapshot().ts_ms`) run under `#[tokio::test(start_paused = true)]`: the
+    //! observer's clock is the *real* monotonic clock in an unpaused test, so an
+    //! exact equality read back after the fact would race with elapsed time (the
+    //! frozen `tests/actions.rs` spec has exactly that shape, see CONTEXT.md
+    //! Known Issues). Paused time freezes the clock at the last event `ts_ms`,
+    //! which is what these tests assert.
     use super::*;
     use crate::state::WindowSnapshot;
     use adesk_core::{AppId, LaunchId};
@@ -939,8 +946,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn new_service_starts_empty_and_honours_config() {
+    #[tokio::test(start_paused = true)]
+    async fn new_service_starts_empty_and_honours_config() {
         let observer = ObserverService::new();
         let snapshot = observer.snapshot();
         assert_eq!(
@@ -1042,8 +1049,8 @@ mod tests {
         assert_eq!(observer.snapshot().journal_len, 2);
     }
 
-    #[test]
-    fn app_launched_only_advances_the_watermark() {
+    #[tokio::test(start_paused = true)]
+    async fn app_launched_only_advances_the_watermark() {
         let observer = ObserverService::new();
         observer.handle_event(&app_launched(7, 70));
 
@@ -1082,8 +1089,8 @@ mod tests {
         assert_eq!(state.geometry, Some(rect(0, 0, 1280, 800)));
     }
 
-    #[test]
-    fn resync_ignores_stale_snapshots() {
+    #[tokio::test(start_paused = true)]
+    async fn resync_ignores_stale_snapshots() {
         let observer = ObserverService::new();
         observer.handle_event(&created(5, 50, 7));
 
@@ -1102,8 +1109,8 @@ mod tests {
         assert_eq!(observer.now_ms(), 50, "clock never moves backwards");
     }
 
-    #[test]
-    fn resync_adds_unknown_windows_with_a_synthetic_created() {
+    #[tokio::test(start_paused = true)]
+    async fn resync_adds_unknown_windows_with_a_synthetic_created() {
         let observer = ObserverService::new();
         let report = observer.resync(state_snapshot(10, 100, vec![window_snapshot(7, 3)]));
 
@@ -1216,8 +1223,11 @@ mod tests {
         assert!(events.has_changed().expect("sender alive"));
     }
 
-    #[test]
-    fn record_action_captures_watermark_and_clock() {
+    /// The inline twin of the frozen `tests/actions.rs::record_action_captures_watermark_and_clock`
+    /// spec: with the clock pinned, the recorded timestamp is exactly the last
+    /// event `ts_ms` (25) rather than "25 plus however long the test has been running".
+    #[tokio::test(start_paused = true)]
+    async fn record_action_captures_watermark_and_clock() {
         let observer = ObserverService::new();
         observer.handle_event(&created(1, 0, 7));
         observer.handle_event(&title_changed(2, 25, 7));
@@ -1283,8 +1293,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn snapshot_reports_watermark_clock_and_counts() {
+    #[tokio::test(start_paused = true)]
+    async fn snapshot_reports_watermark_clock_and_counts() {
         let observer = ObserverService::new();
         observer.handle_event(&created(1, 0, 7));
         observer.handle_event(&created(2, 0, 8));
