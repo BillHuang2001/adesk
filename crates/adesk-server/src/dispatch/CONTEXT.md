@@ -25,9 +25,8 @@ Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>P
 - `inspect::{inspect_capture, inspect_subscribe}`.
 
 Shared internal helpers (not public API):
-- `windows.rs` is the canonical home of the compositor bridge: `pub(super) async state(ctx) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(super) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(super) unknown_window(WindowId) -> ServerError`.
+- `windows.rs` is the canonical home of the compositor bridge: `pub(super) async state(ctx) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(super) async reserve_seq(server: &ServerContext) -> Result<u64>` (the only `seq` allocator for server-synthesized events, called by `apps.rs` and `inspect.rs`; a closed command channel or a dropped reply is `shutting_down`), `pub(super) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(super) unknown_window(WindowId) -> ServerError`.
 - `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale` = output width / source width, `1.0` for an empty source; shared with `inspect.rs`), `source_size` (requested crop size, else window geometry), `observed_window` (the observation's own window, else `active_window_id`/`keyboard_focus`, else none).
-- `apps.rs`: `next_launch_seq(watermark)` allocates the server-side sequence for `AppLaunched`.
 
 ## Routing Table
 
@@ -51,6 +50,7 @@ Shared internal helpers (not public API):
 - One `tracing` span per request (`request{id method}`) applied with `tracing::Instrument` — never `span.enter()` across an `.await`; never log pixel payloads.
 - Input handlers (§5.5) call `ObserverService::record_action` BEFORE any compositor command and run inside `Session::input()` so they keep submission order per connection; keyboard methods activate a named, unfocused `window_id` first (protocol §5.5).
 - `activate_window` / `close_window` are runtime-native `RuntimeCommand`s — never synthesized input.
+- Sequence numbers of server-synthesized events come from the compositor, never from local state: `launch_app` (§5.2 `AppLaunched`) and `inspect.rs`'s `render_frame` (§5.7 `inspect_frame`) each call `windows::reserve_seq` (`RuntimeCommand::ReserveSeq`) — one global monotonic `seq` domain covering compositor- and server-emitted events (`docs/protocol.md` §1), gaps allowed, reuse not. A reserved number may go unused (spawn failure, a dropped or throttled inspect frame). No handler derives a `seq` from the `QueryState` watermark or from a server-private counter; the `inspect_frame` `ts_ms` stays the snapshot's compositor-clock value.
 - Observation methods await the observer first, render only afterwards and only when `include_image` is set; timeouts are observations with `timed_out: true`, never errors.
 - A per-request quiet threshold reaches the observer only when the condition is quiet: `wait_for_quiet` is the only method reading `params.quiet_ms` (proto default 250) into `QuietSpec::quiet_ms`; `observe` carries `quiet_ms` only inside `until: {"type":"quiet","quiet_ms":N}` (required there, no wire default); `wait_for_change` has no quiet field at all.
 - For a non-quiet condition (`change`/`timeout`) the `quiet` evidence flag is therefore computed against the observer's configured `default_quiet_ms` — 250, because `Server::start` builds `ObserverService::new()` (`src/server.rs:75`) and there is no `with_config` call site.
@@ -61,7 +61,6 @@ Shared internal helpers (not public API):
 ## Known Issues
 
 - `type_text` classifies a character as unmappable by matching the compositor's `CompositorError::InvalidRequest` message for the substring `"keymap"`; a typed compositor error variant would be more robust (rewording the message surfaces `invalid_request` instead of a `skipped` entry — visible, not silent).
-- `apps.rs` stamps `AppLaunched.seq` from a server-private `AtomicU64` raised above the observed `QueryState` watermark because the compositor exposes no sequence allocator; a compositor-side allocator would remove the chance of a duplicate seq with the compositor's own next event.
 - `double_click`'s interval (100 ms, 50 ms gap) and `drag`'s post-move sleep are local server policy — protocol §5.5 specifies no interval.
 - `inspect_subscribe` with `min_interval_ms == 0` re-renders continuously (yielding between iterations); it is client-controlled and protocol-legal but CPU-hungry.
 
@@ -73,7 +72,7 @@ Shared internal helpers (not public API):
 
 ## Notes for Agents
 
-- `windows.rs` owns `state`, `command_error` and `unknown_window`; do not reintroduce copies in other files.
+- `windows.rs` owns `state`, `reserve_seq`, `command_error` and `unknown_window`; do not reintroduce copies in other files.
 - `inspect.rs`'s push loop stops when its subscription id disappears from `InspectRegistry::list()`, so `unsubscribe_events` must remove it there (it does).
 - `input.rs` resolves window-relative and normalized coordinates through the window model's geometry from `QueryState`; never hard-code an origin.
 - `capture.rs` and `inspect.rs` render on demand only; there is no per-event rendering anywhere in this directory.
