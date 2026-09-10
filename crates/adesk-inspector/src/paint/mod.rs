@@ -8,7 +8,7 @@
 //!
 //! Painters preserve input order (windows, damage rects and action markers are
 //! drawn in the order the server supplies them) so composition is deterministic
-//! for a given [`InspectionInput`](crate::InspectionInput).
+//! for a given [`InspectionInput`].
 
 mod actions;
 mod app_ids;

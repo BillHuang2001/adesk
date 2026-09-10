@@ -169,8 +169,8 @@ post-processing to the server and drop the dependency.
   (crop, downscale, order, invalid values), `render_from_source`, dimension preservation.
   `crop`/`downscale` from `adesk-render` are the spec oracle for the request path.
 - Unit level: blend formula, clipping, `with_clip` restore, text metrics/elision, font coverage.
-- Current state: all 52 tests are implemented and green (`canvas_primitives` 12, `composition` 14,
-  `overlay_geometry` 8, `overlay_labels` 12, `overlay_timing` 6) plus the lib doctest.
+- Current state (measured): 52 integration tests green — `canvas_primitives` 12, `composition` 14,
+  `overlay_geometry` 8, `overlay_labels` 12, `overlay_timing` 6 — plus 2 lib doctests (one `no_run`).
 - Run with `./scripts/dev.sh cargo test -p adesk-inspector` (bare `cargo` cannot link outside the
   Nix dev shell).
 
@@ -188,8 +188,9 @@ post-processing to the server and drop the dependency.
   3. `inspect_subscribe`: the same call per frame, throttled by `min_interval_ms`, pushed as
      `inspect_frame` events; reuse one `Inspector` per subscription.
   4. Convert `Error` with `adesk_core::Error::from` (→ `invalid_request` / `render_failed`).
-- **Status**: Phase 2 complete. Zero `todo!()`; all drawing, text, painters and `render_into` are
-  implemented; `cargo check`/`clippy --all-targets` are warning-free for this crate.
+- **Status**: implemented and warning-free — every overlay painter, the text/font layer, the canvas
+  and the request post-processing path are complete, with no `todo!()` in the crate. `cargo check`,
+  `clippy --all-targets` and `cargo doc --no-deps --document-private-items` are green.
 - **Validation**: `./scripts/dev.sh cargo test -p adesk-inspector`; targeted suites with
   `--test <name>`. `tests/common/mod.rs` keeps `#![allow(dead_code)]` because each test binary uses
   a subset of the shared helpers — do not remove it.

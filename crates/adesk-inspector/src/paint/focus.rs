@@ -5,8 +5,8 @@ use crate::input::InspectionInput;
 use crate::style::OverlayStyle;
 
 /// Outlines the active window's geometry with [`OverlayStyle::focus`] and draws
-/// the label `"focus"` in slot 2 of its top-left corner (see
-/// [`super::labels`]).
+/// the label `"focus"` in slot 2 of its top-left corner (slot layout is shared
+/// in `paint::labels`).
 ///
 /// Draws nothing when [`InspectionInput::active`] is `None` or does not match
 /// any window.

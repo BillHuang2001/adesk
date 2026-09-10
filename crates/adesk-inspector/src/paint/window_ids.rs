@@ -4,8 +4,8 @@ use crate::canvas::Canvas;
 use crate::input::InspectionInput;
 use crate::style::OverlayStyle;
 
-/// Draws `"win {id}"` in slot 0 of every window's top-left corner (see
-/// [`super::labels`]) in input order.
+/// Draws `"win {id}"` in slot 0 of every window's top-left corner (slot layout
+/// is shared in `paint::labels`) in input order.
 ///
 /// The label is elided to the window's inner width and clipped to the window;
 /// windows too small to show anything draw nothing.
