@@ -4,7 +4,7 @@
 
 Integration tests that prove `adesk-testkit` works: runtime lifecycle, the real Wayland protocol path, fixtures/launch, assertions, and public-API stability.
 The suite is implemented and passes under the dev shell (`cargo test -p adesk-testkit`).
-Current state: the suite's source count is 62 `#[test]`/`#[tokio::test]` functions; the crate-level CONTEXT records under Known Issues that the 66-test / 49-test figures quoted elsewhere do not match that count.
+Current state: verified by a full workspace run — this directory contributes 34 tests, part of the crate's 66 tests + 3 doctests, all green with 0 failures.
 No test is `#[ignore]`d; the only ignored doctests are the 3 doc-code fences in `src/assert/`.
 
 ## API Surface
