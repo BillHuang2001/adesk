@@ -45,9 +45,9 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 ### Events (`src/events.rs`)
 - `EventFilter{kinds: Option<Vec<EventKind>>, window_id: Option<WindowId>}` + `all()`, `kinds(..)`, `.window(id)`; `None` fields are omitted from the params object (= "all").
 - `EventKind` — the 11 protocol §5.6 names (9 core + `SurfaceDamage`, `Quiet`), snake_case serde, `as_str()`, `From<adesk_core::EventKind>`.
-- `AgpEvent{Runtime(RuntimeEvent), Quiet(QuietEvent), InspectFrame(InspectFrame), Other{name, seq, ts_ms, data}}`; `InspectFrame{seq, ts_ms, image}`.
-- Wire `"quiet"` frames map to `Quiet` (a payload that does not fit → `Other`); `"surface_damage"` is a filter alias and always lands in `Other`.
-- `QuietEvent` — re-export of the shared wire type from `adesk-proto` (`window_id: Option<WindowId>`, `None` = runtime-wide; `quiet_ms: u64`); carries no envelope `seq`/`ts_ms` (unlike `RuntimeEvent`/`InspectFrame`).
+- `AgpEvent{Runtime(RuntimeEvent), Quiet{seq, ts_ms, event: QuietEvent}, InspectFrame(InspectFrame), Other{name, seq, ts_ms, data}}`; `InspectFrame{seq, ts_ms, image}`.
+- Wire `"quiet"` frames map to `Quiet` with the frame's own `seq`/`ts_ms` (a payload that does not fit → `Other`); `"surface_damage"` is a filter alias and always lands in `Other`.
+- `QuietEvent` — re-export of the shared wire type from `adesk-proto` (`window_id: Option<WindowId>`, `None` = runtime-wide; `quiet_ms: u64`); the frame envelope (`seq`/`ts_ms`) lives on the `Quiet` variant, not in this payload.
 - `EventStream: Stream<Item = Result<RuntimeEvent, ClientError>>` (a `RuntimeEvent`-only view — `quiet`, `inspect_frame` and unknown frames are skipped even when the filter selects them; use `AgpEventStream`/`subscribe_frames` for those); `AgpEventStream: Stream<Item = Result<AgpEvent, ClientError>>`; `InspectStream: Stream<Item = Result<InspectFrame, ClientError>>`.
 - All three are `Send + Unpin`, expose `subscription_id()`, and **unsubscribe on drop** (best-effort `unsubscribe_events`).
 
