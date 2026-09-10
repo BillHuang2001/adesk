@@ -24,7 +24,7 @@ They assert protocol values (`docs/protocol.md`), never wall-clock timing beyond
 
 | File | Covers |
 |---|---|
-| `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; error responses keep the connection open; malformed NDJSON closes only that connection; concurrent + pipelined requests; blank lines ignored. |
+| `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; params that fail validation answer `invalid_request` and keep the connection open; error responses keep the connection open; malformed NDJSON closes only that connection — pinned for non-JSON, JSON non-object and id-less object lines (the §6 open/close boundary); concurrent + pipelined requests; blank lines ignored. |
 | `apps.rs` | §5.2 `list_apps` (query, include_hidden, invalid entries skipped, Exec-less entries), `get_app`, unknown app. |
 | `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix), keyboard methods without `window_id` answer `invalid_request` (no keyboard focus). |
 | `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire. |
