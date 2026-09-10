@@ -8,7 +8,7 @@ Assertions panic with detailed messages (`assert_eq!` semantics); everything els
 ## API Surface
 
 - `ImageAssert<'a>` — `new`, `pixel`, `region_avg`, `matches_pattern` (+`_tol`), `matches_solid`, `differs_from` (+`_tol`), `save_png`, `dump_on_failure`.
-- `EventAssert` — `tap`, `from_receiver`, `try_recv`, `drain`, `seen`, `wait_for`, `wait_for_kind`, `wait_for_expected`, `wait_ordered`, `expect_none`, `assert_seen_order`.
+- `EventAssert` — `tap`, `from_receiver`, `try_recv`, `drain`, `seen`, `wait_for`, `wait_for_kind`, `wait_for_expected`, `expect_none`, `assert_seen_order`.
 - `Expected` — common event predicates (`WindowCreated`, `SurfaceCommit(WindowId)`, ...) plus `custom(name, predicate)`.
 
 ## Constraints
