@@ -431,10 +431,9 @@ impl EventPayload {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::InvalidEventData`](crate::ProtoError::InvalidEventData)
-    /// when `data` does not match the kind's schema, and
-    /// [`ProtoError::Malformed`](crate::ProtoError::Malformed) for
-    /// `surface_damage`, which is a filter alias and never an emitted kind.
+    /// Returns [`ProtoError::InvalidEventData`] when `data` does not match the
+    /// kind's schema, and [`ProtoError::Malformed`] for `surface_damage`, which
+    /// is a filter alias and never an emitted kind.
     pub fn from_data(kind: EventKind, data: serde_json::Value) -> Result<EventPayload> {
         fn parse<T: serde::de::DeserializeOwned>(
             kind: EventKind,
@@ -471,7 +470,7 @@ impl EventPayload {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Json`](crate::ProtoError::Json) if serialization fails.
+    /// Returns [`ProtoError::Json`] if serialization fails.
     pub fn to_data(&self) -> Result<serde_json::Value> {
         Ok(match self {
             EventPayload::WindowCreated(event) => serde_json::to_value(event)?,

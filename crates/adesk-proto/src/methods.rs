@@ -199,7 +199,7 @@ impl Method {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Json`] if serialization fails.
+    /// Returns [`crate::ProtoError::Json`] if serialization fails.
     pub fn params_value(&self) -> Result<serde_json::Value> {
         let value = match self {
             Method::Ping(params) => serde_json::to_value(params)?,

@@ -20,14 +20,14 @@ pub trait Codec: std::fmt::Debug + Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns a [`ProtoError`](crate::ProtoError) when the frame cannot be encoded.
+    /// Returns a [`ProtoError`] when the frame cannot be encoded.
     fn encode(&self, frame: &Frame) -> Result<Vec<u8>>;
 
     /// Decodes one transport payload into a frame.
     ///
     /// # Errors
     ///
-    /// Returns a [`ProtoError`](crate::ProtoError) when the payload is not a
+    /// Returns a [`ProtoError`] when the payload is not a
     /// well-formed frame.
     fn decode(&self, payload: &[u8]) -> Result<Frame>;
 }
@@ -42,7 +42,7 @@ impl NdjsonCodec {
     ///
     /// # Errors
     ///
-    /// Returns [`ProtoError::Json`](crate::ProtoError::Json) on serialization failure.
+    /// Returns [`ProtoError::Json`] on serialization failure.
     pub fn encode_str(&self, frame: &Frame) -> Result<String> {
         // `serde_json` escapes control characters inside strings, so the object
         // never contains a raw newline (§1: no embedded newlines).
@@ -53,7 +53,7 @@ impl NdjsonCodec {
     ///
     /// # Errors
     ///
-    /// Returns a [`ProtoError`](crate::ProtoError) for malformed JSON, unknown
+    /// Returns a [`ProtoError`] for malformed JSON, unknown
     /// methods/kinds, or frames that match no frame shape.
     pub fn decode_str(&self, line: &str) -> Result<Frame> {
         let value: serde_json::Value = serde_json::from_str(line)?;
