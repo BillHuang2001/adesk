@@ -65,7 +65,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 1. `ShutdownHandle::initiate()` — stop accepting.
 2. Fail in-flight requests with `shutting_down`; drain connection tasks.
 3. `CompositorHandle::shutdown()` — drops the Wayland display (clients lose their connection).
-4. Remove the socket file; complete `wait()` with `Ok(())`; exit code 0.
+4. Remove the AGP socket file and, when the endpoint is enabled, the viewer socket file; complete `wait()` with `Ok(())`; exit code 0.
 
 ## Constraints
 
