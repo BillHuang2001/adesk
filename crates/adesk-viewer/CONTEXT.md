@@ -1,4 +1,5 @@
 # adesk-viewer — VAP server session + client SDK + headless viewer binary
+
 ## Intent
 `adesk-viewer` is the ADesk side of the Viewer Attachment Protocol (VAP v1, `docs/viewer.md`) plus the client that consumes it.
 It has three responsibilities and nothing else:
@@ -6,11 +7,15 @@ It has three responsibilities and nothing else:
 2. an **async client SDK** (`ViewerClient`) that connects over a Unix or TCP transport, performs the handshake, streams frames and sends human input;
 3. a **headless `adesk-viewer` binary** that connects, captures frames to disk and can drive input from a script.
 The crate is transport-agnostic (any `AsyncRead + AsyncWrite` stream), never links Smithay and never touches the compositor — `adesk-server` implements `ViewerBackend` and binds the transport.
+
 ## API Surface
 Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Name>`).
+
 ### Errors (`src/error.rs`)
 - `ViewerError` (`thiserror`): `Io`, `Protocol(ViewerProtoError)`, `Closed`, `Handshake(String)`, `Backend(String)`, `VersionMismatch { client, server }`, `Transport(String)`.
 - `Result<T, E = ViewerError>`.
+- `VersionMismatch` mirrors `ViewerProtoError`'s field meaning: `client` is the peer's version, `server` is `PROTOCOL_VERSION`.
+
 ### Backend seam (`src/backend.rs`)
 - `#[async_trait] trait ViewerBackend: Send + Sync + 'static` — the runtime implements exactly this:
   - `fn display(&self) -> ServerHello` — output size, runtime version, renderer, initial cursor, control owner (used for the handshake reply).
@@ -20,60 +25,98 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
   - `fn change_signal(&self) -> ChangeSignal { ChangeSignal::never() }` — notified when the desktop changes (a commit/damage/window event), so frames are pushed on demand.
   - `async fn set_control(&self, owner: ControlOwner) -> Result<()> { Ok(()) }` — advisory ownership handshake (a no-op by default).
 - `ViewerInput` — the input subset the backend sees (no handshake/protocol traffic): `PointerMove { x, y }`, `PointerButton { button, state, x, y }`, `Scroll { dx, dy, x, y }`, `Key { keys, action }`, `Text { text }`.
-- `ChangeSignal` — a cheap-clone "desktop changed" notifier: `new()`, `never()`, `notify()`, `async changed(&self)`.
-### Server session (`src/server.rs`, `src/session.rs`, `src/transport.rs`)
-- `ViewerServer<B: ViewerBackend>` — `new(Arc<B>)`, `with_config(ViewerServerConfig)`; `async serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(&self, stream: S, peer: PeerInfo) -> Result<()>` runs one viewer connection to completion.
-- `ViewerServerConfig` — `handshake_timeout`, `max_frame_len` (default 32 MiB), `default_min_interval_ms`, `default_overlays`; builders.
-- `PeerInfo` — a display label for logs (`Unix(PathBuf)` / `Tcp(SocketAddr)` / `Other(String)`).
-- `transport.rs` — line-framed read/write over any stream: `read_line`/`write_line` (NDJSON), enforcing `max_frame_len`; the single place the byte framing lives.
+  - Positions are **normalized** `0.0..=1.0` output coordinates and optional; there is no `window_id` — the runtime resolves them to output pixels through its window model.
+  - `button` is an `adesk_core::Button`, `keys` an `adesk_proto::KeySpec`, `action` a `KeyAction`.
+- `ChangeSignal` — cheap-clone "desktop changed" notifier: `new()`, `never()`, `notify()`, `async changed(&self)`.
+
+### Server session (`src/server.rs`, `src/session.rs`)
+- `ViewerServer<B: ViewerBackend>` — `new(Arc<B>)`, `with_config(ViewerServerConfig)`, `config()`, and `async serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(&self, stream: S, peer: PeerInfo) -> Result<()>` which runs one viewer connection to completion.
+- `ViewerServerConfig` — `handshake_timeout` (default 5 s), `max_frame_len` (default `DEFAULT_MAX_FRAME_LEN`), `default_min_interval_ms` (default `0` = no default pacing), `default_overlays` (default `adesk_viewer_proto::DEFAULT_OVERLAYS`); builders.
+- `PeerInfo` — a display label for logs (`Unix(PathBuf)` / `Tcp(SocketAddr)` / `Other(String)`) + `Display`.
+
+### Transport framing (`src/transport.rs`)
+- `DEFAULT_MAX_FRAME_LEN` (32 MiB) — the one shared line cap for server and client.
+- `async read_line<R: AsyncBufRead + Unpin>(&mut R, max_len) -> Result<Option<String>>` — strips the terminator, `Ok(None)` on EOF, `Err(Transport)` on an over-cap or non-UTF-8 line.
+- `async write_line<W: AsyncWrite + Unpin>(&mut W, &str) -> Result<()>` — bytes + `\n` + flush.
+- This is the single place byte framing lives.
+
 ### Client SDK (`src/client.rs`)
 - `ViewerTarget::{Unix(PathBuf), Tcp(SocketAddr)}` + `Display`.
-- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `socket_path()`/`target()`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame() -> Result<ViewerFrame>`; `request_state() -> Result<DesktopState>`; `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(keys, action)`, `text(text)`, `set_control(owner)`, `input_ack()` stream; `close(self) -> Result<()>`.
-- `ConnectOptions` (`#[non_exhaustive]`): `target`, `max_frame_len`, `connect_timeout`, `handshake_timeout`, `client_name`, `overlays`, `min_interval_ms`, `verify_version` (default true).
-- `DEFAULT_MAX_FRAME_LEN` (32 MiB), `DEFAULT_CONNECT_TIMEOUT`, `DEFAULT_HANDSHAKE_TIMEOUT`.
+- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `target() -> &ViewerTarget`, `socket_path() -> Option<&Path>`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame()`, `request_state()`, `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(KeySpec, KeyAction)`, `text(text)`, `set_control(owner)`, `input_ack() -> impl Stream<Item = (Option<u64>, ActionId)>`, `async close(self) -> Result<()>`.
+- `ConnectOptions` (`#[non_exhaustive]`): `target`, `max_frame_len`, `connect_timeout`, `handshake_timeout`, `client_name`, `overlays`, `min_interval_ms`, `verify_version` (default `true`); `new` + `with_*` builders.
+- `DEFAULT_CONNECT_TIMEOUT` / `DEFAULT_HANDSHAKE_TIMEOUT` (5 s each), `DEFAULT_MAX_FRAME_LEN` (re-exported from `transport`).
+
 ### Frame capture helpers (`src/capture.rs`)
-- `save_frame_png(&ImagePayload, &Path) -> Result<()>` — decode an `ImagePayload` and write a PNG (used by the binary and tests); `write_rgba8(&ImageBuffer, &Path)`.
-- `FrameWriter` — writes successive frames into a directory as `frame-<seq:08>.png`, returning the path written.
+- `save_frame_png(&ImagePayload, &Path) -> Result<()>` — decode an `ImagePayload` and write a PNG (used by the binary and tests).
+- `write_rgba8(&ImageBuffer, &Path) -> Result<()>`.
+- `FrameWriter` — `new(dir)`, `directory()`, `write(&ViewerFrame) -> Result<PathBuf>` writing `frame-<seq:08>.png` into the directory.
+
+### Input scripts (`src/script.rs`)
+- `parse_script(&str) -> Result<Vec<ScriptCommand>, ScriptError>`; every `ScriptError` variant carries the 1-based `line` it occurred on.
+- `ScriptCommand`: `Move { x, y }`, `Click { button }`, `Down { button }`, `Up { button }`, `Scroll { dx, dy }`, `Key { keys, action }`, `Text { text }`, `Control { owner }`, `Wait { ms }`, `Capture { path }`.
+- Grammar — one command per line, whitespace-separated tokens, blank lines and `#` comments ignored:
+  `move X Y`, `click [BUTTON]` (left when omitted), `down BUTTON`, `up BUTTON`, `scroll DX DY`, `key KEYS...` (one token = key, several = chord, always a tap), `type TEXT` (rest of line verbatim), `control ai|human`, `wait MS`, `capture FILE` (single token).
+
 ### Binary (`src/main.rs`)
-- `adesk-viewer` (clap): transport `--unix <PATH>` (default the runtime-derived path) / `--tcp <HOST:PORT>`; `--fps <N>` (→ `min_interval_ms`), `--overlays <list>`; capture: `--capture <FILE>` (one frame then exit) or `--follow --out-dir <DIR> --max-frames <N> --duration-ms <M>`; input: `--input <FILE>` / `--input-stdin` (a script of `move X Y`, `click [BUTTON]`, `down/up BUTTON`, `scroll DX DY`, `key KEYS...`, `type TEXT`, `control ai|human`, `wait MS`, `capture FILE`, `# comment`); `--log <FILTER>`.
-- Exit codes: `0` success, `1` runtime error, `2` config/CLI error.
+- `adesk-viewer` (clap): transport `--unix <PATH>` (default `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else `<temp_dir>/adesk-viewer.sock`) / `--tcp <HOST:PORT>` (mutually exclusive); `--fps <N>` (→ `min_interval_ms = 1000 / N`, `0` = unpaced); `--overlays <LIST>`; `--log <FILTER>` (env `ADESK_LOG`, default `info`).
+- One mutually exclusive mode ArgGroup: `--capture <FILE>` (one frame then exit) | `--follow --out-dir <DIR> [--max-frames N] [--duration-ms M]` | `--input <FILE>` | `--input-stdin`.
+- Exit codes: `0` success, `1` runtime/connection failure, `2` usage or configuration error.
+
 ## Constraints
 - `docs/viewer.md` is normative; the crate invents no message or field — it speaks only `adesk-viewer-proto`.
-- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold.
-- Transport-agnostic: the crate never imports `std::os::unix::net`, `tokio::net::UnixListener` or a listener — `adesk-server` owns binding; the client dialect (`ViewerTarget`) is the only place socket/TCP addresses appear.
-- No panics on connection/input paths: every failure returns `ViewerError`.
+- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/session.rs` 888, `src/client.rs` 812).
+- Transport-agnostic: the crate never imports a listener (`tokio::net::UnixListener`, `std::os::unix::net::*`) — `adesk-server` owns binding; `ViewerTarget` is the only place socket/TCP addresses appear.
+- No panics on connection/input paths: every failure returns `ViewerError`. Empty `pub mod` stubs are not viable here — `missing_docs` requires at least a `//!` module doc.
 - No pixel payloads in logs; `tracing` at `debug`/`trace` for transport internals only.
 - Dependencies come only from root `[workspace.dependencies]`; never inline versions.
 - The server session must never block the runtime: it renders only while a viewer is attached and the desktop changed (or the pacing timer fires), matching the on-demand-rendering invariant.
+
 ## Routing Table
 | Area | Owner |
 |---|---|
-| Error type + PG error mapping | `./src/error.rs` |
+| Error type + VAP error mapping | `./src/error.rs` |
 | `ViewerBackend`, `ViewerInput`, `ChangeSignal` | `./src/backend.rs` |
-| NDJSON line framing over any stream | `./src/transport.rs` |
-| Per-connection session state machine (handshake, select loop, pacing) | `./src/session.rs` |
+| NDJSON line framing + `DEFAULT_MAX_FRAME_LEN` | `./src/transport.rs` |
+| Per-connection session state machine (handshake, select loop, pacing, message dispatch) | `./src/session.rs` |
 | `ViewerServer` façade + `ViewerServerConfig`/`PeerInfo` | `./src/server.rs` |
 | `ViewerClient`, `ViewerTarget`, `ConnectOptions` | `./src/client.rs` |
 | Frame → PNG capture helpers | `./src/capture.rs` |
-| CLI wiring | `./src/main.rs` |
+| Input-script grammar + parser | `./src/script.rs` |
+| CLI wiring, mode ArgGroup, exit codes | `./src/main.rs` |
 | Server-session tests over an in-memory duplex stream | `./tests/session.rs` |
 | Client round-trip tests over a real Unix socket | `./tests/client.rs` |
 | Input-script parser tests | `./tests/script.rs` |
+
 ## Design Decisions
 - **The backend trait is the only runtime coupling.** `ViewerServer` depends on `ViewerBackend`, never on the compositor; `adesk-server` implements it over its render command + seat input. This keeps the viewer reusable and testable with a fake backend.
-- **Frames are pushed on change, paced by `min_interval_ms`.** The session awaits the `ChangeSignal` or the pacing deadline, renders one frame, and writes it; a viewer that only wants a snapshot sends `request_frame` instead. No background render loop exists without a viewer.
-- **One session task per connection.** Unlike the AGP server (concurrent dispatch), viewer messages are cheap and order-sensitive (input), so a single select loop per connection applies them in submission order — mirroring the AGP §5.5 input ordering guarantee.
-- **Handshake is mandatory and version-checked.** `serve` refuses (error + close) a missing/`Unknown` first message, a version mismatch, or a handshake timeout; the client refuses the same on the server's reply.
+- **Frames are pushed on change, paced by `min_interval_ms`.** The session awaits the `ChangeSignal` or the pacing deadline, renders one frame, and writes it; a viewer that only wants a snapshot sends `request_frame` instead. There is no initial frame and no background render loop without a viewer.
+- **`ViewerServerConfig::default_min_interval_ms == 0` means "no default pacing"**, so a viewer that also asks for `min_interval_ms == 0` gets a frame per desktop change; a non-zero config value is substituted when the viewer asks for `0`.
+- **`ChangeSignal` collapses.** One wakeup per `notify()`, with a single stored permit when there is no waiter — the right semantics for "something changed, render once".
+- **One session task per connection.** Unlike the AGP server (concurrent dispatch), viewer messages are cheap and order-sensitive (input), so a single `select!` loop per connection applies them in submission order — mirroring the AGP §5.5 input ordering guarantee. Input messages carry no `id`, so `InputAck.id` is always `None`.
+- **Handshake is mandatory and version-checked.** The session refuses (protocol `error` + close) a malformed first line, a missing/`Unknown`/duplicate `hello`, and a version mismatch; a silent viewer hits `handshake_timeout` and `serve` returns `Err(Handshake)`. The client refuses the same on the server's reply unless `verify_version` is disabled.
 - **`ViewerInput` is a narrowing of `ClientMessage`.** The backend never sees handshake/`request_frame`/`bye` traffic, so the trait stays stable if the protocol grows non-input messages.
+- **Close is a graceful handshake, and a peer-gone ack is not an error.** `ViewerClient::close()` writes `bye`, shuts its write half, then waits a bounded grace (250 ms) for the dispatcher to read the server's `bye`/EOF and end naturally before aborting it; either way it returns `Ok(())`. On the server, a write failure while acking an *already-received* `bye` is downgraded to the normal clean close only for `BrokenPipe`/`ConnectionReset` (logged at `debug`) — any other error kind still propagates.
+- **The client uses a background dispatcher.** One task owns the read half and fans messages into `broadcast` channels (frames, input acks, errors) and a `oneshot` FIFO (state replies), so `frames()`, `input_ack()`, `request_*` and the input methods are usable concurrently without deadlock; `Drop` aborts the dispatcher.
+- **Overlays are negotiated, not plumbed into v1 rendering.** `render_frame()` takes no overlay argument, so `overlays` travels through the handshake and is reported, but the backend decides what an overlay set means for a given frame.
+- **Exit-code mapping is fixed** (`0`/`1`/`2`) so the binary is safe to script; unrecognized overlay names and unreadable `--input` files are usage errors, a missing socket is a runtime error.
+- **Test fakes are duplicated on purpose.** `tests/session.rs` and `tests/client.rs` each define their own fake backend so neither file depends on the other's internals.
+
 ## Test Strategy
-Tests in `./tests/`, no display/GPU/network; a fake `ViewerBackend` and an in-memory duplex stream:
-- `tests/session.rs` — handshake (version check, timeout), `request_frame`/`request_state` round-trip, change-driven frame push, input forwarding to the backend + `input_ack`, `set_control`, `bye`, malformed line handling.
-- `tests/client.rs` — `ViewerClient` against a `ViewerServer` on a real `tokio::net::UnixListener` in a `tempfile` dir: handshake, frame stream, input methods, close.
-- `tests/script.rs` — the headless input-script parser.
-- Run with `./scripts/dev.sh cargo test -p adesk-viewer`.
+No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex stream or a `tempfile` Unix socket.
+- `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
+- `tests/client.rs` — 10 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream, input methods, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
+- `tests/script.rs` — 15 tests for the input-script grammar and error line numbers.
+- Inline unit tests: 53 in the lib target (backend, transport, capture, session, server, client) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
+- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **105 passed / 0 failed / 0 ignored** (53 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
+- Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
+
 ## Notes for Agents
 - The server session owns no transport: `serve` takes an already-connected stream; binding/accepting lives in `adesk-server`.
-- `change_signal()` default `never()` means a backend that has no event source still serves `request_frame`/pacing — used by tests and simple backends.
+- `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
+- `close()` can block up to the 250 ms grace only when the peer never answers; the happy path returns as soon as the server's `bye`/EOF arrives.
+- Implementing `ViewerBackend` is still pending in `adesk-server` (planned: `RenderOutput` full-output render through `adesk-server::images::encode_png` → `ImagePayload`, `CursorTracker` for the cursor, `QueryState` for the window list/active window, and the seat input helpers for `apply_input` returning an `ActionId`).
+
 ## Status
-Skeleton only: `src/lib.rs` carries the crate attributes and docs; every module above is **not yet implemented**. Implement the surface exactly as documented here.
+Implementation-complete, documented and tested: all modules, the client SDK and the headless binary are landed, and the crate's own test/clippy/fmt/doc gates are green (counts in Test Strategy).
+The viewer endpoint is not yet wired into the runtime — no `adesk-server` code references `adesk-viewer`/`ViewerBackend` yet, so nothing binds the transport or renders frames from the compositor; that integration is a separate task and is the only remaining work for an end-to-end viewer.
