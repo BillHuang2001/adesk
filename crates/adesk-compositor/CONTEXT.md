@@ -220,7 +220,7 @@ Unit tests (colocated `#[cfg(test)]`; 89 tests pass):
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
 - `snapshot`: lookup/helpers, frame size.
 - `state`: released chord and unresolvable keysym → `invalid_request`.
-- `wm` (in `wm_tests.rs`): surface lookup, stable ids, duplicate map idempotence, popup id/offset/grab bookkeeping, launch ledger bounds, title evidence, late app-id write-back, unknown windows.
+- `wm` (in `wm_tests.rs`): surface lookup, stable ids, duplicate map idempotence, popup id/offset/grab bookkeeping, launch ledger bounds, title evidence, late app-id write-back, unknown windows, and the O(1) hot-path lookups (`window_geometry`, `root_id`).
 
 Smoke tests (`tests/compositor_smoke.rs`; 3 tests, public API only, no `adesk-testkit`):
 - spawn/readiness/display name/renderer/output size; `QueryState` on a fresh runtime; shutdown + thread join + post-shutdown send failure.
