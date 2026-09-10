@@ -1,6 +1,6 @@
-//! Integration scenario 4 of `tests/integration_plan.md`: popup tracking, the lifecycle
-//! half — an `xdg_popup` that appears, commits, renders into its owner, and disappears
-//! without taking the window with it.
+//! Integration scenario 4 of `tests/integration_plan.md`: popup tracking, both halves — an
+//! `xdg_popup` that appears, commits, renders into its owner and disappears without taking
+//! the window with it, and an owner destroyed while its popup is still open.
 //!
 //! The runtime is a real in-process compositor (pixman renderer, one compositor thread, one
 //! virtual output) driven the way an ordinary toolkit application does: a `wayland-client`
@@ -8,7 +8,7 @@
 //! path, `RuntimeCommand`s on the command channel for the state queries, and the
 //! compositor's own `RuntimeEvent` broadcast as the assertion surface.
 //!
-//! # What this test proves
+//! # What these tests prove
 //!
 //! 1. **A popup belongs to its owner window, not to itself.** `popup_appeared` is emitted
 //!    with the *owner's* `WindowId` (a popup never consumes a window id), and the window
@@ -28,6 +28,15 @@
 //!    `popup_id` captured at creation and the same owner; `popup_count` returns to `0`, the
 //!    popup's pixels leave the composition, and the window itself stays `mapped`, `Active`
 //!    and the active window of the runtime.
+//! 5. **A popup never outlives its owner.** Destroying the owner while its popup is still
+//!    open reports the popup's disappearance *before* the window's destruction, so a
+//!    subscriber can never hold a popup whose window is already gone; afterwards the model
+//!    keeps neither a window nor a popup record for the owner and reports nothing further
+//!    for it.
+//!
+//! Claims 1–4 belong to
+//! `popup_lifecycle_renders_into_the_owner_and_destroy_keeps_the_window`, claim 5 to
+//! `owner_destroyed_with_open_popup_reports_popup_disappeared_first`.
 //!
 //! # Rules this file follows (plan §"Ground rules")
 //!
@@ -44,8 +53,13 @@
 //!   at the positioner offset the client asked for.
 //!
 //! The ordering half of the plan's scenario 4 — "destroying the owner window while a popup is
-//! open emits `popup_disappeared` first, then `window_destroyed`" — is a separate follow-up
-//! and is deliberately not covered here.
+//! open emits `popup_disappeared` first, then `window_destroyed`" — is
+//! [`owner_destroyed_with_open_popup_reports_popup_disappeared_first`] below. The order is
+//! not incidental: `State::on_toplevel_destroyed` (`crates/adesk-compositor/src/state.rs`)
+//! takes the popup ids the window model still tracks under the dying window and emits each
+//! `popup_disappeared` *before* the `window_destroyed`, so a subscriber that reacts to
+//! `window_destroyed` by dropping its per-window state can never be handed a popup event for
+//! the window it has already forgotten.
 
 use std::time::Duration;
 
@@ -59,6 +73,15 @@ use tokio::sync::oneshot;
 
 /// Every bounded wait in this file uses this deadline (10 s, the harness bound).
 const DEADLINE: Duration = Duration::from_secs(10);
+
+/// Bound for the bounded negative assertion ("no further event for the destroyed owner").
+///
+/// A negative claim can only be proven by waiting, and this is deliberately *not*
+/// [`DEADLINE`]: the destruction is served in one compositor callback whose positive
+/// counterpart is observed in single-digit milliseconds, so a quarter second is orders of
+/// magnitude longer than the latency of the events being ruled out, while a failing test
+/// still reports fast.
+const QUIET_BOUND: Duration = Duration::from_millis(250);
 
 /// App id and title of the owning toplevel (echoed back by `window_created`).
 const APP_ID: &str = "org.example.popup.lifecycle";
@@ -173,6 +196,24 @@ fn popup_disappeared(owner: WindowId, popup_id: u64) -> Expected {
                     ..
                 } if *window_id == owner && *disappeared == popup_id
             )
+        },
+    )
+}
+
+/// Matches any further lifecycle event naming the destroyed `owner`: another popup of that
+/// window, a second disappearance of one, or a second destruction of the window itself.
+///
+/// Events of the other kinds the runtime can still emit once its last window is gone
+/// (`focus_changed` for the cleared focus, `window_activated`) deliberately do not match:
+/// the claim is about the destroyed window's popup/window lifecycle, not about the seat.
+fn further_lifecycle_events_for(owner: WindowId) -> Expected {
+    Expected::custom(
+        "popup_appeared/popup_disappeared/window_destroyed naming the destroyed owner",
+        move |event| match event {
+            RuntimeEvent::PopupAppeared { window_id, .. }
+            | RuntimeEvent::PopupDisappeared { window_id, .. }
+            | RuntimeEvent::WindowDestroyed { window_id, .. } => *window_id == owner,
+            _ => false,
         },
     )
 }
@@ -402,6 +443,189 @@ async fn popup_lifecycle_renders_into_the_owner_and_destroy_keeps_the_window() -
         image.pixel(sample_x, sample_y),
         parent_fill.at(sample_x, sample_y, tiled.size()),
         "a destroyed popup is not composed any more"
+    );
+
+    wayland.close().await?;
+    runtime.shutdown().await
+}
+
+/// Scenario 4 (ordering half): destroying the owner toplevel while its popup is still open
+/// reports the popup's disappearance before the window's destruction.
+///
+/// Both notifications come out of the one `xdg_toplevel.destroy` dispatch:
+/// `State::on_toplevel_destroyed` (`crates/adesk-compositor/src/state.rs`) consumes the
+/// destroyed window together with the popup ids the window model still tracks under it and
+/// emits `popup_disappeared` for each of them *before* `window_destroyed`. That order is the
+/// contract pinned here: a subscriber that reacts to `window_destroyed` by dropping its
+/// per-window state must never be handed a popup event for the window it has already
+/// forgotten, which is exactly what the reverse order would cause.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owner_destroyed_with_open_popup_reports_popup_disappeared_first() -> Result<()> {
+    let runtime = TestRuntime::start_with(test_config()).await?;
+    // The event broadcast never replays: tap before the commit that maps the surface.
+    let mut events = EventAssert::tap(&runtime);
+    let wayland = runtime.wayland_client()?;
+
+    // --- the owner toplevel -----------------------------------------------------------
+    let parent_fill = FillPattern::default();
+    let owner_window = wayland.create_toplevel(ToplevelSpec::new(APP_ID, TITLE, PARENT_SIZE))?;
+    let configure = owner_window.wait_for_configure(DEADLINE)?;
+    assert_eq!(
+        configure.size(),
+        runtime.tiled_rect().size(),
+        "the tiling policy fills the output with the one visible toplevel, not {PARENT_SIZE:?}"
+    );
+    owner_window.apply_configure()?;
+    owner_window.commit_frame(parent_fill)?;
+
+    let created = events
+        .wait_for_expected(&Expected::WindowCreatedFor(AppId::from(APP_ID)), DEADLINE)
+        .await?;
+    let owner = created
+        .window_id()
+        .expect("window_created carries the owner window id");
+    events
+        .wait_for_expected(&Expected::WindowActivated(owner), DEADLINE)
+        .await?;
+
+    // --- the popup, open when its owner dies ------------------------------------------
+    let popup = wayland.create_popup(
+        &owner_window,
+        PopupSpec::new(POPUP_SIZE).with_offset(POPUP_OFFSET),
+    )?;
+    let popup_configure = popup.wait_for_configure(DEADLINE)?;
+    assert!(
+        popup_configure.width > 0 && popup_configure.height > 0,
+        "the compositor configures the popup, got {popup_configure:?}"
+    );
+    popup.apply_configure()?;
+
+    let appeared = events
+        .wait_for_expected(&Expected::PopupAppeared, DEADLINE)
+        .await?;
+    assert_eq!(
+        appeared.window_id(),
+        Some(owner),
+        "the popup event names its owning window, got {appeared:?}"
+    );
+    let RuntimeEvent::PopupAppeared {
+        window_id: appeared_owner,
+        popup_id,
+        ..
+    } = &appeared
+    else {
+        panic!("wait_for_expected(PopupAppeared) returned {appeared:?}");
+    };
+    assert_eq!(*appeared_owner, owner);
+    // Captured now: the disappearance below has to name this exact popup of this exact owner.
+    let popup_id = *popup_id;
+    // The popup carries content, not just a configure handshake. It is committed after the
+    // tracking event was observed and *before* the destroy request below is written, so the
+    // compositor's FIFO socket dispatch orders the commit strictly before the destruction.
+    popup.commit_frame(POPUP_FILL)?;
+
+    let with_popup = query_state(&runtime).await?;
+    assert_eq!(
+        window_info(&with_popup, owner).popup_count,
+        1,
+        "the model tracks the popup under its owner before the destruction"
+    );
+
+    // --- 1. the popup dies with its owner, and it dies first ---------------------------
+    owner_window.destroy()?;
+
+    // First event of the pair, payload-constrained: only the disappearance of *this* popup
+    // of *this* owner can satisfy this wait.
+    let disappeared = events
+        .wait_for_expected(&popup_disappeared(owner, popup_id), DEADLINE)
+        .await?;
+    let RuntimeEvent::PopupDisappeared {
+        window_id: disappeared_owner,
+        popup_id: disappeared_id,
+        ..
+    } = &disappeared
+    else {
+        panic!("popup_disappeared must carry the owner and the popup id, got {disappeared:?}");
+    };
+    assert_eq!(
+        *disappeared_owner, owner,
+        "the disappearance names the owner window"
+    );
+    assert_eq!(
+        *disappeared_id, popup_id,
+        "the disappearance names the popup id captured at creation"
+    );
+
+    // Last event of the pair: the window's own destruction. Waiting for it is also the
+    // barrier for the history check below — both notifications are emitted from one
+    // `xdg_toplevel.destroy` dispatch, so once this is observed the pair is in `seen`.
+    let destroyed = events
+        .wait_for_expected(&Expected::WindowDestroyed(owner), DEADLINE)
+        .await?;
+    assert_eq!(
+        destroyed.window_id(),
+        Some(owner),
+        "the destruction names the destroyed window, got {destroyed:?}"
+    );
+    // The strict order, over the tap's history: a disappearance recorded only *after* the
+    // window's destruction fails here — and it cannot be satisfied by a second destruction,
+    // because the runtime destroys a window exactly once.
+    events.assert_seen_order(&[Expected::PopupDisappeared, Expected::WindowDestroyed(owner)]);
+    // Arrival order and the compositor's own watermark agree, so the order above is causal
+    // and not an artefact of how the tap is drained.
+    assert!(
+        disappeared.seq() < destroyed.seq(),
+        "the popup's disappearance (seq {}) must be causally before the window's \
+         destruction (seq {})",
+        disappeared.seq(),
+        destroyed.seq()
+    );
+
+    // --- 2. nothing further is reported for the destroyed owner ------------------------
+    // The window is gone, so neither its popups nor the window itself may be reported
+    // again: no second disappearance when the client's still-open popup object is torn
+    // down with the surface, no popup re-appearing, no second destruction. `focus_changed`
+    // for the now-empty session is expected and deliberately does not match.
+    events
+        .expect_none(&further_lifecycle_events_for(owner), QUIET_BOUND)
+        .await?;
+
+    let after = query_state(&runtime).await?;
+    assert!(
+        after.window(owner).is_none(),
+        "the destroyed owner is gone from the model, got {:?}",
+        after.windows
+    );
+    assert!(
+        after.windows.is_empty(),
+        "it was the only window, so no record is left behind (a popup is never a window \
+         record of its own): {:?}",
+        after.windows
+    );
+    assert_eq!(
+        after.active_window_id, None,
+        "with no window left there is no active window"
+    );
+    assert_eq!(
+        after.keyboard_focus, None,
+        "with no window left the keyboard focus is cleared"
+    );
+
+    // --- 3. the state change is fully observed ----------------------------------------
+    // The snapshot is served after both events were received, so its watermark has already
+    // passed them: the model the assertions above read is the model the events describe,
+    // and neither notification is still in flight behind it.
+    assert!(
+        after.seq >= destroyed.seq(),
+        "the snapshot watermark ({}) lags the window's destruction (seq {})",
+        after.seq,
+        destroyed.seq()
+    );
+    assert!(
+        after.seq >= disappeared.seq(),
+        "the snapshot watermark ({}) lags the popup's disappearance (seq {})",
+        after.seq,
+        disappeared.seq()
     );
 
     wayland.close().await?;
