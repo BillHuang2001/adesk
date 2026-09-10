@@ -407,244 +407,303 @@ mod tests {
 
     // ---------------------------------------------------------------- absorb
 
-    #[test]
-    fn absorb_created_pushes_new_window_id() {
-        let mut acc = acc();
-        acc.absorb(&event(1, 10, Some(wid(7)), CountedKind::Created), None);
+    /// One `absorb` step: a counted event plus the window geometry known at that
+    /// point (`None` = geometry not yet known, so damage is left unclipped — the
+    /// pre-`resync` case).
+    type AbsorbStep = (CountedEvent, Option<Rect>);
 
-        assert_eq!(acc.events, 1);
-        assert_eq!(acc.new_windows, vec![wid(7)]);
-        assert!(acc.destroyed_windows.is_empty());
-        assert_eq!(acc.commits, 0);
+    /// Every accumulator field after a case's steps have been absorbed.
+    #[derive(Debug, Default)]
+    struct Absorbed {
+        events: u64,
+        commits: u64,
+        last_commit_seq: u64,
+        last_commit_ts: Option<u64>,
+        new_windows: Vec<WindowId>,
+        destroyed_windows: Vec<WindowId>,
+        title_changed: bool,
+        focus_changed: Option<bool>,
+        popups_appeared: Vec<u64>,
+        popups_disappeared: Vec<u64>,
+        damage: Vec<Rect>,
+        simplified: Vec<Rect>,
+    }
+
+    /// `Absorbed` for a single event that only advances `events`.
+    fn counted_only() -> Absorbed {
+        Absorbed {
+            events: 1,
+            ..Absorbed::default()
+        }
     }
 
     #[test]
-    fn absorb_created_without_window_id_is_ignored() {
-        let mut acc = acc();
-        acc.absorb(&event(1, 10, None, CountedKind::Created), None);
-
-        assert_eq!(acc.events, 1);
-        assert!(acc.new_windows.is_empty(), "no id to report, no panic");
-    }
-
-    #[test]
-    fn absorb_destroyed_pushes_destroyed_window_id() {
-        let mut acc = acc();
-        acc.absorb(&event(2, 20, Some(wid(7)), CountedKind::Destroyed), None);
-
-        assert_eq!(acc.events, 1);
-        assert_eq!(acc.destroyed_windows, vec![wid(7)]);
-        assert!(acc.new_windows.is_empty());
-    }
-
-    #[test]
-    fn absorb_destroyed_without_window_id_is_ignored() {
-        let mut acc = acc();
-        acc.absorb(&event(2, 20, None, CountedKind::Destroyed), None);
-
-        assert_eq!(acc.events, 1);
-        assert!(
-            acc.destroyed_windows.is_empty(),
-            "no id to report, no panic"
-        );
-    }
-
-    #[test]
-    fn absorb_activated_only_counts_the_event() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(
-                3,
-                30,
-                Some(wid(7)),
-                CountedKind::Activated {
-                    previous: Some(wid(8)),
+    fn absorb_folds_every_counted_kind_into_the_accumulator() {
+        // Each row is the `absorb` step(s) of one former standalone test plus the
+        // accumulator contents it asserted. Every field is asserted for every row,
+        // so merging cannot drop an edge case (empty/absent geometry, clipping,
+        // the unclipped pre-resync union, newest-vs-highest commit sequence).
+        let cases: Vec<(&str, Vec<AbsorbStep>, Absorbed)> = vec![
+            (
+                "created pushes the new window id",
+                vec![(event(1, 10, Some(wid(7)), CountedKind::Created), None)],
+                Absorbed {
+                    events: 1,
+                    new_windows: vec![wid(7)],
+                    ..Absorbed::default()
                 },
             ),
-            None,
-        );
-
-        assert_eq!(acc.events, 1);
-        assert_eq!(acc.commits, 0, "activation is not a commit");
-        assert!(acc.new_windows.is_empty());
-        assert!(acc.destroyed_windows.is_empty());
-        assert!(!acc.title_changed);
-        assert_eq!(acc.focus_changed, None);
-        assert!(acc.popups_appeared.is_empty());
-        assert!(acc.popups_disappeared.is_empty());
-    }
-
-    #[test]
-    fn absorb_title_changed_sets_flag() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(
-                4,
-                40,
-                Some(wid(7)),
-                CountedKind::TitleChanged {
-                    title: Some("hi".into()),
+            (
+                "created without a window id counts but reports nothing",
+                vec![(event(1, 10, None, CountedKind::Created), None)],
+                counted_only(),
+            ),
+            (
+                "destroyed pushes the destroyed window id",
+                vec![(event(2, 20, Some(wid(7)), CountedKind::Destroyed), None)],
+                Absorbed {
+                    events: 1,
+                    destroyed_windows: vec![wid(7)],
+                    ..Absorbed::default()
                 },
             ),
-            None,
-        );
-
-        assert_eq!(acc.events, 1);
-        assert!(acc.title_changed);
-    }
-
-    #[test]
-    fn absorb_commit_updates_counters_and_unions_damage() {
-        let mut acc = acc();
-        acc.absorb(
-            &commit_event(1, 40, wid(7), 1, &[Rect::new(0, 0, 10, 10)]),
-            None,
-        );
-        acc.absorb(
-            &commit_event(2, 80, wid(7), 2, &[Rect::new(5, 5, 10, 10)]),
-            None,
-        );
-
-        assert_eq!(acc.events, 2);
-        assert_eq!(acc.commits, 2);
-        assert_eq!(acc.last_commit_seq, 2);
-        assert_eq!(acc.last_commit_ts, Some(80));
-        assert_eq!(
-            acc.damage.rects().to_vec(),
-            vec![Rect::new(0, 0, 10, 10), Rect::new(5, 5, 10, 10)],
-            "damage is unioned in arrival order"
-        );
-        assert_eq!(
-            acc.damage.simplified(),
-            vec![Rect::new(0, 0, 15, 15)],
-            "overlapping rects coalesce to their bounding box"
-        );
-    }
-
-    #[test]
-    fn absorb_commit_keeps_highest_commit_seq() {
-        let mut acc = acc();
-        acc.absorb(&commit_event(1, 10, wid(7), 9, &[]), None);
-        acc.absorb(&commit_event(2, 20, wid(7), 4, &[]), None);
-
-        assert_eq!(acc.commits, 2);
-        assert_eq!(
-            acc.last_commit_seq, 9,
-            "commit seq is a maximum, not the last"
-        );
-        assert_eq!(
-            acc.last_commit_ts,
-            Some(20),
-            "timestamp follows the newest event"
-        );
-    }
-
-    #[test]
-    fn absorb_commit_clips_damage_to_geometry() {
-        let mut acc = acc();
-        acc.absorb(
-            &commit_event(
-                1,
-                10,
-                wid(7),
-                1,
-                &[Rect::new(0, 0, 10, 10), Rect::new(50, 50, 4, 4)],
+            (
+                "destroyed without a window id counts but reports nothing",
+                vec![(event(2, 20, None, CountedKind::Destroyed), None)],
+                counted_only(),
             ),
-            Some(Rect::new(0, 0, 8, 8)),
-        );
-
-        assert_eq!(
-            acc.damage.rects().to_vec(),
-            vec![Rect::new(0, 0, 8, 8)],
-            "the intersecting part is kept, the outside rect dropped"
-        );
-    }
-
-    #[test]
-    fn absorb_commit_with_empty_geometry_drops_damage() {
-        let mut acc = acc();
-        acc.absorb(
-            &commit_event(1, 10, wid(7), 1, &[Rect::new(0, 0, 10, 10)]),
-            Some(Rect::EMPTY),
-        );
-
-        assert_eq!(acc.commits, 1, "the commit still counts");
-        assert!(acc.damage.is_empty());
-    }
-
-    #[test]
-    fn absorb_focus_sets_focus_changed_true() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(
-                5,
-                50,
-                Some(wid(7)),
-                CountedKind::Focus {
-                    window_id: Some(wid(7)),
+            (
+                "activated only advances the event count",
+                vec![(
+                    event(
+                        3,
+                        30,
+                        Some(wid(7)),
+                        CountedKind::Activated {
+                            previous: Some(wid(8)),
+                        },
+                    ),
+                    None,
+                )],
+                counted_only(),
+            ),
+            (
+                "title_changed sets the flag",
+                vec![(
+                    event(
+                        4,
+                        40,
+                        Some(wid(7)),
+                        CountedKind::TitleChanged {
+                            title: Some("hi".into()),
+                        },
+                    ),
+                    None,
+                )],
+                Absorbed {
+                    events: 1,
+                    title_changed: true,
+                    ..Absorbed::default()
                 },
             ),
-            None,
-        );
-
-        assert_eq!(acc.events, 1);
-        assert_eq!(acc.focus_changed, Some(true));
-    }
-
-    #[test]
-    fn absorb_focus_without_window_id_still_reports_focus() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(5, 50, None, CountedKind::Focus { window_id: None }),
-            None,
-        );
-
-        assert_eq!(acc.focus_changed, Some(true));
-    }
-
-    #[test]
-    fn absorb_popup_appeared_pushes_popup_id() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(
-                6,
-                60,
-                Some(wid(7)),
-                CountedKind::PopupAppeared { popup_id: 3 },
+            (
+                "commit unions damage in arrival order while geometry is unknown",
+                vec![
+                    (
+                        commit_event(1, 40, wid(7), 1, &[Rect::new(0, 0, 10, 10)]),
+                        None,
+                    ),
+                    (
+                        commit_event(2, 80, wid(7), 2, &[Rect::new(5, 5, 10, 10)]),
+                        None,
+                    ),
+                ],
+                Absorbed {
+                    events: 2,
+                    commits: 2,
+                    last_commit_seq: 2,
+                    last_commit_ts: Some(80),
+                    damage: vec![Rect::new(0, 0, 10, 10), Rect::new(5, 5, 10, 10)],
+                    simplified: vec![Rect::new(0, 0, 15, 15)],
+                    ..Absorbed::default()
+                },
             ),
-            None,
-        );
-        acc.absorb(
-            &event(
-                7,
-                70,
-                Some(wid(7)),
-                CountedKind::PopupAppeared { popup_id: 4 },
+            (
+                "commit keeps the highest commit seq but the newest timestamp",
+                vec![
+                    (commit_event(1, 10, wid(7), 9, &[]), None),
+                    (commit_event(2, 20, wid(7), 4, &[]), None),
+                ],
+                Absorbed {
+                    events: 2,
+                    commits: 2,
+                    last_commit_seq: 9,
+                    last_commit_ts: Some(20),
+                    ..Absorbed::default()
+                },
             ),
-            None,
-        );
-
-        assert_eq!(acc.events, 2);
-        assert_eq!(acc.popups_appeared, vec![3, 4]);
-        assert!(acc.popups_disappeared.is_empty());
-    }
-
-    #[test]
-    fn absorb_popup_disappeared_pushes_popup_id() {
-        let mut acc = acc();
-        acc.absorb(
-            &event(
-                8,
-                80,
-                Some(wid(7)),
-                CountedKind::PopupDisappeared { popup_id: 3 },
+            (
+                "commit clips damage to known geometry",
+                vec![(
+                    commit_event(
+                        1,
+                        10,
+                        wid(7),
+                        1,
+                        &[Rect::new(0, 0, 10, 10), Rect::new(50, 50, 4, 4)],
+                    ),
+                    Some(Rect::new(0, 0, 8, 8)),
+                )],
+                Absorbed {
+                    events: 1,
+                    commits: 1,
+                    last_commit_seq: 1,
+                    last_commit_ts: Some(10),
+                    damage: vec![Rect::new(0, 0, 8, 8)],
+                    simplified: vec![Rect::new(0, 0, 8, 8)],
+                    ..Absorbed::default()
+                },
             ),
-            None,
-        );
+            (
+                "commit with empty geometry drops the damage but still counts",
+                vec![(
+                    commit_event(1, 10, wid(7), 1, &[Rect::new(0, 0, 10, 10)]),
+                    Some(Rect::EMPTY),
+                )],
+                Absorbed {
+                    events: 1,
+                    commits: 1,
+                    last_commit_seq: 1,
+                    last_commit_ts: Some(10),
+                    ..Absorbed::default()
+                },
+            ),
+            (
+                "focus sets focus_changed to some(true)",
+                vec![(
+                    event(
+                        5,
+                        50,
+                        Some(wid(7)),
+                        CountedKind::Focus {
+                            window_id: Some(wid(7)),
+                        },
+                    ),
+                    None,
+                )],
+                Absorbed {
+                    events: 1,
+                    focus_changed: Some(true),
+                    ..Absorbed::default()
+                },
+            ),
+            (
+                "focus without a window id still reports focus",
+                vec![(
+                    event(5, 50, None, CountedKind::Focus { window_id: None }),
+                    None,
+                )],
+                Absorbed {
+                    events: 1,
+                    focus_changed: Some(true),
+                    ..Absorbed::default()
+                },
+            ),
+            (
+                "popup_appeared records the ids in order",
+                vec![
+                    (
+                        event(
+                            6,
+                            60,
+                            Some(wid(7)),
+                            CountedKind::PopupAppeared { popup_id: 3 },
+                        ),
+                        None,
+                    ),
+                    (
+                        event(
+                            7,
+                            70,
+                            Some(wid(7)),
+                            CountedKind::PopupAppeared { popup_id: 4 },
+                        ),
+                        None,
+                    ),
+                ],
+                Absorbed {
+                    events: 2,
+                    popups_appeared: vec![3, 4],
+                    ..Absorbed::default()
+                },
+            ),
+            (
+                "popup_disappeared records the id",
+                vec![(
+                    event(
+                        8,
+                        80,
+                        Some(wid(7)),
+                        CountedKind::PopupDisappeared { popup_id: 3 },
+                    ),
+                    None,
+                )],
+                Absorbed {
+                    events: 1,
+                    popups_disappeared: vec![3],
+                    ..Absorbed::default()
+                },
+            ),
+        ];
 
-        assert_eq!(acc.events, 1);
-        assert_eq!(acc.popups_disappeared, vec![3]);
-        assert!(acc.popups_appeared.is_empty());
+        for (name, steps, expected) in cases {
+            let mut acc = acc();
+            for (event, geometry) in &steps {
+                acc.absorb(event, *geometry);
+            }
+
+            assert_eq!(acc.events, expected.events, "{name}: events");
+            assert_eq!(acc.commits, expected.commits, "{name}: commits");
+            assert_eq!(
+                acc.last_commit_seq, expected.last_commit_seq,
+                "{name}: last_commit_seq"
+            );
+            assert_eq!(
+                acc.last_commit_ts, expected.last_commit_ts,
+                "{name}: last_commit_ts"
+            );
+            assert_eq!(acc.new_windows, expected.new_windows, "{name}: new_windows");
+            assert_eq!(
+                acc.destroyed_windows, expected.destroyed_windows,
+                "{name}: destroyed_windows"
+            );
+            assert_eq!(
+                acc.title_changed, expected.title_changed,
+                "{name}: title_changed"
+            );
+            assert_eq!(
+                acc.focus_changed, expected.focus_changed,
+                "{name}: focus_changed"
+            );
+            assert_eq!(
+                acc.popups_appeared, expected.popups_appeared,
+                "{name}: popups_appeared"
+            );
+            assert_eq!(
+                acc.popups_disappeared, expected.popups_disappeared,
+                "{name}: popups_disappeared"
+            );
+            assert_eq!(
+                acc.damage.rects().to_vec(),
+                expected.damage,
+                "{name}: damage union (arrival order, clipped to known geometry)"
+            );
+            assert_eq!(
+                acc.damage.simplified(),
+                expected.simplified,
+                "{name}: damage simplified"
+            );
+        }
     }
 
     // --------------------------------------------------------------- resolve

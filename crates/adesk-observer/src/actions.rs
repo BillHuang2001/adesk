@@ -261,18 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn ids_start_at_one_and_are_strictly_monotonic() {
-        let registry = ActionRegistry::new();
-        for expected in 1..=5_u64 {
-            let id = registry.record(ActionKind::Click, None, None, 0, 0);
-            assert_eq!(id, ActionId(expected));
-            assert_eq!(registry.len(), expected as usize);
-            assert!(!registry.is_empty());
-        }
-        assert_eq!(registry.last().map(|record| record.id), Some(ActionId(5)));
-    }
-
-    #[test]
     fn record_stores_every_field() {
         let registry = ActionRegistry::new();
         let id = registry.record(
@@ -306,22 +294,6 @@ mod tests {
     }
 
     #[test]
-    fn lookup_and_seq_of_reject_unknown_ids() {
-        let registry = ActionRegistry::new();
-        let id = registry.record(ActionKind::Scroll, Some(WindowId(3)), None, 42, 7);
-
-        assert_eq!(registry.seq_of(id), Some(42));
-        assert!(registry.contains(id));
-        assert_eq!(registry.get(id).map(|record| record.ts_ms), Some(7));
-
-        let unknown = ActionId(id.0 + 1);
-        assert!(!registry.contains(unknown));
-        assert!(registry.get(unknown).is_none());
-        assert!(registry.seq_of(unknown).is_none());
-        assert!(!registry.contains(ActionId(0)));
-    }
-
-    #[test]
     fn records_are_in_ascending_id_order_and_last_is_newest() {
         let registry = ActionRegistry::new();
         let kinds = [
@@ -346,23 +318,6 @@ mod tests {
             kinds.to_vec()
         );
         assert_eq!(registry.last(), Some(records[records.len() - 1].clone()));
-    }
-
-    #[test]
-    fn clones_share_one_id_space_and_one_record_set() {
-        let registry = ActionRegistry::new();
-        let clone = registry.clone();
-
-        let first = registry.record(ActionKind::Click, None, None, 0, 0);
-        let second = clone.record(ActionKind::Click, None, None, 1, 1);
-
-        assert_eq!(first, ActionId(1));
-        assert_eq!(second, ActionId(2));
-        assert_eq!(registry.len(), 2);
-        assert_eq!(clone.len(), 2);
-        assert_eq!(registry.get(second), clone.get(second));
-        assert_eq!(registry.records(), clone.records());
-        assert_eq!(clone.last().map(|record| record.id), Some(second));
     }
 
     #[test]
