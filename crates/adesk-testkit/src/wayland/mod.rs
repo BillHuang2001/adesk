@@ -97,7 +97,7 @@ mod window;
 
 pub use clipboard::DEFAULT_SELECTION_TIMEOUT;
 pub use input::{
-    AxisKind, ButtonState, KeyboardEvent, KeyState, ModifiersState, PointerEvent, BTN_LEFT, KEY_C,
+    AxisKind, ButtonState, KeyState, KeyboardEvent, ModifiersState, PointerEvent, BTN_LEFT, KEY_C,
     KEY_LEFTCTRL,
 };
 pub use protocol::Globals;
@@ -279,9 +279,10 @@ impl WaylandTestClient {
         )?));
         // The clipboard device is created before the reader thread exists, so it is already
         // in `ClientState` when its first `data_offer`/`selection` event is dispatched.
-        let data_device = globals
-            .data_device_manager()
-            .get_data_device(globals.seat(), &qhandle, ());
+        let data_device =
+            globals
+                .data_device_manager()
+                .get_data_device(globals.seat(), &qhandle, ());
 
         // The advertised formats start empty: `wait_for_shm_formats` must observe the
         // real `wl_shm.format` events before `supports_argb8888` means anything (a
@@ -377,7 +378,10 @@ impl WaylandTestClient {
         mut pred: impl FnMut(&PointerEvent) -> bool,
     ) -> Result<()> {
         block_until(timeout, what, || {
-            lock_client(&self.state).pointer_events.iter().any(&mut pred)
+            lock_client(&self.state)
+                .pointer_events
+                .iter()
+                .any(&mut pred)
         })
     }
 
@@ -390,7 +394,10 @@ impl WaylandTestClient {
         mut pred: impl FnMut(&KeyboardEvent) -> bool,
     ) -> Result<()> {
         block_until(timeout, what, || {
-            lock_client(&self.state).keyboard_events.iter().any(&mut pred)
+            lock_client(&self.state)
+                .keyboard_events
+                .iter()
+                .any(&mut pred)
         })
     }
 
@@ -412,12 +419,7 @@ impl WaylandTestClient {
     /// Waits until `keycode` was recorded in `state` (`wl_keyboard.key`).
     ///
     /// The keycode is the raw evdev code the protocol carries (e.g. [`KEY_LEFTCTRL`]).
-    pub fn wait_for_key(
-        &self,
-        keycode: u32,
-        state: KeyState,
-        timeout: Duration,
-    ) -> Result<()> {
+    pub fn wait_for_key(&self, keycode: u32, state: KeyState, timeout: Duration) -> Result<()> {
         self.wait_for_keyboard_event(timeout, "key", |event| {
             matches!(event, KeyboardEvent::Key { keycode: recorded, state: recorded_state }
                 if *recorded == keycode && *recorded_state == state)

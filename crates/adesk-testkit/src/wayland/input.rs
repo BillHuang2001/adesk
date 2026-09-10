@@ -414,10 +414,9 @@ mod tests {
         let moved = (tiled.w / 2, tiled.h / 2);
         let client = tokio_rt.block_on(runtime.client()).expect("AGP connects");
         tokio_rt
-            .block_on(client.pointer_move(
-                window_id,
-                Position::pixels(entry.0 as i32, entry.1 as i32),
-            ))
+            .block_on(
+                client.pointer_move(window_id, Position::pixels(entry.0 as i32, entry.1 as i32)),
+            )
             .expect("the first pointer move is injected");
 
         let surface = window.surface().id();
@@ -442,10 +441,9 @@ mod tests {
         );
 
         tokio_rt
-            .block_on(client.pointer_move(
-                window_id,
-                Position::pixels(moved.0 as i32, moved.1 as i32),
-            ))
+            .block_on(
+                client.pointer_move(window_id, Position::pixels(moved.0 as i32, moved.1 as i32)),
+            )
             .expect("the second pointer move is injected");
         wayland
             .wait_for_pointer_event(DEADLINE, "pointer motion on the mapped surface", |event| {
@@ -457,9 +455,11 @@ mod tests {
         // Keyboard capability wiring: the compositor sends the keymap when the client
         // creates the keyboard, and `enter` + `modifiers` when the toplevel takes focus.
         wayland
-            .wait_for_keyboard_event(DEADLINE, "keyboard keymap", |event| {
-                matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0)
-            })
+            .wait_for_keyboard_event(
+                DEADLINE,
+                "keyboard keymap",
+                |event| matches!(event, KeyboardEvent::Keymap { size, .. } if *size > 0),
+            )
             .expect("the compositor sent the keymap to the keyboard object");
         wayland
             .wait_for_keyboard_event(DEADLINE, "keyboard enter on the mapped surface", |event| {

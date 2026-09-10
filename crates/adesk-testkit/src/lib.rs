@@ -91,7 +91,7 @@ pub use runtime::{
 };
 pub use wait::{block_until, poll_until, wait_until, wait_until_async, DEFAULT_POLL_INTERVAL};
 pub use wayland::{
-    AxisKind, ButtonState, ConfiguredSize, KeyboardEvent, KeyState, ModifiersState, PointerEvent,
-    PopupSpec, PumpStats, TestPopup, TestWindow, ToplevelSpec, WaylandTestClient,
-    BTN_LEFT, DEFAULT_SELECTION_TIMEOUT, KEY_C, KEY_LEFTCTRL,
+    AxisKind, ButtonState, ConfiguredSize, KeyState, KeyboardEvent, ModifiersState, PointerEvent,
+    PopupSpec, PumpStats, TestPopup, TestWindow, ToplevelSpec, WaylandTestClient, BTN_LEFT,
+    DEFAULT_SELECTION_TIMEOUT, KEY_C, KEY_LEFTCTRL,
 };

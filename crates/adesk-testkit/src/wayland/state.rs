@@ -460,7 +460,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ClientState {
             }
             // `Motion { time, surface_x, surface_y }` — movement on the focused surface.
             wl_pointer::Event::Motion {
-                surface_x, surface_y, ..
+                surface_x,
+                surface_y,
+                ..
             } => {
                 state.pointer_events.push(PointerEvent::Motion {
                     x: surface_x,
@@ -491,7 +493,9 @@ impl Dispatch<wl_pointer::WlPointer, ()> for ClientState {
             // axis would make a scroll assertion lie).
             wl_pointer::Event::Axis { axis, value, .. } => {
                 if let Some(axis) = input::axis_kind(axis) {
-                    state.pointer_events.push(PointerEvent::Axis { axis, value });
+                    state
+                        .pointer_events
+                        .push(PointerEvent::Axis { axis, value });
                 }
             }
             // `Frame` (since v5) — the end of a group of pointer events.

@@ -267,7 +267,11 @@ impl WaylandTestClient {
         };
         let current = state.current_offer.clone().ok_or_else(missing)?;
         let record = state.offers.get(&current).ok_or_else(missing)?;
-        if !record.mime_types.iter().any(|advertised| advertised == mime) {
+        if !record
+            .mime_types
+            .iter()
+            .any(|advertised| advertised == mime)
+        {
             return Ok(None);
         }
         Ok(Some(record.offer.clone()))
@@ -427,10 +431,10 @@ impl Dispatch<wl_data_source::WlDataSource, ()> for ClientState {
             // this source does not offer (or one for a superseded source) closes the
             // descriptor without writing, which is the only answer the protocol allows.
             wl_data_source::Event::Send { mime_type, fd } => {
-                let matches_current_source = state
-                    .selection_source
-                    .as_ref()
-                    .is_some_and(|source| source.source.id() == proxy.id() && source.mime == mime_type);
+                let matches_current_source =
+                    state.selection_source.as_ref().is_some_and(|source| {
+                        source.source.id() == proxy.id() && source.mime == mime_type
+                    });
                 if matches_current_source {
                     let source = state
                         .selection_source
@@ -597,11 +601,7 @@ mod tests {
         wayland: &mut WaylandTestClient,
     ) -> (TestWindow, WindowId) {
         let window = wayland
-            .create_toplevel(ToplevelSpec::new(
-                APP_ID,
-                "Clipboard",
-                Size::new(320, 200),
-            ))
+            .create_toplevel(ToplevelSpec::new(APP_ID, "Clipboard", Size::new(320, 200)))
             .expect("the toplevel is created");
         window
             .wait_for_configure(DEADLINE)

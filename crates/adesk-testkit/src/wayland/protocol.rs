@@ -214,11 +214,8 @@ pub(crate) fn bind_globals(
         qhandle,
         REQUIRED_XDG_WM_BASE_VERSION..=MAX_XDG_WM_BASE_VERSION,
     )?;
-    let seat = bind_required::<wl_seat::WlSeat>(
-        list,
-        qhandle,
-        REQUIRED_SEAT_VERSION..=MAX_SEAT_VERSION,
-    )?;
+    let seat =
+        bind_required::<wl_seat::WlSeat>(list, qhandle, REQUIRED_SEAT_VERSION..=MAX_SEAT_VERSION)?;
     let data_device_manager = bind_required::<wl_data_device_manager::WlDataDeviceManager>(
         list,
         qhandle,
