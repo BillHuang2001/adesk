@@ -7,7 +7,7 @@ It starts the compositor thread, binds the AGP Unix socket and (when enabled) th
 It owns the process-lifetime concerns no sibling can own: the socket files, the action→observation wiring, subscription fan-out, signal handling and the ordered shutdown sequence.
 It also owns every conversion between sibling crates' overlapping types (`src/translate.rs`), because no sibling depends on another.
 
-Every module is implemented (`src/` has no `todo!()`); `cargo test -p adesk-server` is green — 218 tests across lib, bin and the ten integration targets (144 lib + 9 bin + 65 integration), 0 failed, 0 ignored.
+Every module is implemented (`src/` has no `todo!()`); `cargo test -p adesk-server` is green — 219 tests across lib, bin and the ten integration targets (145 lib + 9 bin + 65 integration), 0 failed, 0 ignored.
 
 ## API Surface
 
