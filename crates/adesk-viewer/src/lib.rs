@@ -23,6 +23,8 @@ mod error;
 mod script;
 mod server;
 mod session;
+#[cfg(test)]
+mod test_support;
 mod transport;
 
 pub use backend::{ChangeSignal, ViewerBackend, ViewerInput};
