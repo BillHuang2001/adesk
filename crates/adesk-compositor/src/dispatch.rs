@@ -49,12 +49,11 @@ pub(crate) fn handle_command(state: &mut State, command: RuntimeCommand) -> Comm
             CommandOutcome::Continue
         }
         RuntimeCommand::RenderOutput {
-            overlays,
             region,
             max_dimension,
             reply,
         } => {
-            let result = state.render_output(&overlays, region, max_dimension);
+            let result = state.render_output(region, max_dimension);
             let _ = reply.send(result.map_err(Into::into));
             CommandOutcome::Continue
         }
@@ -162,7 +161,6 @@ mod tests {
             ),
             (
                 RuntimeCommand::RenderOutput {
-                    overlays: vec![],
                     region: None,
                     max_dimension: None,
                     reply: render_reply(),

@@ -179,10 +179,9 @@ impl InspectionSource for InspectionCache {
     }
 }
 
-/// Renders the full output (`RenderOutput { overlays: [], region: None,
-/// max_dimension: None }`) and snapshots windows/active window (`QueryState`),
-/// cursor, damage, commit and action markers, producing a new
-/// [`InspectionSnapshot`] for the cache.
+/// Renders the full output (`RenderOutput { region: None, max_dimension: None }`)
+/// and snapshots windows/active window (`QueryState`), cursor, damage, commit and
+/// action markers, producing a new [`InspectionSnapshot`] for the cache.
 ///
 /// Overlays are composited at full output resolution and cropped/downscaled
 /// afterwards, so overlay coordinates need no translation.
@@ -194,7 +193,6 @@ impl InspectionSource for InspectionCache {
 pub async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
     let (reply, rendered) = oneshot::channel();
     context.compositor.send(RuntimeCommand::RenderOutput {
-        overlays: Vec::new(),
         region: None,
         max_dimension: None,
         reply,

@@ -1,9 +1,9 @@
 //! Render-element collection for the offscreen pipeline.
 //!
 //! Smithay renders *elements*, not surfaces. This module is the only place that
-//! turns compositor state (a window's surface tree, its popups, the requested
-//! debug overlays) into the two things `adesk-render` needs: an ordered list of
-//! elements and an [`adesk_render::Scene`] that places them.
+//! turns compositor state (a window's surface tree and its popups) into the two
+//! things `adesk-render` needs: an ordered list of elements and an
+//! [`adesk_render::Scene`] that places them.
 //!
 //! # Scene coordinates and scale
 //!
@@ -41,26 +41,21 @@
 //!   to `surface` (popup geometry offsets included). It yields descendants
 //!   *before* their parents, i.e. front-to-back, so [`popup_surfaces`] reverses
 //!   it to restore back-to-front order.
-//! * `SolidColorRenderElement` implements `RenderElement<R>` for every
-//!   `R: Renderer`, so one overlay type works for both backends. Its geometry is
-//!   the scene placement; `SceneNode` locations are derived from it.
 
-use adesk_core::{OverlayKind, Rect, Region};
+use adesk_core::{Rect, Region};
 use adesk_render::{Scene, SceneNode};
 use smithay::{
     backend::renderer::{
         element::{
             render_elements,
-            solid::SolidColorRenderElement,
             surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-            Element, Id, Kind,
+            Element, Kind,
         },
-        utils::CommitCounter,
-        Color32F, ImportAll, Renderer,
+        ImportAll, Renderer,
     },
     desktop::PopupManager,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
-    utils::{Logical, Physical, Point, Rectangle, Scale, Size as SmithaySize},
+    utils::{Logical, Physical, Point, Rectangle, Scale},
 };
 
 use super::OutputWindow;
@@ -72,24 +67,16 @@ use super::OutputWindow;
 /// scale-aware APIs rather than hard-coded in coordinate math.
 pub(crate) const SCENE_SCALE: f64 = 1.0;
 
-/// Thickness of an overlay border, in pixels.
-const OVERLAY_BORDER: i32 = 2;
-
-/// Alpha of the translucent fill the `damage` overlay paints over a window.
-const OVERLAY_DAMAGE_ALPHA: f32 = 0.25;
-
 render_elements! {
     /// Render elements of a full output composition.
     ///
-    /// [`adesk_render::Scene`] is generic over exactly one element type, but an
-    /// output is made of window surfaces *and* solid-color debug overlays. This
-    /// enum aggregates both; Smithay's `render_elements!` macro generates the
-    /// `Element`/`RenderElement` forwarding impls and the `From` conversions.
+    /// [`adesk_render::Scene`] is generic over exactly one element type, and an
+    /// output is made of window surfaces; this enum is that surface element type.
+    /// Smithay's `render_elements!` macro generates the `Element`/`RenderElement`
+    /// forwarding impls and the `From` conversions.
     pub(crate) OutputRenderElements<R> where R: ImportAll;
     /// A window surface: toplevel, subsurface or popup.
     Surface=WaylandSurfaceRenderElement<R>,
-    /// A solid-color debug overlay marker.
-    Overlay=SolidColorRenderElement,
 }
 
 /// Collect the render elements of one window's surface tree.
@@ -166,7 +153,7 @@ where
 }
 
 /// Build the scene of the whole virtual output: the single **visible** window at
-/// its geometry origin, then the requested debug overlays on top.
+/// its geometry origin.
 ///
 /// `windows` is the *candidate* list of every tracked window; `active` marks the
 /// one `adesk-wm` tiled to fill the output. ADesk shows exactly one toplevel at a
@@ -183,7 +170,6 @@ where
 pub(crate) fn output_scene<R>(
     renderer: &mut R,
     windows: &[OutputWindow],
-    overlays: &[OverlayKind],
 ) -> Scene<OutputRenderElements<R>>
 where
     R: Renderer + ImportAll,
@@ -199,11 +185,6 @@ where
     let origin = Point::<i32, Physical>::from((window.geometry.x, window.geometry.y));
     for element in window_elements(renderer, &window.surface, origin) {
         push_element(&mut scene, OutputRenderElements::Surface(element));
-    }
-    // Overlays are computed from the composed window alone: a debug marker must
-    // never point at a window the frame does not show.
-    for overlay in overlay_elements(std::slice::from_ref(window), overlays) {
-        push_element(&mut scene, OutputRenderElements::Overlay(overlay));
     }
     scene
 }
@@ -242,147 +223,6 @@ where
     scene.push(SceneNode::with_damage(element, geometry.loc, damage));
 }
 
-/// One overlay marker: where it is painted (scene coordinates) and its color.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct OverlayMarker {
-    rect: Rect,
-    color: [f32; 4],
-}
-
-/// Build the solid-color elements of the requested debug overlays.
-///
-/// Overlays are debug-only (`docs/protocol.md` §5.7) and never part of
-/// agent-facing captures. [`output_scene`] passes the composed (visible) window
-/// only, so a marker can never point at a window the frame does not show. See
-/// [`overlay_markers`] for what each kind paints.
-pub(crate) fn overlay_elements(
-    windows: &[OutputWindow],
-    overlays: &[OverlayKind],
-) -> Vec<SolidColorRenderElement> {
-    overlay_markers(windows.iter().map(|w| (w.geometry, w.active)), overlays)
-        .into_iter()
-        .map(|marker| {
-            SolidColorRenderElement::new(
-                Id::new(),
-                rect_to_smithay(marker.rect),
-                CommitCounter::default(),
-                Color32F::from(marker.color),
-                Kind::Unspecified,
-            )
-        })
-        .collect()
-}
-
-/// The markers one set of overlay kinds paints over a list of windows.
-///
-/// The list is the **composed** set — one window, per the
-/// single-visible-toplevel invariant — so "every window" below means the window
-/// the frame actually shows.
-///
-/// Overlay rendering is deliberately minimal: the compositor's render pipeline
-/// has no text renderer and no seat state, so it draws **color-coded geometry**,
-/// not labels or cursors. Each requested kind paints a [`OVERLAY_BORDER`]-thick
-/// border just inside every window rectangle, in the kind's own color:
-///
-/// | kind | color | painted on |
-/// |---|---|---|
-/// | `window_ids` | cyan | every window |
-/// | `app_ids` | magenta | every window |
-/// | `focus` | yellow | the active window only |
-/// | `damage` | red + translucent red fill | every window |
-/// | `surface_bounds` | green | every window |
-/// | `cursor` | orange | every window |
-/// | `actions` | white | every window |
-/// | `commit_timing` | blue | every window |
-///
-/// Two kinds that need runtime state this pipeline does not have are drawn as
-/// their window-level stand-in: `damage` fills the window rectangle (per-region
-/// damage is accumulated by `adesk-observer`, not known at render time) and
-/// `cursor` marks the window instead of the pointer position (the seat is not
-/// visible to the renderer). Text labels (`window_ids`/`app_ids`/`actions`/
-/// `commit_timing` values) and cursor tracking are `adesk-inspector`'s job; the
-/// compositor only provides the composited marker.
-fn overlay_markers(
-    windows: impl IntoIterator<Item = (Rect, bool)>,
-    overlays: &[OverlayKind],
-) -> Vec<OverlayMarker> {
-    let mut markers = Vec::new();
-    for (geometry, active) in windows {
-        for &kind in overlays {
-            if kind == OverlayKind::Focus && !active {
-                continue;
-            }
-            let color = overlay_color(kind);
-            if kind == OverlayKind::Damage {
-                // Translucent fill first, border on top, so the window content
-                // stays readable under the damage marker.
-                markers.push(OverlayMarker {
-                    rect: geometry,
-                    color: with_alpha(color, OVERLAY_DAMAGE_ALPHA),
-                });
-            }
-            markers.extend(
-                border_rects(geometry, OVERLAY_BORDER)
-                    .into_iter()
-                    .map(|rect| OverlayMarker { rect, color }),
-            );
-        }
-    }
-    markers
-}
-
-/// The color each overlay kind paints, `R, G, B, A` in `0.0..=1.0`.
-fn overlay_color(kind: OverlayKind) -> [f32; 4] {
-    match kind {
-        OverlayKind::WindowIds => [0.0, 1.0, 1.0, 1.0],
-        OverlayKind::AppIds => [1.0, 0.0, 1.0, 1.0],
-        OverlayKind::Focus => [1.0, 1.0, 0.0, 1.0],
-        OverlayKind::Damage => [1.0, 0.0, 0.0, 1.0],
-        OverlayKind::SurfaceBounds => [0.0, 1.0, 0.0, 1.0],
-        OverlayKind::Cursor => [1.0, 0.5, 0.0, 1.0],
-        OverlayKind::Actions => [1.0, 1.0, 1.0, 1.0],
-        OverlayKind::CommitTiming => [0.0, 0.5, 1.0, 1.0],
-    }
-}
-
-/// `color` with its alpha channel replaced.
-fn with_alpha(color: [f32; 4], alpha: f32) -> [f32; 4] {
-    [color[0], color[1], color[2], alpha]
-}
-
-/// The rectangles of a `thickness`-pixel border drawn *inside* `rect`.
-///
-/// Top and bottom span the full width, left and right only the inner height, so
-/// the four rectangles are disjoint and no pixel is painted twice. A rectangle
-/// too small to hold a ring (`width`/`height` ≤ `2 * thickness`) is returned as a
-/// single filled rectangle instead, so the marker never disappears.
-fn border_rects(rect: Rect, thickness: i32) -> Vec<Rect> {
-    if rect.is_empty() || thickness <= 0 {
-        return Vec::new();
-    }
-    let w = dimension(rect.w);
-    let h = dimension(rect.h);
-    let t = thickness.min(w).min(h);
-    if w <= 2 * t || h <= 2 * t {
-        return vec![rect];
-    }
-    let inner_height = (h - 2 * t) as u32;
-    vec![
-        Rect::new(rect.x, rect.y, rect.w, t as u32),
-        Rect::new(rect.x, rect.y + h - t, rect.w, t as u32),
-        Rect::new(rect.x, rect.y + t, t as u32, inner_height),
-        Rect::new(rect.x + w - t, rect.y + t, t as u32, inner_height),
-    ]
-}
-
-/// Converts a core [`Rect`] into a Smithay physical rectangle.
-pub(crate) fn rect_to_smithay(rect: Rect) -> Rectangle<i32, Physical> {
-    Rectangle::new(
-        Point::from((rect.x, rect.y)),
-        SmithaySize::from((dimension(rect.w), dimension(rect.h))),
-    )
-}
-
 /// Converts a Smithay physical rectangle into a core [`Rect`] (negative sizes
 /// clamp to zero; the pipeline never produces them, but a panic is not an
 /// option on a render path).
@@ -400,16 +240,12 @@ fn logical_to_physical(offset: Point<i32, Logical>) -> Point<i32, Physical> {
     offset.to_f64().to_physical(SCENE_SCALE).to_i32_round()
 }
 
-/// Saturating `u32` → `i32` (core dimensions are `u32`, Smithay uses `i32`).
-fn dimension(value: u32) -> i32 {
-    value.min(i32::MAX as u32) as i32
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::backend::renderer::element::Id;
     use smithay::backend::renderer::pixman::PixmanRenderer;
-    use smithay::backend::renderer::utils::{DamageSet, OpaqueRegions};
+    use smithay::backend::renderer::utils::{CommitCounter, DamageSet, OpaqueRegions};
     use smithay::utils::{Buffer as BufferCoords, Size};
 
     /// Creates the software renderer; pixman needs no display, GPU or EGL.
@@ -551,23 +387,14 @@ mod tests {
     ///
     /// `adesk_render::render_scene` turns an empty scene into a clear-color
     /// frame, so "nothing visible" is a composition, not an error;
-    /// `headless.rs`'s `pixman_output_without_windows_is_a_clear_frame` and
-    /// `pixman_output_with_overlays_but_no_windows_is_still_a_clear_frame` assert
+    /// `headless.rs`'s `pixman_output_without_windows_is_a_clear_frame` asserts
     /// the resulting pixels. The pixel-level proof with a *tracked but inactive*
     /// window needs a real `WlSurface` (`adesk-testkit`) and is provided by
     /// `tests/output_composition.rs`; here the scene-level fact is asserted.
     #[test]
     fn output_scene_without_a_visible_window_is_empty() {
         let mut renderer = pixman();
-        let scene = output_scene(
-            &mut renderer,
-            &[],
-            &[
-                OverlayKind::WindowIds,
-                OverlayKind::Focus,
-                OverlayKind::Damage,
-            ],
-        );
+        let scene = output_scene(&mut renderer, &[]);
 
         assert!(scene.is_empty(), "nothing is visible, so nothing is drawn");
         assert!(scene.damage().is_empty());
@@ -575,147 +402,16 @@ mod tests {
     }
 
     #[test]
-    fn border_rects_are_disjoint_and_inside_the_rect() {
-        let rects = border_rects(Rect::new(5, 7, 40, 30), 2);
-        assert_eq!(
-            rects,
-            vec![
-                Rect::new(5, 7, 40, 2),
-                Rect::new(5, 35, 40, 2),
-                Rect::new(5, 9, 2, 26),
-                Rect::new(43, 9, 2, 26),
-            ]
-        );
-        for rect in &rects {
-            let inner = rect.intersect(&Rect::new(5, 7, 40, 30));
-            assert_eq!(inner, Some(*rect), "border escapes the window rect");
-        }
-    }
-
-    #[test]
-    fn border_rects_fill_rects_too_small_for_a_ring() {
-        assert_eq!(
-            border_rects(Rect::new(0, 0, 4, 4), 2),
-            vec![Rect::new(0, 0, 4, 4)]
-        );
-        assert_eq!(
-            border_rects(Rect::new(1, 1, 1, 10), 2),
-            vec![Rect::new(1, 1, 1, 10)]
-        );
-        assert!(border_rects(Rect::EMPTY, 2).is_empty());
-        assert!(border_rects(Rect::new(0, 0, 10, 10), 0).is_empty());
-    }
-
-    #[test]
-    fn overlay_markers_border_every_window_for_most_kinds() {
-        let markers = overlay_markers(
-            [(Rect::new(0, 0, 20, 20), false)],
-            &[OverlayKind::WindowIds],
-        );
-        assert_eq!(markers.len(), 4, "one border ring per window");
-        assert!(markers
-            .iter()
-            .all(|marker| marker.color == overlay_color(OverlayKind::WindowIds)));
-    }
-
-    #[test]
-    fn focus_overlay_only_marks_the_active_window() {
-        let windows = [
-            (Rect::new(0, 0, 20, 20), false),
-            (Rect::new(20, 0, 20, 20), true),
-        ];
-        let markers = overlay_markers(windows, &[OverlayKind::Focus]);
-        assert_eq!(markers.len(), 4);
-        assert!(
-            markers
-                .iter()
-                .all(|marker| marker.rect.x >= 20
-                    && marker.color == overlay_color(OverlayKind::Focus))
-        );
-    }
-
-    #[test]
-    fn damage_overlay_fills_translucently_below_its_border() {
-        let window = Rect::new(2, 3, 30, 30);
-        let markers = overlay_markers([(window, true)], &[OverlayKind::Damage]);
-        assert_eq!(markers.len(), 5, "fill plus four border rects");
-        assert_eq!(markers[0].rect, window);
-        assert_eq!(markers[0].color, [1.0, 0.0, 0.0, OVERLAY_DAMAGE_ALPHA]);
-        assert_eq!(markers[1].color, overlay_color(OverlayKind::Damage));
-    }
-
-    #[test]
-    fn overlay_markers_are_empty_without_windows_or_kinds() {
-        assert!(overlay_markers([], &[OverlayKind::Focus]).is_empty());
-        assert!(overlay_markers([(Rect::new(0, 0, 10, 10), true)], &[]).is_empty());
-    }
-
-    /// Debug overlays mark the composed window only.
-    ///
-    /// `output_scene` computes the markers from the selected candidate, so the
-    /// rectangle of a tracked-but-invisible window can never appear in an
-    /// inspection frame.
-    #[test]
-    fn composed_overlays_mark_only_the_selected_window() {
-        let candidates = [
-            (Rect::new(0, 0, 20, 20), false),
-            (Rect::new(20, 0, 20, 20), true),
-            (Rect::new(40, 0, 20, 20), false),
-        ];
-        let index = visible_index(candidates.iter().map(|(_, active)| *active))
-            .expect("one candidate is active");
-        let composed = candidates[index].0;
-        let markers = overlay_markers(
-            [candidates[index]],
-            &[OverlayKind::WindowIds, OverlayKind::Focus],
-        );
-
-        assert_eq!(markers.len(), 8, "two kinds, four border rects each");
-        for marker in &markers {
-            assert_eq!(
-                marker.rect.intersect(&composed),
-                Some(marker.rect),
-                "{:?} marks a window that is not composed",
-                marker.rect
-            );
-        }
-
-        // Nothing selected: `output_scene` returns before building any overlay.
-        assert!(overlay_markers([], &[OverlayKind::WindowIds]).is_empty());
-    }
-
-    #[test]
-    fn overlay_colors_are_distinct_per_kind() {
-        let kinds = [
-            OverlayKind::WindowIds,
-            OverlayKind::AppIds,
-            OverlayKind::Focus,
-            OverlayKind::Damage,
-            OverlayKind::SurfaceBounds,
-            OverlayKind::Cursor,
-            OverlayKind::Actions,
-            OverlayKind::CommitTiming,
-        ];
-        for (index, kind) in kinds.iter().enumerate() {
-            for other in &kinds[index + 1..] {
-                assert_ne!(
-                    overlay_color(*kind),
-                    overlay_color(*other),
-                    "{kind:?} and {other:?} must be distinguishable"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn rect_conversions_round_trip() {
-        let rect = Rect::new(-4, 9, 1280, 800);
-        assert_eq!(to_core_rect(rect_to_smithay(rect)), rect);
-
+    fn rect_conversions_clamp_negative_sizes() {
         // Smithay rejects negative sizes at construction, so `to_core_rect`'s
         // clamp is defensive only; a zero-size rect is the smallest real input.
         let smithay = Rectangle::<i32, Physical>::new(Point::from((1, 2)), Size::from((0, 0)));
         assert_eq!(to_core_rect(smithay), Rect::new(1, 2, 0, 0));
+
+        // Coordinates may be negative even though sizes are not.
+        let located =
+            Rectangle::<i32, Physical>::new(Point::from((-4, 9)), Size::from((1280, 800)));
+        assert_eq!(to_core_rect(located), Rect::new(-4, 9, 1280, 800));
     }
 
     #[test]

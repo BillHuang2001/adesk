@@ -136,7 +136,7 @@ pub async fn render_window(
     .await
 }
 
-/// Composes the whole virtual output without debug overlays (`region`/`max_dimension` `None`).
+/// Composes the whole virtual output (`region`/`max_dimension` `None`).
 ///
 /// The reply is the composed frame: the same readback the server's `inspect_capture` returns,
 /// with none of its encoding — which is what makes whole-output pixel assertions possible
@@ -144,7 +144,6 @@ pub async fn render_window(
 pub async fn render_output(runtime: &TestRuntime) -> adesk_core::Result<RenderedFrame> {
     reply(runtime.compositor(), move |reply| {
         RuntimeCommand::RenderOutput {
-            overlays: Vec::new(),
             region: None,
             max_dimension: None,
             reply,

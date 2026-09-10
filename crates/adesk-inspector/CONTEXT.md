@@ -204,14 +204,13 @@ post-processing to the server and drop the dependency.
 
 - Test-only public API (exercised by `./tests/`, no production consumer): `Inspector::render_from_source`, `InspectionRequest::{new, region, max_dimension, is_identity}`, `InspectionInputBuilder::cursor_at`, `InspectionInput::size`, `Canvas::line`.
 - `Error::Render` (`./src/error.rs`) is never constructed: `./src/post.rs` delegates to the infallible `adesk_render::crop`/`downscale`, so the `#[from]` arm exists only for a hand-written value (the server's error-mapping tests).
-- A second, independent implementation of the same §5.7 overlays lives in `adesk-compositor` (`src/render/elements.rs`: `overlay_elements`, `overlay_markers`, `overlay_color`, `border_rects`, `with_alpha`; consts `OVERLAY_BORDER = 2`, `OVERLAY_DAMAGE_ALPHA = 0.25`). It has **no per-kind colour agreement** with this crate: its `overlay_color` (f32 0..=1) is cyan/magenta/yellow/red/green/orange/white/blue for `window_ids`/`app_ids`/`focus`/`damage`/`surface_bounds`/`cursor`/`actions`/`commit_timing` respectively, whereas this crate paints white/white/green/white-border+red-fill/white/yellow/cyan/magenta for the same eight kinds — i.e. all eight differ. It also draws only 2 px geometry borders (no text, no real cursor; it marks every window for `cursor` and the window rect for `damage`). The compositor path is unreachable in production: `adesk-server` only ever sends `RuntimeCommand::RenderOutput { overlays: vec![], .. }` (`crates/adesk-server/src/inspection.rs::refresh`), and no other crate sends non-empty overlays; the compositor overlay code is exercised only by `elements.rs` unit tests and `render/headless.rs`'s no-window test. Deleting it would break nothing outside the compositor's own tests; the inspector is the sole production overlay painter.
 
 ## Notes for Agents
 
 - **What `adesk-server` must do** (the only consumer):
   1. Implement `InspectionSource for ServerState`:
-     render the full output with `RenderOutput { overlays: vec![], region: None, max_dimension:
-     None }` (never crop before overlays); snapshot windows/active window (`QueryState`), cursor
+     render the full output with `RenderOutput { region: None, max_dimension: None }` (never crop
+     before overlays); snapshot windows/active window (`QueryState`), cursor
      position, damage union and the observer's last `commit_seq` + age; map action-registry entries
      to `ActionMarker` (`age_ms = now_ms - ts_ms`, position in output coordinates); skip state for
      overlays not present in `overlays`.
