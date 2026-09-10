@@ -681,14 +681,16 @@ async fn focus_follows_activation() -> Result<()> {
 ///
 /// The test maps one toplevel (own app id, title and fill) and waits for every lifecycle
 /// event of the map, asserts `QueryState` reports the map-time app id, then flips the app id
-/// through the real protocol and asserts the model reports the new value. The write-back is
-/// metadata-only, so it must emit no runtime event and change nothing else about the window.
+/// through the real protocol and asserts the model reports the new value. The write-back
+/// itself is metadata-only and emits nothing; it is separated from the `set_app_id` request
+/// by a *commit barrier* on the same connection (see the inline comment below), whose own
+/// `surface_commit` event and single commit step are the only changes the tail allows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn late_app_id_reaches_the_window_model() -> Result<()> {
     let runtime = TestRuntime::start_with(test_config()).await?;
     // The event broadcast never replays: tap before the commit that maps the surface.
     let mut events = EventAssert::tap(&runtime);
-    let mut client = runtime.wayland_client()?;
+    let client = runtime.wayland_client()?;
     let fill = FillPattern::checker(8, [0, 200, 0, 255], [0, 0, 0, 255]);
 
     // --- map: the client's first commit carries the model-time app id ------------------
@@ -727,12 +729,39 @@ async fn late_app_id_reaches_the_window_model() -> Result<()> {
 
     // --- the late `set_app_id` ----------------------------------------------------------
     window.set_app_id(APP_ID_LATE)?;
-    // Synchronization barrier, not a sleep: the round trip completes only after the
-    // compositor dispatched the `set_app_id` request it precedes (one client request queue,
-    // processed in order), and `QueryState` is served afterwards from the FIFO command
-    // channel — so the query below cannot observe the pre-change value.
-    client.roundtrip().await?;
+    // Barrier, not a sleep and *not* `WaylandTestClient::roundtrip`: `roundtrip` only flushes
+    // and waits for one reader-thread poll cycle, so it proves nothing about whether the
+    // compositor has dispatched the requests that precede it — making the `QueryState` below
+    // racy (observed under full-workspace load). A commit on the *same* connection is sound:
+    // Wayland dispatches one connection's requests in order, so observing the commit event
+    // proves the `set_app_id` sent before it on the wire was already dispatched, and smithay
+    // applies `set_app_id` inline while dispatching it (`app_id_changed` has run by then).
+    // The barrier commit is this test's own request, not a consequence of the app-id change,
+    // and its one event / one commit step are accounted for explicitly below.
+    window.commit_pending()?;
+    let seen_before_barrier = events.seen().len();
+    let barrier = events
+        .wait_for_expected(&Expected::SurfaceCommit(id), DEADLINE)
+        .await?;
+    // Everything received while waiting is recorded, so a shorter tail would mean a skipped
+    // event: an app-id write-back that emitted anything would show up here.
+    let between = &events.seen()[seen_before_barrier..];
+    assert_eq!(
+        between.len(),
+        1,
+        "the app-id write-back emits no event, so the barrier commit is the only event \
+         between `set_app_id` and it, got {between:?}"
+    );
+    let RuntimeEvent::SurfaceCommit {
+        commit_seq: barrier_commit_seq,
+        ..
+    } = &barrier
+    else {
+        panic!("wait_for_expected(SurfaceCommit({id})) returned {barrier:?}");
+    };
 
+    // The public observation path is the assertion: the model — not the protocol — must
+    // report the late value.
     let late = query_state(&runtime).await?;
     let after = late.window(id).expect("the window is still tracked");
     assert_eq!(
@@ -742,17 +771,27 @@ async fn late_app_id_reaches_the_window_model() -> Result<()> {
         after.app_id
     );
 
-    // --- and it changed nothing else ----------------------------------------------------
+    // --- and, beyond the barrier commit, it changed nothing else -------------------------
     // The write-back is metadata-only: AGP v1 has no app-id event, so `Expected::Any` — the
-    // strongest form of "emits no event" — must not match anything. Bounded by QUIET_BOUND.
+    // strongest form of "emits no event" — must not match anything after the barrier commit.
+    // Bounded by QUIET_BOUND.
     events.expect_none(&Expected::Any, QUIET_BOUND).await?;
     assert_eq!(
-        late.seq, mapped.seq,
-        "no event was emitted, so the sequence watermark did not move"
+        late.seq,
+        barrier.seq(),
+        "the barrier commit is the newest event, so it is the sequence watermark"
     );
     assert_eq!(
-        after.last_commit_seq, before.last_commit_seq,
-        "the late app id is not a commit"
+        after.last_commit_seq,
+        before.last_commit_seq + 1,
+        "the barrier commit advanced the window's commit counter by exactly one \
+         ({} -> {}), not by more",
+        before.last_commit_seq,
+        after.last_commit_seq
+    );
+    assert_eq!(
+        *barrier_commit_seq, after.last_commit_seq,
+        "the event and the model agree on the barrier commit's sequence"
     );
     assert_eq!(
         after.geometry, before.geometry,
@@ -760,6 +799,20 @@ async fn late_app_id_reaches_the_window_model() -> Result<()> {
     );
     assert_eq!(after.state, before.state, "the window stays Active");
     assert_eq!(after.title, before.title, "only the app id changed");
+    assert_eq!(
+        late.active_window_id, mapped.active_window_id,
+        "the app id is not an activation"
+    );
+    assert_eq!(
+        late.keyboard_focus, mapped.keyboard_focus,
+        "the app id moves no keyboard focus"
+    );
+    assert_eq!(
+        late.len(),
+        1,
+        "the late app id does not add or remove a window, got {:?}",
+        late.windows
+    );
     assert!(
         window.pending_configure().is_none(),
         "an app-id change re-configures nothing, got {:?}",
