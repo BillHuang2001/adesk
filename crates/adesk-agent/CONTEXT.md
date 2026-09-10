@@ -60,6 +60,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Provider trait, factory, kinds | `./src/provider/mod.rs` |
 | Scripted/replayable provider | `./src/provider/mock.rs` |
 | OpenAI-compatible provider + prompt schema | `./src/provider/openai.rs` |
+| Synthetic "dummy VLM" provider (fixed/random, no I/O) | `./src/provider/dummy.rs` |
 | Metrics recorder, report, latency, token estimate | `./src/metrics.rs` |
 | Built-in scenarios, expectations, runner | `./src/scenario.rs` |
 | `RunReport` artifact | `./src/report.rs` |
