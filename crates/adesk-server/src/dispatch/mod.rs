@@ -24,7 +24,10 @@ pub mod apps;
 /// `observe`, `wait_for_change`, `wait_for_quiet`).
 pub mod capture;
 /// The compositor-command seam shared by the groups (`command + reply + await`).
-pub mod command;
+///
+/// Every item is `pub(crate)`; the module is crate-private so it adds no public
+/// API path.
+pub(crate) mod command;
 /// §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`).
 pub mod events;
 /// §5.5 input methods (11 methods, all returning `ActionResult` except
