@@ -1,4 +1,4 @@
-//! Crate-local error type.
+//! Crate-local error type and its mapping to the umbrella [`adesk_core::Error`].
 
 use adesk_core::WindowId;
 
@@ -16,12 +16,25 @@ pub enum Error {
     UnknownWindow(WindowId),
 }
 
+/// Umbrella mapping mandated by `docs/core-api.md` §errors: every crate-local
+/// error type implements `From<LocalError> for adesk_core::Error`. This is the
+/// `?`-conversion path for callers that return [`adesk_core::Error`]; it is kept
+/// as shipped library API even though no in-workspace caller exercises it.
+impl From<Error> for adesk_core::Error {
+    fn from(err: Error) -> adesk_core::Error {
+        match err {
+            Error::UnknownWindow(id) => adesk_core::Error::unknown_window(id),
+        }
+    }
+}
+
 /// Crate-wide result alias: `Result<T, adesk_wm::Error>`.
 pub type Result<T> = std::result::Result<T, Error>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adesk_core::ErrorCode;
 
     #[test]
     fn display_is_stable() {
@@ -29,5 +42,12 @@ mod tests {
             Error::UnknownWindow(WindowId(9)).to_string(),
             "unknown window 9"
         );
+    }
+
+    #[test]
+    fn unknown_window_maps_to_core_unknown_window() {
+        let err: adesk_core::Error = Error::UnknownWindow(WindowId(9)).into();
+        assert_eq!(err.code, ErrorCode::UnknownWindow);
+        assert_eq!(err.message, "unknown window 9");
     }
 }
