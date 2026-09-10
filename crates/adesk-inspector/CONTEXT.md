@@ -83,6 +83,7 @@ Painters preserve input order for windows, damage rects and action markers.
 - Overlays are drawn only in `paint::CANONICAL_ORDER`, never in caller order; the same
   `InspectionInput` must always produce the same bytes.
 - No panics on render paths: bad frames/requests return `Error`; every draw is bounds- and clip-checked.
+- Canvas row indexing relies on the `ImageBuffer` invariant (`stride >= width * 4`, `data.len() == stride * height`); only the single-pixel path (`Canvas::offset`) re-checks byte bounds, so a struct-literal buffer violating the invariant would panic instead of erroring (all `ImageBuffer` constructors in `adesk-core` enforce it).
 - `tracing` logs sizes/counts only — never pixel payloads.
 - Agent-facing capture paths must never include overlays.
 
