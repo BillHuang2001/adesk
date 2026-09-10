@@ -21,6 +21,17 @@ path = "src/lib.rs"
 name = "adesk-agent"
 path = "src/main.rs"
 
+# Fixture application for the `e2e` suite: the launch tests write a `.desktop` entry whose
+# `Exec` points at this example (an example, not a bin, because examples are built together
+# with this package's dev-dependencies and are resolved next to the test binary by
+# `tests/e2e_support/mod.rs`). Gated on `e2e` so the default and `test-support` builds
+# never compile it.
+
+[[example]]
+name = "adesk-e2e-app"
+path = "examples/adesk-e2e-app.rs"
+required-features = ["e2e"]
+
 [features]
 default = []
 # Compiles `adesk_agent::testing` (ScriptedClient), the socket-free fake used by

@@ -11,12 +11,12 @@ use adesk_agent::{
     AgentDecision, AgentLoop, AgpClient, LoopConfig, MetricsReport, MockProvider, Scenario,
     ScenarioId, ScenarioReport, ScenarioRunner, StepRecord, TaskDescription,
 };
-use adesk_core::{Button, Observation, Position, WindowId};
+use adesk_core::{AppId, Button, Observation, Position, WindowId};
 use adesk_testkit::{
-    helper_bin_path, EventAssert, Expected, FillPattern, Size, TestRuntime, TestRuntimeConfig,
-    TestWindow, ToplevelSpec, WaylandTestClient,
+    helper_bin_path, DesktopEntryFixture, EventAssert, Expected, FillPattern, FixtureDir, Size,
+    TestAppSpec, TestRuntime, TestRuntimeConfig, TestWindow, TestkitError, ToplevelSpec,
+    WaylandTestClient,
 };
-
 /// Deadline for every bounded harness wait.
 pub const DEADLINE: Duration = Duration::from_secs(10);
 
@@ -35,14 +35,91 @@ pub const TITLE_CHANGE_DELAY: Duration = Duration::from_millis(800);
 /// Both `adesk_testkit::TestkitError` and `adesk_agent::Error` convert into this.
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
-/// The fixture helper binary, with a build instruction when it is missing.
-pub fn require_helper_bin() -> PathBuf {
-    helper_bin_path("adesk-test-app").unwrap_or_else(|error| {
-        panic!(
-            "the `adesk-test-app` fixture helper is missing ({error}); build it first:\n  \
-             ./scripts/dev.sh cargo build -p adesk-testkit --bin adesk-test-app"
-        )
-    })
+/// Name of this package's example that serves as the suite's fixture application.
+const FIXTURE_APP: &str = "adesk-e2e-app";
+
+/// Testkit's own fixture helper, used as a fallback when it happens to be built.
+const TESTKIT_HELPER: &str = "adesk-test-app";
+
+/// The fixture application binary that the launch tests put in a `.desktop` entry.
+///
+/// Resolution order:
+///
+/// 1. `target/<profile>/examples/adesk-e2e-app` — `cargo test` builds this package's
+///    examples next to its test binaries (tests live in `target/<profile>/deps/`, examples
+///    in `target/<profile>/examples/`), so the path is deterministic and needs no globbing;
+/// 2. `adesk_testkit::helper_bin_path("adesk-test-app")` — an environment that already
+///    built testkit's own helper keeps working.
+///
+/// Otherwise panics with the commands that build the example.
+pub fn fixture_app_bin() -> PathBuf {
+    if let Some(bundled) = bundled_fixture_app() {
+        return bundled;
+    }
+    if let Ok(testkit_helper) = helper_bin_path(TESTKIT_HELPER) {
+        return testkit_helper;
+    }
+    let searched = examples_dir()
+        .map(|dir| dir.display().to_string())
+        .unwrap_or_else(|| String::from("<unknown>"));
+    panic!(
+        "no fixture application found: `{FIXTURE_APP}` is missing from {searched} and \
+         testkit's `{TESTKIT_HELPER}` was not found next to the test binary or on $PATH; \
+         build the example first:\n  \
+         ./scripts/dev.sh cargo test -p adesk-agent --features e2e --no-run\n\
+         or\n  \
+         ./scripts/dev.sh cargo build -p adesk-agent --example {FIXTURE_APP} --features e2e"
+    )
+}
+
+/// `target/<profile>/examples/<FIXTURE_APP><EXE_SUFFIX>` when that file exists.
+fn bundled_fixture_app() -> Option<PathBuf> {
+    let candidate = examples_dir()?.join(format!("{FIXTURE_APP}{}", std::env::consts::EXE_SUFFIX));
+    candidate.is_file().then_some(candidate)
+}
+
+/// The `examples` directory belonging to the running test binary.
+///
+/// A test binary lives in `target/<profile>/deps/`, so its grandparent is the profile
+/// directory that also holds `examples/`.
+fn examples_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.parent()?.parent()?.join("examples"))
+}
+
+/// Writes the `.desktop` entry that launches `spec` through this package's fixture app.
+///
+/// Mirrors [`TestAppSpec::desktop_entry`] exactly — `Name` = the spec's title,
+/// `StartupWMClass` = the app id (the registry's window↔app correlation depends on it),
+/// `Exec` = the program followed by [`TestAppSpec::cli_args`] — except that the program is
+/// [`fixture_app_bin`] rather than testkit's `adesk-test-app`, which a downstream crate
+/// cannot point at its own binary.
+pub fn write_app(fixtures: &FixtureDir, spec: &TestAppSpec) -> Result<AppId, TestkitError> {
+    let program = fixture_app_bin();
+    let program = program.to_str().ok_or_else(|| {
+        TestkitError::Fixture(format!(
+            "fixture app path {} is not valid UTF-8",
+            program.display()
+        ))
+    })?;
+    let mut exec = vec![program.to_string()];
+    exec.extend(spec.cli_args());
+    let mut entry = DesktopEntryFixture::new(spec_title(spec), exec);
+    entry.startup_wm_class = Some(spec.app_id().as_str().to_string());
+    fixtures.write_entry(spec.app_id().as_str(), &entry)
+}
+
+/// The window title `spec` carries.
+///
+/// [`TestAppSpec`] keeps its title private and exposes it only through
+/// [`TestAppSpec::cli_args`], whose grammar always contains `--title <TITLE>` before any
+/// extra arguments; the first occurrence is the spec's own title.
+fn spec_title(spec: &TestAppSpec) -> String {
+    let args = spec.cli_args();
+    args.iter()
+        .position(|arg| arg == "--title")
+        .and_then(|index| args.get(index + 1).cloned())
+        .unwrap_or_else(|| spec.app_id().as_str().to_string())
 }
 
 /// Loop config for real-runtime runs: no retry backoff (tests must never sleep).

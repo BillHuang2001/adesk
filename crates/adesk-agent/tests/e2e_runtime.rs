@@ -8,10 +8,15 @@
 //! installed application is involved: the renderer is pixman and the only provider is
 //! [`MockProvider`], so the whole suite is deterministic and offline.
 //!
-//! Prerequisite: the fixture helper binary must exist —
-//! `./scripts/dev.sh cargo build -p adesk-testkit --bin adesk-test-app`. Launch tests
-//! panic with that instruction when it is missing (downstream crates cannot use
-//! `CARGO_BIN_EXE_*`).
+//! Prerequisites: none beyond the dev shell — the suite is self-contained. The two launch
+//! tests need a real application to launch, and it ships with this package as the example
+//! `examples/adesk-e2e-app.rs`, which `cargo test --features e2e` builds automatically
+//! next to this test binary. `tests/e2e_support/mod.rs::fixture_app_bin()` resolves it
+//! from `target/<profile>/examples/`, falling back to testkit's pre-built
+//! `adesk-test-app` helper; the `.desktop` entry is composed there from the public
+//! `DesktopEntryFixture`/`FixtureDir::write_entry` API because testkit's
+//! `TestAppSpec::desktop_entry`/`TestApp::spawn` resolve their program through
+//! `helper_bin_path("adesk-test-app")`, which a downstream crate cannot redirect.
 //!
 //! | Test | What it proves against a live runtime |
 //! |---|---|
@@ -102,13 +107,12 @@ async fn ping_reports_protocol_version() -> TestResult {
 /// without reading a single pixel back.
 #[tokio::test]
 async fn scenario_launch() -> TestResult {
-    require_helper_bin();
     let fixtures = FixtureDir::new()?;
     let spec = adesk_testkit::TestAppSpec::new(LAUNCHED_APP_ID)
         .with_title("Files")
         .with_size(Size::new(320, 200))
         .with_exit_after(HELPER_LIFETIME);
-    let app_id = fixtures.write_app(&spec)?;
+    let app_id = write_app(&fixtures, &spec)?;
     assert_eq!(app_id, AppId::from(LAUNCHED_APP_ID));
 
     // Launching needs the process env: the registry spawns the child with the
@@ -742,7 +746,6 @@ async fn determinism_identical_metrics() -> TestResult {
 /// loop, no screenshot loop and no display.
 #[tokio::test]
 async fn capstone_launch_window_observe_input_capture() -> TestResult {
-    require_helper_bin();
     let fixtures = FixtureDir::new()?;
     let fill = FillPattern::solid_rgb(20, 160, 90);
     let spec = adesk_testkit::TestAppSpec::new(LAUNCHED_APP_ID)
@@ -750,8 +753,7 @@ async fn capstone_launch_window_observe_input_capture() -> TestResult {
         .with_size(Size::new(320, 200))
         .with_fill(fill)
         .with_exit_after(HELPER_LIFETIME);
-    let app_id = fixtures.write_app(&spec)?;
-
+    let app_id = write_app(&fixtures, &spec)?;
     let runtime = TestRuntime::start_with(
         TestRuntimeConfig::new()
             .with_fixture_dir(&fixtures)
