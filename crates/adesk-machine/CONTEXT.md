@@ -74,4 +74,5 @@ Tests in `./tests/`, no container engine/display/GPU/network:
 - The default `MachineSpec` describes the ADesk machine (image + command running `adesk-server` + a viewer socket mount); keep that default coherent with `docs/machine.md` §3/§5.
 - This crate is an interface + a reference backend, not an orchestrator: multi-host scheduling and image building are out of scope (`docs/machine.md` §8).
 ## Status
-Skeleton only: `src/lib.rs` carries the crate attributes and docs; every module above is **not yet implemented**. Implement the surface exactly as documented here.
+Foundation layer landed: `error`, `spec`, `state`, `runtime` (the `ContainerRuntime` trait + `RuntimeKind`), `registry` and `approval` are fully implemented with in-module unit tests, and `src/lib.rs` re-exports the whole surface at the crate root.
+Still placeholders (module-doc line only, no code): `src/manager.rs`, `src/host.rs`, `src/runtime/mock.rs`, `src/runtime/podman.rs`; `src/main.rs` is still the stub binary. `src/lib.rs` keeps `pub use host::*;` / `pub use manager::*;` guarded by a line-scoped `#[allow(unused_imports)]` until those modules gain items.
