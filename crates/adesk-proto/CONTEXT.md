@@ -76,6 +76,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `EventKind::SurfaceDamage` is a filter alias, never an emitted kind: durable commits are `surface_commit` (which carries `damage`), and `matches` returns true only for commits with non-empty damage; `EventPayload::from_data` rejects it with `Malformed`.
 - `EventKind::InspectFrame` is a 12th, non-subscribable kind so `inspect_subscribe` pushes are typed; the §5.6 eleven filterable kinds are exactly `SUBSCRIBABLE`.
 - `QuietEvent` and `InspectFrameEvent` are additive data structs for the two spec-unnamed kinds (§7 allows additions).
+- `EventKind::Quiet` is subscribable (`is_subscribable()` returns true; it is in `SUBSCRIBABLE`) but protocol-only: no `RuntimeEvent` maps to `EventPayload::Quiet` (`from_runtime` has no such arm), `EventKind::Quiet::matches` is always false, and within this crate the payload is produced only by wire decoding (`EventPayload::from_data`) and tests.
 - Response results are untyped at frame level (`ResultPayload(serde_json::Value)`): a codec cannot correlate an `id` to a method, so server/client decode with the method's typed result via `ResultPayload::decode::<R>()`.
 - All decode entry points (`decode_frame`, `NdjsonCodec::{decode, decode_str}`) route through crate-internal `Frame::from_value`, because serde's `Deserialize` cannot carry `ProtoError` payloads while the frozen acceptance spec requires exact `UnknownMethod(name)`/`Malformed(_)`/`UnknownEventKind(name)`; the serde `Deserialize` impls map errors to generic serde errors.
 - `Frame::from_value` discrimination order is `event` → `method` → `id` + exactly one outcome; missing/null `params`/`data` are treated as `{}`; non-objects and unrecognized shapes are `Malformed`; JSON syntax errors are `Json`/`Malformed`.
@@ -86,6 +87,8 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `ProtoError::error_code()` maps `UnknownMethod` → `ErrorCode::UnknownMethod`, `VersionMismatch` → `ProtocolVersionMismatch` and everything else → `InvalidRequest`.
 - `CaptureResult` and `InspectCaptureResult` derive `PartialEq` but not `Eq` because `ImagePayload::scale` is `f64`.
 - Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+- The `quiet_ms=250` default is scoped to `WaitForQuietParams`; `Condition::Quiet { quiet_ms }` has no serde default, so an `observe`/`until` of `{"type":"quiet"}` without `quiet_ms` fails as `InvalidParams`, and no field on `ObserveParams`/`WaitForChangeParams` can carry a quiet threshold for a non-quiet condition.
+- `QuietEvent.quiet_ms` is required when decoding `quiet` event data (`window_id` is optional).
 - `ImagePayload::from_rgba8` rejects dimension/byte-count overflow and length mismatch with `Malformed`; `to_rgba8_buffer` is strict — non-`Rgba8` format, `stride != width*4` (including `stride: null`), or length mismatch is an error.
 - Base64 encoding is infallible in `base64` 0.22; `ProtoError::Base64` is reachable only on decode paths.
 

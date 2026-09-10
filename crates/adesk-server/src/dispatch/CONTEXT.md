@@ -52,6 +52,9 @@ Shared internal helpers (not public API):
 - Input handlers (§5.5) call `ObserverService::record_action` BEFORE any compositor command and run inside `Session::input()` so they keep submission order per connection; keyboard methods activate a named, unfocused `window_id` first (protocol §5.5).
 - `activate_window` / `close_window` are runtime-native `RuntimeCommand`s — never synthesized input.
 - Observation methods await the observer first, render only afterwards and only when `include_image` is set; timeouts are observations with `timed_out: true`, never errors.
+- A per-request quiet threshold reaches the observer only when the condition is quiet: `wait_for_quiet` is the only method reading `params.quiet_ms` (proto default 250) into `QuietSpec::quiet_ms`; `observe` carries `quiet_ms` only inside `until: {"type":"quiet","quiet_ms":N}` (required there, no wire default); `wait_for_change` has no quiet field at all.
+- For a non-quiet condition (`change`/`timeout`) the `quiet` evidence flag is therefore computed against the observer's configured `default_quiet_ms` — 250, because `Server::start` builds `ObserverService::new()` (`src/server.rs:75`) and there is no `with_config` call site.
+- The returned `Observation` is not post-processed: `translate::observe_result` only pairs it with the optional image (rendered afterwards from `observation.window_id`), so `timed_out`, `quiet` and the observer's condition semantics reach the wire verbatim.
 - Errors map through `crate::error::ServerError` per `crates/adesk-server/CONTEXT.md`; do not invent AGP methods or fields.
 - Files ≤ ~1000 lines; no new dependencies; no `unwrap`/`expect`/`panic!` outside `#[cfg(test)]`.
 
