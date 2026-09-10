@@ -110,7 +110,9 @@ Skeleton-phase module-level `#![allow(dead_code)]` blocks are gone; only `tests/
 - `WaitSpec` has no `after_action`; action-correlated change waits use `ObserveSpec::new(Condition::Change).after_action(id)`.
 - Window-filtered `Observation::last_commit_seq` is the window's *absolute* commit watermark (non-zero even when `commits == 0`); unfiltered it is the global max across windows.
 - An already-quiet window does not resolve `wait_for_quiet` instantly: with no counted commit in the filter the anchor is the wait start (or the action `ts_ms`), so resolution is `anchor + quiet_ms` — or immediate with `quiet: false` when `after_action` is already older than `quiet_ms`.
-- `Observation::quiet` is the evidence flag above, *not* "condition met": `docs/protocol.md` §5.4 and the field's doc in `adesk-core` phrase it as the latter, but a timed-out `change` wait can legitimately carry `quiet: true`.
+- `Observation::quiet` is the evidence flag above, *not* "condition met": `docs/protocol.md` §5.4 and the field's doc in `adesk-core` phrase it as the latter.
+  A timed-out `wait_for_change` can legitimately carry `quiet: true` (default 250 ms evidence threshold, `ObserverConfig::default_quiet_ms`).
+  A timed-out `Condition::Quiet`/`wait_for_quiet` always reports `quiet: false` + `timed_out: true` (its evidence threshold is the condition's own `quiet_ms`), and `Condition::Timeout` resolves with `timed_out: false` by definition.
 ## Dependencies
 - `adesk-core` (landed): `RuntimeEvent`, `Observation`, `WindowId`, `ActionId`, `Position`, `Rect`, `Region`, `Error`/`ErrorCode`.
 - `tokio`: `sync` (`watch`), `time` (`Instant`, `sleep_until`); dev-only `test-util` for paused time.
