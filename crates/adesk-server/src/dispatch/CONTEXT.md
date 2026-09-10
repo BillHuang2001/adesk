@@ -11,7 +11,7 @@ Handlers are thin adapters: they translate proto params into sibling-crate calls
 
 Router (`mod.rs`):
 - `RequestContext<'a> { server: &'a ServerContext, session: &'a Session }` — the only handle handlers receive.
-- `Dispatcher::new(ServerContext)` / `context()` / `async dispatch(&Session, RequestFrame) -> ResponseFrame` — total over `adesk_proto::Method`; every `Err` becomes `error_response` and the connection stays open.
+- `Dispatcher::new(ServerContext)` / `context()` / `async dispatch(&Session, RequestFrame) -> ResponseFrame` — total over `adesk_proto::Method`; every `Err` becomes `error_response` and the connection stays open. `dispatch` opens no span itself: it runs inside the `request{id method}` span the read loop (`crate::connection::read_loop`) instruments the task with.
 - `error_response(id, &ServerError) -> ResponseFrame` = `ResponseFrame::error(id, error.payload())`.
 - Sink seam: `pub(crate) session_sink(&Session) -> Result<EventSink>`, `pub(crate) register_session_sink(SessionId, EventSink)`, `pub(crate) forget_session_sink(SessionId)`; `Connection::run` publishes the writer queue on connect and forgets it on disconnect.
 
@@ -25,6 +25,7 @@ Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>P
 - `inspect::{inspect_capture, inspect_subscribe}`.
 
 Shared internal helpers (not public API):
+- `command.rs` (`pub(crate) mod`, `send_infallible`/`send_result`): the shared compositor-command seam every group uses — build a `RuntimeCommand` around a `oneshot` reply, send, await and classify. `send_infallible` is for the infallible reply shapes (`QueryState`, `ReserveSeq`), `send_result` for the `adesk_core::Result<T>` shapes (seat + window commands); a *dropped* reply is classified by a caller-supplied closure (the seat/state helpers report `shutting_down`, `activate_window`/`close_window`/`render_window` report `internal`), and a failure reply maps through `windows::command_error`.
 - `windows.rs` is the canonical home of the compositor bridge: `pub(crate) async state(server: &ServerContext) -> Result<StateSnapshot>` (the only `QueryState` read; a dropped reply is `shutting_down`), `pub(crate) async reserve_seq(server: &ServerContext) -> Result<u64>` (the only `seq` allocator for server-synthesized events, called by `apps.rs`, `inspect.rs` and `viewer/backend.rs`; a closed command channel or a dropped reply is `shutting_down`), `pub(crate) command_error(Option<WindowId>, adesk_core::Error) -> ServerError` (preserves the compositor's AGP code across the `adesk_core::Error` boundary), `pub(crate) unknown_window(WindowId) -> ServerError`.
 - `input.rs` exposes its seat/state seam `pub(crate)` for the viewer endpoint (`docs/viewer.md` §4): `window_rect`, `move_to`, `move_pointer`, `click_times`, `button_event`, `activate_if_needed`, `type_character`, `send_unit` (each takes `&ServerContext`), plus the pure `resolve_pointer_position`, `is_unmappable_key` and `output_fraction_position` (VAP normalized output fraction → window-relative position). The §5.5 handler bodies stay private.
 - `capture.rs`: `pub(super) scale_from(source, &ImageBuffer)` (the reported `ImagePayload::scale` = output width / source width, `1.0` for an empty source; shared with `inspect.rs`), `source_size` (requested crop size, else window geometry), `observed_window` (the observation's own window, else `active_window_id`/`keyboard_focus`, else none).
@@ -34,6 +35,7 @@ Shared internal helpers (not public API):
 | Area | Owner |
 |---|---|
 | Router, `RequestContext`, `error_response`, outbound-sink seam | `./mod.rs` |
+| Compositor-command + oneshot-reply seam (`send_infallible`/`send_result`) | `./command.rs` |
 | §5.1 `ping` | `./runtime.rs` |
 | §5.2 `list_apps`, `get_app`, `launch_app` | `./apps.rs` |
 | §5.3 `list_windows`, `get_window`, `activate_window`, `close_window`, `get_focus` + canonical bridge helpers | `./windows.rs` |

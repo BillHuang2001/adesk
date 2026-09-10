@@ -33,13 +33,13 @@ Rendering is on demand: a frame is produced only when a session asks for one, an
 - `#![forbid(unsafe_code)]`, `#![deny(missing_docs)]` (crate level); every item here still carries `///` docs.
 - `mod viewer` is declared `pub mod viewer` in `src/lib.rs` but exposes **zero** public items — every item is `pub(crate)`.
 - The two accept loops must not own teardown: only the AGP accept loop runs `crate::shutdown::run`. These tasks hold the shutdown token and stop accepting; the socket file is removed by `shutdown::run`, with `SocketListener`'s RAII drop (keyed on the `(device, inode)` pair) as fallback.
+- Both transports are served by one generic `accept_loop<T: ViewerTransport>`; `UnixTransport`/`TcpTransport` are private and differ only in the accepted stream type and the `PeerInfo` variant. `spawn_accept_loops` spawns one `accept_loop` per bound transport.
 - `apply_input` requires a target window (`snapshot.keyboard_focus.or(snapshot.active_window_id)`; VAP carries no `window_id`). No window ⇒ `invalid_request("no window is active")`, never a panic and never a silent drop. Keyboard input activates the target first; pointer input never does.
 - The backend owns one `ChangeSignal` (fed by the pump in `spawn_change_pump`) and one `InputQueue` shared by every connection, so input from concurrent viewers stays in submission order.
 
 ## Known Issues
 
 - `listener.rs:74` calls `ViewerServer::new(backend).with_config(ViewerServerConfig::default())` — a no-op, because `ViewerServer::new` already installs `ViewerServerConfig::default()`. The `ViewerServerConfig` import exists only for that call.
-- The Unix and TCP accept blocks in `spawn_accept_loops` (`listener.rs:81-106` and `112-137`) are near-identical (same shutdown `select!`, same accept-error handling, same two log messages); they differ only in the accepted type and the `PeerInfo` variant. They also parallel the AGP accept loop in `server.rs:119-154` (which additionally runs teardown).
 - `backend.rs::render_frame` hand-rolls `images::encode_png` + `ImagePayload::from_png(.., 1.0)`; `crate::images::encode(image, ImageFormat::Png, 1.0)` does exactly that in one call.
 - `apply_input` re-implements the §5.5 *orchestration* (parse key → `record_action` → `activate_if_needed` → `send_unit`) that `dispatch/input.rs` handlers also perform, per `ViewerInput` arm. It reuses the `pub(crate)` seat helpers, so the duplication is at the sequence level, not the command level.
 - There are no in-module `#[cfg(test)]` tests in any of these three files; the only coverage is the 7 E2E tests in `tests/viewer.rs`. The TCP accept arm and the Unix arm's error branch, `spawn_change_pump`/`is_desktop_change`, `cursor_state`/`normalize`, `no_active_window` and `not_a_single_key` have no direct test.
