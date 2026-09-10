@@ -34,3 +34,10 @@ pub use client::{
 pub use error::{Result, ViewerError};
 pub use script::{parse_script, ScriptCommand, ScriptError};
 pub use server::{PeerInfo, ViewerServer, ViewerServerConfig};
+
+// The NDJSON framing helpers are `pub` so the crate's integration tests (which
+// live outside the crate and cannot see a private module) can frame a duplex
+// stream exactly the way the session and the client do. Hidden from the docs
+// because they are not part of the supported public surface.
+#[doc(hidden)]
+pub use transport::{read_line, read_line_into, write_line};

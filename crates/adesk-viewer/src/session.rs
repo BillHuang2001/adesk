@@ -28,7 +28,7 @@ use tokio::time::Instant;
 use crate::backend::{ViewerBackend, ViewerInput};
 use crate::error::{Result, ViewerError};
 use crate::server::{PeerInfo, ViewerServerConfig};
-use crate::transport::{read_line, write_line};
+use crate::transport::{read_line, read_line_into, write_line};
 
 /// Runs one viewer connection to completion (`docs/viewer.md` §2–§6).
 ///
@@ -101,6 +101,10 @@ where
     let mut last_sent: Option<Instant> = None;
     // A desktop change arrived while the pacing interval had not yet elapsed.
     let mut pending = false;
+    // One inbound line buffer reused for the whole connection: the select loop
+    // passes it to `read_line_into`, which clears and refills it each iteration,
+    // so steady-state message handling never allocates for a line.
+    let mut line_buf: Vec<u8> = Vec::new();
 
     loop {
         // The pacing arm is armed only while a change is pending; otherwise it is
@@ -116,11 +120,11 @@ where
         };
 
         tokio::select! {
-            inbound = read_line(&mut read, config.max_frame_len) => {
-                let line = match inbound {
-                    Ok(Some(line)) => line,
+            inbound = read_line_into(&mut read, &mut line_buf, config.max_frame_len) => {
+                match inbound {
                     // Clean EOF: the viewer went away (§5).
-                    Ok(None) => return Ok(()),
+                    Ok(false) => return Ok(()),
+                    Ok(true) => {}
                     // Framing corruption (over-cap line or invalid UTF-8) is a
                     // protocol error that closes the connection (§6).
                     Err(ViewerError::Transport(_)) => {
@@ -128,9 +132,19 @@ where
                         return Ok(());
                     }
                     Err(error) => return Err(error),
+                }
+
+                let line = match std::str::from_utf8(&line_buf) {
+                    Ok(line) => line,
+                    // Unreachable: `read_line_into` already rejected invalid
+                    // UTF-8; handled like any other malformed message.
+                    Err(_) => {
+                        send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
+                        return Ok(());
+                    }
                 };
 
-                let message = match decode_client(&line) {
+                let message = match decode_client(line) {
                     Ok(message) => message,
                     Err(_) => {
                         send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;

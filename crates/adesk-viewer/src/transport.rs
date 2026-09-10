@@ -6,6 +6,8 @@
 //! [`write_line`]. Message contents are never logged here (pixel payloads must
 //! never reach a log).
 
+use std::io::IoSlice;
+
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Result, ViewerError};
@@ -17,25 +19,29 @@ use crate::error::{Result, ViewerError};
 /// the [`ViewerClient`](crate::client::ViewerClient) use for both directions.
 pub const DEFAULT_MAX_FRAME_LEN: usize = 32 * 1024 * 1024;
 
-/// Reads one `\n`-terminated NDJSON line (`docs/viewer.md` §1).
+/// Reads one `\n`-terminated NDJSON line into a caller-owned buffer, reusing its
+/// allocation across calls (`docs/viewer.md` §1).
 ///
-/// Returns the line **without** its terminator, or `Ok(None)` on a clean EOF
-/// (zero bytes were read). A final line without a terminator (EOF in the middle
-/// of a line) is returned as-is. A line whose length — including the terminator —
-/// exceeds `max_len` is rejected, as is a line that is not valid UTF-8.
+/// `buf` is cleared at the start and left holding the line's raw bytes **without**
+/// its terminator — identical to [`read_line`]. Returns `Ok(false)` on a clean EOF
+/// (zero bytes were read) and `Ok(true)` otherwise. A final line without a
+/// terminator (EOF in the middle of a line) is returned as-is. A line whose
+/// length — including the terminator — exceeds `max_len` is rejected, as is a line
+/// that is not valid UTF-8.
 ///
 /// # Errors
 ///
 /// Returns [`ViewerError::Io`] on a read failure, and [`ViewerError::Transport`]
 /// when the line exceeds `max_len` bytes or is not valid UTF-8.
-pub async fn read_line<R: AsyncBufRead + Unpin>(
+pub async fn read_line_into<R: AsyncBufRead + Unpin>(
     reader: &mut R,
+    buf: &mut Vec<u8>,
     max_len: usize,
-) -> Result<Option<String>> {
-    let mut buf = Vec::new();
-    let read = reader.read_until(b'\n', &mut buf).await?;
+) -> Result<bool> {
+    buf.clear();
+    let read = reader.read_until(b'\n', buf).await?;
     if read == 0 {
-        return Ok(None);
+        return Ok(false);
     }
     if buf.len() > max_len {
         return Err(ViewerError::Transport(format!(
@@ -46,6 +52,36 @@ pub async fn read_line<R: AsyncBufRead + Unpin>(
     if buf.last() == Some(&b'\n') {
         buf.pop();
     }
+    std::str::from_utf8(buf.as_slice()).map_err(|error| {
+        ViewerError::Transport(format!("inbound line is not valid UTF-8: {error}"))
+    })?;
+    Ok(true)
+}
+
+/// Reads one `\n`-terminated NDJSON line (`docs/viewer.md` §1).
+///
+/// Returns the line **without** its terminator, or `Ok(None)` on a clean EOF
+/// (zero bytes were read). A final line without a terminator (EOF in the middle
+/// of a line) is returned as-is. A line whose length — including the terminator —
+/// exceeds `max_len` is rejected, as is a line that is not valid UTF-8.
+///
+/// This is a thin wrapper over [`read_line_into`] for callers that want an owned
+/// [`String`] and have no buffer to reuse.
+///
+/// # Errors
+///
+/// Returns [`ViewerError::Io`] on a read failure, and [`ViewerError::Transport`]
+/// when the line exceeds `max_len` bytes or is not valid UTF-8.
+pub async fn read_line<R: AsyncBufRead + Unpin>(
+    reader: &mut R,
+    max_len: usize,
+) -> Result<Option<String>> {
+    let mut buf = Vec::new();
+    if !read_line_into(reader, &mut buf, max_len).await? {
+        return Ok(None);
+    }
+    // `read_line_into` already rejected invalid UTF-8, so this cannot fail; the
+    // error arm is kept for parity with the old implementation.
     String::from_utf8(buf).map(Some).map_err(|error| {
         ViewerError::Transport(format!("inbound line is not valid UTF-8: {error}"))
     })
@@ -54,12 +90,30 @@ pub async fn read_line<R: AsyncBufRead + Unpin>(
 /// Writes one NDJSON line: `line`, then a single `\n`, then a flush
 /// (`docs/viewer.md` §1).
 ///
+/// The line and its terminator are offered to the writer in a **single vectored
+/// write**; a short vectored write is completed in place, so the bytes emitted are
+/// always exactly `line` followed by one `\n`.
+///
 /// # Errors
 ///
 /// Returns [`ViewerError::Io`] if a write or the flush fails.
 pub async fn write_line<W: AsyncWrite + Unpin>(writer: &mut W, line: &str) -> Result<()> {
-    writer.write_all(line.as_bytes()).await?;
-    writer.write_all(b"\n").await?;
+    let bytes = line.as_bytes();
+    // A short vectored write reports how many bytes it accepted; resubmit the
+    // remainder (line tail, then the lone terminator) until all of `line + "\n"`
+    // has been handed to the writer, so no byte is ever dropped.
+    let mut written = 0usize;
+    while written < bytes.len() + 1 {
+        let accepted = writer
+            .write_vectored(&[IoSlice::new(&bytes[written..]), IoSlice::new(b"\n")])
+            .await?;
+        if accepted == 0 {
+            // Matches `AsyncWriteExt::write_all`, which reports a zero-length
+            // write as `WriteZero` rather than looping forever.
+            return Err(ViewerError::Io(std::io::ErrorKind::WriteZero.into()));
+        }
+        written += accepted;
+    }
     writer.flush().await?;
     Ok(())
 }
