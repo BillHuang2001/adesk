@@ -3,7 +3,7 @@
 ## Intent
 
 `adesk-server` is the composition root of the ADesk runtime and the only process an agent ever talks to.
-It starts the compositor thread, binds the AGP Unix socket, pumps `RuntimeEvent`s into the observer and the subscription fan-out, and serves every method of `docs/protocol.md` §5.
+It starts the compositor thread, binds the AGP Unix socket and (when enabled) the viewer's VAP v1 endpoint, pumps `RuntimeEvent`s into the observer and the subscription fan-out, and serves every method of `docs/protocol.md` §5 plus the Viewer Attachment Protocol of `docs/viewer.md`.
 It owns the process-lifetime concerns no sibling can own: the socket file, the action→observation wiring, subscription fan-out, signal handling and the ordered shutdown sequence.
 It also owns every conversion between sibling crates' overlapping types (`src/translate.rs`), because no sibling depends on another.
 
