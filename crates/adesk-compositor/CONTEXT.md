@@ -32,8 +32,8 @@ Config:
 - `XkbSettings { rules, model, layout, variant, options }` — defaults `evdev`/`pc105`/`us`/empty/`None`; `us()`, `to_xkb_config() -> smithay::input::keyboard::XkbConfig<'_>`.
 
 Commands and replies:
-- `RuntimeCommand` — `docs/architecture.md` §3 plus `NoteLaunch` (compositor-side launch-ledger bookkeeping for `launch_app`): `RenderWindow`, `RenderOutput`, `QueryState`, `NoteLaunch`, `ActivateWindow`, `CloseWindow`, `PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`, `Shutdown`.
-- Every result-bearing variant carries its own `tokio::sync::oneshot::Sender<adesk_core::Result<T>>`; `QueryState` replies `StateSnapshot` infallibly; `NoteLaunch` acknowledges `()` infallibly; `Shutdown` acknowledges `()`.
+- `RuntimeCommand` — `docs/architecture.md` §3 plus `NoteLaunch` (compositor-side launch-ledger bookkeeping for `launch_app`) and `ReserveSeq` (silent `seq` allocation for server-synthesized events): `RenderWindow`, `RenderOutput`, `QueryState`, `NoteLaunch`, `ReserveSeq`, `ActivateWindow`, `CloseWindow`, `PointerMove`, `PointerButton`, `PointerAxis`, `KeyEvent`, `Shutdown`.
+- Every result-bearing variant carries its own `tokio::sync::oneshot::Sender<adesk_core::Result<T>>`; `QueryState` replies `StateSnapshot` infallibly; `NoteLaunch` acknowledges `()` infallibly; `ReserveSeq` replies the next `seq` (`u64`) infallibly; `Shutdown` acknowledges `()`.
 - `RuntimeCommand::method() -> &'static str` is the stable tracing span name.
 - `StateSnapshot { windows: Vec<WindowInfo>, active_window_id: Option<WindowId>, keyboard_focus: Option<WindowId>, seq: u64, ts_ms: u64 }` + `window(id)`, `len()`, `is_empty()`.
 - `RenderedFrame { image: ImageBuffer, commit_seq: u64, damage: Vec<Rect> }` + `new()`, `size()`.
@@ -52,7 +52,7 @@ Threading:
 - Exactly one compositor thread; `State` is created, used and dropped on it and is not `Send`; Smithay state and the renderer never leave it.
 - Three channels only: commands (`calloop::channel`, FIFO, one command served per loop callback), events (`tokio::sync::broadcast<RuntimeEvent>`, capacity ≥ 4096, send never blocks), readiness (`oneshot`, cached in `wait_ready`).
 - A command's reply is sent from inside the callback that produced it, after the state change, so "reply implies the event is visible" holds.
-- `seq` comes from one central counter in `EventSink`; `ts_ms` is monotonic milliseconds since compositor construction (`Instant`), never wall clock.
+- `seq` comes from one central counter in `EventSink` — the single allocation point for compositor- and server-emitted events (`ReserveSeq` takes a number without emitting one; gaps are allowed, reuse is not); `ts_ms` is monotonic milliseconds since compositor construction (`Instant`), never wall clock.
 
 Scope:
 - v1 protocols in scope: `wl_compositor`, `wl_subcompositor`, `wl_shm`, `xdg-shell` (+ popups), `wl_seat` (keyboard + pointer), `wl_output`, `wl_data_device_manager` (basic clipboard), `zwp_linux_dmabuf`, `xdg-decoration`.
@@ -150,7 +150,8 @@ Event loop:
 
 - `RenderedFrame` = `ImageBuffer` + `commit_seq` + `damage`: the frame travels with the causal history it belongs to.
 - `WindowId` allocation is entirely `adesk-wm`'s: `WindowModel::next_id` (a per-`WindowManager` `u64` field, no statics/atomics) starts at `1` and increments only in `policy::on_map`, so a fresh compositor assigns `WindowId(1)`, then `WindowId(2)`, ... to the first two *mapped* toplevels; registration and duplicate maps allocate nothing. Popups use a separate `SurfaceRegistry::next_popup_id` counter and surfaces a separate `SurfaceKey` counter, so only a toplevel map can consume a window id.
-- Title/app-id updates are metadata-only: `policy::on_title` returns no actions and neither path marks damage or re-configures — damage comes exclusively from surface commits.
+- Title/app-id updates are metadata-only: `policy::on_title`/`policy::on_app_id` return no actions and neither path marks damage or re-configures — damage comes exclusively from surface commits.
+- A late `xdg_toplevel.set_app_id` is written back into the window model: `WmBridge::app_id_changed` reads the toplevel metadata and delegates to `note_app_id`, which keeps the `app_ids` change detection and the launch-ledger refinement and writes a genuine change through `WindowManager::on_app_id`, so `WindowInfo.app_id`/`QueryState`/`list_windows` report the new value. Smithay applies `set_app_id` while dispatching the request (not at the next commit), so no commit is needed for the write-back to land.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding.
 - Output composition is the single-visible-toplevel projection: `State::render_output` collects every tracked window with a root surface into a *candidate* list of `OutputWindow`s (`active` marks the one `adesk-wm` tiles), and `elements::output_scene` draws exactly the first `active` candidate (`visible_index`) — tracked-but-inactive windows are never composed and two toplevels cannot stack. The composed window's popups ride along through `window_elements`, overlays are computed from the composed window alone, and no active candidate yields an empty scene (a clear frame). Window-level `render_window` still renders any window by id.
 - `WmBridge` (`src/wm.rs`) is the only place Smithay surfaces meet the window model. Its surface: `new(output_size)`, `active_window`, `keyboard_focus`, `window_for_surface`, `windows`, `tiled_rect`, `toplevel_of`, `surface_of`, `last_commit_seq`, `note_launch`, `resolve_position`, `register_toplevel`, `unmapped_toplevel`, `map_toplevel -> MapOutcome`, `destroy_toplevel`, `title_changed`, `app_id_changed`, `popup_added`, `popup_removed`, `popup_window_offset`, `note_popup_grab`, `popup_grab`, `take_popup_grab`, `commit`, `activate`. `WmDecision { actions, previous_focus }` captures focus *before* the policy ran.
