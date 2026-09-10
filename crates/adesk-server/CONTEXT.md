@@ -75,7 +75,10 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 - `tracing` only: one span per request (`request{id method}`), one per connection, one per window lifecycle; never log pixel payloads.
 - Timestamps are monotonic ms since `ServerContext::started_at`; no wall clock in observations.
 - Dependencies: every version comes from the root `[workspace.dependencies]`; no inline versions.
-- Only `adesk-server` may write the AGP socket path and the process-level signal handlers.
+- Only `adesk-server` may write the AGP socket path, the viewer socket path and the process-level signal handlers.
+- The viewer endpoint owns no protocol logic: `adesk-viewer-proto` and `adesk-viewer` are used as-is, and `./src/viewer/` only implements `adesk_viewer::ViewerBackend` and binds the transports.
+- Viewer input is never a special path: it records an `ActionId` on the observer before the compositor command and calls the same `src/dispatch/input.rs` seat helpers as AGP §5.5, so a viewer click and an agent click are the same code path.
+- Only the AGP accept loop runs `crate::shutdown::run`; the viewer accept loops only observe the shutdown token — teardown stays ordered and single-owner.
 
 ## Routing Table
 
