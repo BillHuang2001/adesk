@@ -7,6 +7,7 @@
 //! ([`crate::inspection::refresh`]) before each `inspect_capture` /
 //! `inspect_subscribe` frame.
 
+use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use adesk_compositor::RuntimeCommand;
@@ -45,9 +46,13 @@ pub struct InspectionSnapshot {
 /// Cheap to clone; all clones share one cache. `None` means the cache has not
 /// been primed yet — [`InspectionSource::inspection_input`] then returns
 /// `InvalidRequest`.
+///
+/// The snapshot is stored behind an `Arc` so [`InspectionCache::snapshot`] can
+/// hand out a copy while holding the read guard only for the cheap pointer
+/// clone, never for the deep copy of the (large) output frame.
 #[derive(Clone, Default)]
 pub struct InspectionCache {
-    inner: Arc<RwLock<Option<InspectionSnapshot>>>,
+    inner: Arc<RwLock<Option<Arc<InspectionSnapshot>>>>,
 }
 
 impl InspectionCache {
@@ -61,21 +66,30 @@ impl InspectionCache {
         *self
             .inner
             .write()
-            .unwrap_or_else(|error| error.into_inner()) = Some(snapshot);
+            .unwrap_or_else(|error| error.into_inner()) = Some(Arc::new(snapshot));
     }
 
     /// The current snapshot, if the cache has been primed.
+    ///
+    /// Only the cheap `Arc` handle is cloned while the read guard is held; the
+    /// deep copy of the (large) surface frame happens after the guard is
+    /// dropped, so a concurrent `InspectionCache::update` never waits for it.
     pub fn snapshot(&self) -> Option<InspectionSnapshot> {
-        self.inner
+        let cached = self
+            .inner
             .read()
             .unwrap_or_else(|error| error.into_inner())
-            .clone()
+            .clone();
+        cached.map(|snapshot| (*snapshot).clone())
     }
 
     /// Mutates the cached snapshot in place; a no-op while the cache is empty.
     ///
     /// The event pump folds single events in this way: it must not clone the
-    /// (large) base frame on every `surface_commit`.
+    /// (large) base frame on every `surface_commit`. The snapshot is
+    /// copy-on-write (`Arc::make_mut`), so the frame is duplicated only in the
+    /// rare case where a concurrent [`InspectionCache::snapshot`] still holds a
+    /// handle to it.
     pub(crate) fn update(&self, update: impl FnOnce(&mut InspectionSnapshot)) {
         if let Some(snapshot) = self
             .inner
@@ -83,7 +97,7 @@ impl InspectionCache {
             .unwrap_or_else(|error| error.into_inner())
             .as_mut()
         {
-            update(snapshot);
+            update(Arc::make_mut(snapshot));
         }
     }
 }
@@ -214,6 +228,15 @@ pub async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
         None => (Vec::new(), None),
     };
 
+    // Resolve every action's geometry from the observer snapshot taken above
+    // (`window_state` would take a fresh lock and clone the whole window state
+    // once per record); the snapshot already carries each window's geometry.
+    let geometry_by_window: HashMap<WindowId, Rect> = observer
+        .windows
+        .iter()
+        .filter_map(|window| window.geometry.map(|geometry| (window.window_id, geometry)))
+        .collect();
+
     let actions = context
         .observer
         .action_registry()
@@ -222,8 +245,7 @@ pub async fn refresh(context: &ServerContext) -> Result<InspectionSnapshot> {
         .map(|record| {
             let geometry = record
                 .window_id
-                .and_then(|window_id| context.observer.window_state(window_id))
-                .and_then(|state| state.geometry);
+                .and_then(|window_id| geometry_by_window.get(&window_id).copied());
             crate::translate::action_marker(record, geometry, now_ms)
         })
         .collect();
@@ -349,6 +371,24 @@ mod tests {
         let cached = cache.snapshot().unwrap();
         assert_eq!(cached.seq, 99);
         assert!(cached.active.is_none());
+    }
+
+    #[test]
+    fn snapshot_is_an_independent_copy_of_the_cached_state() {
+        let cache = InspectionCache::new();
+        cache.store(snapshot());
+        // A held snapshot must not observe later in-place updates (this also
+        // drives the copy-on-write branch while an `Arc` handle is live).
+        let taken = cache.snapshot().expect("primed");
+        cache.update(|cached| {
+            cached.seq = 99;
+            cached.active = None;
+        });
+        assert_eq!(taken.seq, 42);
+        assert_eq!(taken.active, Some(WindowId(1)));
+        let current = cache.snapshot().unwrap();
+        assert_eq!(current.seq, 99);
+        assert!(current.active.is_none());
     }
 
     #[test]

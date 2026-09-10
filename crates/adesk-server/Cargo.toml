@@ -30,7 +30,6 @@ adesk-observer.workspace = true
 adesk-app-registry.workspace = true
 adesk-inspector.workspace = true
 adesk-render.workspace = true
-adesk-wm.workspace = true
 # VAP v1 wire types (`adesk-viewer-proto`) and the viewer server session +
 # `ViewerBackend` seam (`adesk-viewer`): the viewer endpoint (`src/viewer/`)
 # implements the trait and hands it to `ViewerServer::serve`; the runtime never

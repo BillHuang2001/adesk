@@ -60,24 +60,14 @@ impl Session {
         subscriptions.len() != before
     }
 
-    /// All subscriptions still owned by this session.
+    /// All subscriptions still owned by this session (test-only accessor).
+    #[cfg(test)]
     pub fn subscriptions(&self) -> Vec<SubscriptionId> {
         self.inner
             .subscriptions
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .clone()
-    }
-
-    /// Drains the subscription set (called on disconnect).
-    pub fn take_subscriptions(&self) -> Vec<SubscriptionId> {
-        std::mem::take(
-            &mut *self
-                .inner
-                .subscriptions
-                .lock()
-                .unwrap_or_else(|error| error.into_inner()),
-        )
     }
 
     /// The ordered input queue.
@@ -175,18 +165,6 @@ mod tests {
         assert_eq!(session.subscriptions(), vec![6]);
         assert!(!session.remove_subscription(5));
         assert_eq!(session.subscriptions(), vec![6]);
-    }
-
-    #[test]
-    fn session_take_subscriptions_drains_once() {
-        let session = Session::new(7);
-        assert!(session.take_subscriptions().is_empty());
-
-        session.add_subscription(1);
-        session.add_subscription(2);
-        assert_eq!(session.take_subscriptions(), vec![1, 2]);
-        assert!(session.subscriptions().is_empty());
-        assert!(session.take_subscriptions().is_empty());
     }
 
     #[test]

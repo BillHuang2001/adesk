@@ -6,9 +6,9 @@
 //! Waits time out as *observations* (`timed_out: true`), never as errors.
 //!
 //! The compositor-bridge helpers live in `dispatch::windows` (`state`,
-//! `command_error`, `unknown_window`); `scale_from` stays here because only this
-//! module and `dispatch::inspect` need the downscale factor reported in
-//! `ImagePayload::scale`.
+//! `unknown_window`) and `dispatch::command` (`send_result`); `scale_from` stays
+//! here because only this module and `dispatch::inspect` need the downscale
+//! factor reported in `ImagePayload::scale`.
 
 use adesk_compositor::{RenderedFrame, RuntimeCommand};
 use adesk_core::{ImageBuffer, Rect, Size, WindowId, WindowInfo};
@@ -17,14 +17,14 @@ use adesk_proto::{
     CaptureRegionParams, CaptureResult, CaptureWindowParams, ImageFormat, ObserveParams,
     ObserveResult, WaitForChangeParams, WaitForQuietParams,
 };
-use tokio::sync::oneshot;
 
 use crate::dispatch::RequestContext;
 use crate::error::{Result, ServerError};
 use crate::images;
 use crate::translate;
 
-use super::windows::{command_error, state, unknown_window};
+use super::command::send_result;
+use super::windows::{state, unknown_window};
 
 /// `capture_window`: render a window's current pixels (crop/downscale optional).
 pub async fn capture_window(
@@ -132,19 +132,22 @@ async fn render_window(
     region: Option<Rect>,
     max_dimension: Option<u32>,
 ) -> Result<RenderedFrame> {
-    let (reply, response) = oneshot::channel();
-    ctx.server.compositor.send(RuntimeCommand::RenderWindow {
-        window_id,
-        region,
-        max_dimension,
-        reply,
-    })?;
-    let frame = response.await.map_err(|_| {
-        ServerError::Internal(format!(
-            "compositor dropped the render_window reply for window {window_id}"
-        ))
-    })?;
-    frame.map_err(|error| command_error(Some(window_id), error))
+    send_result(
+        ctx.server,
+        Some(window_id),
+        || {
+            ServerError::Internal(format!(
+                "compositor dropped the render_window reply for window {window_id}"
+            ))
+        },
+        |reply| RuntimeCommand::RenderWindow {
+            window_id,
+            region,
+            max_dimension,
+            reply,
+        },
+    )
+    .await
 }
 
 /// Builds the `capture_window`/`capture_region` result from a rendered frame.
