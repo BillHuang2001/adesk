@@ -122,7 +122,7 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `./tests/render_backend.rs` (12 tests): pixman-backed integration tests using a local recording `Element`/`RenderElement` double — clear color, canonical exact pixels, z-order, `-source.loc` translation, element-local full-rect damage despite partial `SceneNode::damage`, scene-coordinate crop translation, crop-before-downscale order, `RenderedFrame::damage`/`commit_seq` passthrough, off-source nodes skipped, target size/format, 0x0 `create_target` error, invalid config. One GL test runs only with `ADESK_TEST_GL=1` (surfaceless EGL + `GlesRenderer`, skips cleanly when EGL is unavailable) and asserts **exact image equality** with the pixman reference — the orientation regression guard (verified under Mesa llvmpipe).
 - `src/config.rs` `#[cfg(test)]` (13 tests): `validate`, `target_size`, `output_size` (crop, aspect-preserving `max_dimension`, no upscale, `0` disabled), defaults/formats.
 - No test needs a display, GPU, network or installed application. Run: `bash scripts/dev.sh cargo test -p adesk-render` (the wrapper is a bash script; bare `cargo` cannot link outside the dev shell). GL: `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-render --test render_backend`.
-- `import_buffer` has no direct test (constructing a `WlBuffer` needs a live wayland connection); it is covered by the `ImportAll` trait pinning and will be exercised by `adesk-compositor`/`adesk-server` integration tests. End-to-end coverage stays in `adesk-compositor/tests` and `adesk-server/tests` via `adesk-testkit`.
+- `import_buffer` currently has no caller at all (no production or test reference anywhere in the workspace; a direct test would also need a live wayland connection). End-to-end coverage stays in `adesk-compositor/tests` and `adesk-server/tests` via `adesk-testkit`.
 
 ## Status
 
@@ -151,4 +151,6 @@ All items are re-exported flat at the crate root; the modules are `pub` as well.
 - `adesk-core` — `ImageBuffer`, `Rect`, `Region`, `Size`, `ErrorCode`, `Error` (never fork these types).
 - `smithay` 0.7 with `wayland_frontend`, `desktop`, `renderer_pixman`, `renderer_glow` (pulls `wayland-server`, `wayland-protocols`, `pixman`, `glow`, `gl_generator`, `drm-fourcc`).
 - `image` 0.25 (png only), `thiserror` 2.
+- System libraries (pixman, EGL/GLES, libwayland) come from the Nix dev shell; build through `./scripts/dev.sh`.
+r` 2.
 - System libraries (pixman, EGL/GLES, libwayland) come from the Nix dev shell; build through `./scripts/dev.sh`.
