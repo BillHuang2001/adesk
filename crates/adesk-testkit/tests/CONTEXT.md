@@ -28,3 +28,11 @@ Current state: `cargo test -p adesk-testkit --all-features` passes 66 tests + 3 
 - The harness serializes process-env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 - The frozen acceptance specs (`api_surface.rs`, `assertions.rs`, `fixtures.rs`, `runtime.rs`, `wayland_client.rs`) must not be edited; add new behavior proof in new test files.
 - `clipboard.rs` asserts strict delivery: `REQUIRE_CLIPBOARD_DELIVERY = true`, so a missing selection offer is a hard failure; the flag-false tolerant fallback is a configured escape hatch, never a passing path in the shipped configuration.
+
+## Known Issues
+
+- Clipboard tests can lose a publication under cold parallel load: `set_selection` only flushes, and the following awaited AGP `activate_window` travels a different channel, so the compositor may apply the focus change before it dispatches the Wayland request; Smithay then silently denies `set_selection` from a client without keyboard focus (no error, no `cancelled`).
+- `clipboard.rs::second_set_selection_invalidates_the_first_offer` has no barrier between publication and the focus change at either publication (`set_selection` at lines 313/331, `activate_window(reader)` at lines 314/333); `crates/adesk-compositor/tests/clipboard.rs::second_set_selection_supersedes_the_first_offer` has the same shape, where its `publish` helper wrongly documents `roundtrip()` as a sync-callback barrier.
+- `roundtrip()` is not a barrier — flush plus one buffered reader-cycle notification — so `set_selection` + `roundtrip()` does not close the race either.
+- Failure signatures: a lost first publication leaves the reader's `selection_offer_count` at 0, so `selection_delivery` panics after its `wait_for_selection_offer(1, OFFER_PROBE)` timeout; a lost replacement makes `wait_for_selection_offer(2, OFFER_PROBE)` time out or the payload assertion read the re-announced old selection.
+- Fix pattern: before moving focus off the publisher, prove the publication was dispatched/accepted — a commit on the publisher's own connection (`commit_frame`/`commit_pending`) awaited as its `RuntimeEvent::SurfaceCommit` through `EventAssert` (as in `set_selection_is_accepted_on_a_focused_client_and_leaks_no_payload`), or the publisher's own same-client echo `wait_for_selection_offer` (unambiguous only for the first publication).
