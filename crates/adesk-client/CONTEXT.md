@@ -45,8 +45,10 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 ### Events (`src/events.rs`)
 - `EventFilter{kinds: Option<Vec<EventKind>>, window_id: Option<WindowId>}` + `all()`, `kinds(..)`, `.window(id)`; `None` fields are omitted from the params object (= "all").
 - `EventKind` — the 11 protocol §5.6 names (9 core + `SurfaceDamage`, `Quiet`), snake_case serde, `as_str()`, `From<adesk_core::EventKind>`.
-- `AgpEvent{Runtime(RuntimeEvent), InspectFrame(InspectFrame), Other{name, seq, ts_ms, data}}`; `InspectFrame{seq, ts_ms, image}`.
-- `EventStream: Stream<Item = Result<RuntimeEvent, ClientError>>`; `AgpEventStream: Stream<Item = Result<AgpEvent, ClientError>>`; `InspectStream: Stream<Item = Result<InspectFrame, ClientError>>`.
+- `AgpEvent{Runtime(RuntimeEvent), Quiet(QuietEvent), InspectFrame(InspectFrame), Other{name, seq, ts_ms, data}}`; `InspectFrame{seq, ts_ms, image}`.
+- Wire `"quiet"` frames map to `Quiet` (a payload that does not fit → `Other`); `"surface_damage"` is a filter alias and always lands in `Other`.
+- `QuietEvent` — re-export of the shared wire type from `adesk-proto` (`window_id: Option<WindowId>`, `None` = runtime-wide; `quiet_ms: u64`); carries no envelope `seq`/`ts_ms` (unlike `RuntimeEvent`/`InspectFrame`).
+- `EventStream: Stream<Item = Result<RuntimeEvent, ClientError>>` (a `RuntimeEvent`-only view — `quiet`, `inspect_frame` and unknown frames are skipped even when the filter selects them; use `AgpEventStream`/`subscribe_frames` for those); `AgpEventStream: Stream<Item = Result<AgpEvent, ClientError>>`; `InspectStream: Stream<Item = Result<InspectFrame, ClientError>>`.
 - All three are `Send + Unpin`, expose `subscription_id()`, and **unsubscribe on drop** (best-effort `unsubscribe_events`).
 
 ### Images (`src/image.rs`)
@@ -58,7 +60,7 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 
 - Only `docs/protocol.md` defines the wire; the client must never invent a method, field or default. Adding one is a root-owned protocol change.
 - The client owns no semantics: waits, filtering, ordering and quiet detection are server-side (`docs/architecture.md` §6, §9). Methods marshal params and map results — nothing else.
-- All `adesk_proto` frame/codec types are named **only** in `src/wire.rs` (plus the `ImagePayload` re-export in `lib.rs` and its `format` vocabulary in `src/image.rs`); the rest of the crate uses the crate-internal `RawEvent`/`Inbound` vocabulary.
+- All `adesk_proto` frame/codec types are named **only** in `src/wire.rs` (plus the `ImagePayload`/`QuietEvent` re-exports in `lib.rs` and the `format` vocabulary in `src/image.rs`); the rest of the crate uses the crate-internal `RawEvent`/`Inbound` vocabulary.
 - No third-party version literals: every dependency comes from `[workspace.dependencies]` via `.workspace = true`.
 - No `unsafe`; `#![deny(missing_docs)]`. No panics on request/event paths.
 - Files stay well under the ~1000-line threshold; split along protocol sections rather than growing a file.
@@ -72,7 +74,7 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 | `ClientError`, `Result`, error mapping | `./src/error.rs` |
 | Connection, request ids, pending map, reader/writer tasks, line cap | `./src/transport.rs` |
 | AGP frame encode/decode; the only `adesk-proto` touchpoint | `./src/wire.rs` |
-| `EventFilter`, `EventKind`, `AgpEvent`, the three event streams | `./src/events.rs` |
+| `EventFilter`, `EventKind`, `AgpEvent` (incl. typed `QuietEvent`), the three event streams | `./src/events.rs` |
 | `ImageFormat`, `decode_image` | `./src/image.rs` |
 | §5.1 `ping`, `PingInfo`, `Renderer` | `./src/api/runtime.rs` |
 | §5.2 app registry methods, `LaunchResult` | `./src/api/apps.rs` |
@@ -86,8 +88,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 
 ## Design Decisions
 
-- **Public SDK surface is client-owned and stable.** Method params/results are defined here (`ClickRequest`, `ObserveResult`, …) rather than re-exported from `adesk-proto`, so `adesk-agent` codes against one stable API; the wire mapping lives in the api modules. The only shared wire type exposed is `ImagePayload` (re-exported), because consumers must be able to read pixels without depending on `adesk-proto` directly. If `adesk-proto` later lands typed method params/results, adopt them internally without changing this surface.
-- **`adesk-proto` coupling is one file.** `src/wire.rs` converts proto frames to `RawEvent`/`Inbound` immediately; a proto API change touches that file only (plus the `ImagePayload` re-export in `lib.rs` and the `format` match in `src/image.rs`).
+- **Public SDK surface is client-owned and stable.** Method params/results are defined here (`ClickRequest`, `ObserveResult`, …) rather than re-exported from `adesk-proto`, so `adesk-agent` codes against one stable API; the wire mapping lives in the api modules. The shared wire types exposed are `ImagePayload` (re-exported so consumers can read pixels without depending on `adesk-proto` directly) and `QuietEvent` (the typed `quiet` payload, re-exported rather than mirrored so the wire shape has a single definition). If `adesk-proto` later lands typed method params/results, adopt them internally without changing this surface.
+- **`adesk-proto` coupling is one file.** `src/wire.rs` converts proto frames to `RawEvent`/`Inbound` immediately; a proto API change touches that file only (plus the `ImagePayload`/`QuietEvent` re-exports in `lib.rs` and the `format` match in `src/image.rs`).
 - **Event demux is local.** AGP event frames carry no subscription id, so the reader task publishes every event to a per-connection fan-out (`EventFanout` in `src/transport.rs`) and each stream applies its own `EventFilter`. Server-side filtering is an optimisation, not a correctness dependency.
 - **The fan-out is per-subscriber bounded `mpsc`, not `broadcast`.** `tokio::sync::broadcast::Receiver` exposes no `poll_recv`, so it cannot be driven from `Stream::poll_next`; instead every subscription gets its own `mpsc` queue (`EVENT_CHANNEL_CAPACITY`) plus an explicit skipped counter. The observable contract matches a broadcast channel: the reader never blocks, and when the connection ends the senders are dropped so receivers wake and observe `RecvError`-equivalent end-of-stream.
 - **Backpressure is explicit.** A lagging subscriber gets `ClientError::Lagged{skipped}` on its next poll rather than stalling the reader; the stream stays usable and the consumer re-synchronises (e.g. `list_windows`).
@@ -96,7 +98,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - **`ping` is the version gate.** `connect*` pings by default (`ConnectOptions::verify_version`) so a skewed client fails at connect, not at the first request. `ping_raw` exists for diagnostics.
 - **The wait helpers are pixel-free.** `wait_for_change`/`wait_for_quiet` omit `include_image` (protocol default `false`) and return `Observation`; use `observe` when pixels are needed. This keeps the return type honest instead of silently discarding an image.
 - **`ServerError` drops the wire `data` object.** `ClientError::Server` carries `code` + `message` only; `data` is advisory and the typed variants cover actionable cases. Add a field here (not in a second error type) if a consumer needs it.
-- **Observation image handling is layout-tolerant.** The protocol puts the optional image inside the `Observation` object (§4) while `adesk-core::Observation` has no image field, so `ObserveResult` deserialises the observation object with `#[serde(flatten)]` and picks up `image` whether it is a sibling or nested.
+- **Observation image layout is pinned on the wire; the client's tolerance is defensive.** The wire carries `image` INSIDE the observation object (`adesk-server/src/translate.rs` + the `adesk-proto` serializer test) while `adesk-core::Observation` has no image field, so `ObserveResult` deserialises the observation object with `#[serde(flatten)]` and picks up `image` whether nested or a sibling — the sibling tolerance is defensive, not a second supported layout.
+- **`quiet` is typed; `surface_damage` is not.** Wire `quiet` frames map to `AgpEvent::Quiet` carrying the re-exported `QuietEvent` payload (`window_id`/`quiet_ms`; no envelope `seq`/`ts_ms`); a payload that does not fit falls back to `AgpEvent::Other` (protocol §7). `surface_damage` is a subscription-only filter alias that no frame carries, so any `surface_damage` frame stays `Other`. `EventStream` remains `RuntimeEvent`-only by design; non-core frames are observed through `AgpEventStream`/`subscribe_frames`.
 - **`Renderer::Unknown` and `AgpEvent::Other`** keep the client forward-compatible with additive protocol changes (protocol §7) instead of failing deserialisation.
 
 ## Test Strategy
@@ -107,7 +110,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - `tests/api.rs` — one round-trip per §5.1–§5.7 method: assert the exact request `method`/`params` JSON and that canned results deserialise into the typed values.
 - `tests/concurrency.rs` — N concurrent in-flight requests get distinct ids and all resolve; responses delivered out of order are still matched to the right caller.
 - `tests/errors.rs` — every `ErrorCode` maps to `ClientError::Server{code, message}`; an error does not close the connection; unknown response ids are ignored.
-- `tests/events.rs` — subscribe yields typed `RuntimeEvent`s; kind/window filtering is applied locally; `subscribe_frames` surfaces `Other`/`InspectFrame`; dropping a stream sends `unsubscribe_events`; lag yields `Lagged`; connection close ends the stream with `Closed`.
+- `tests/events.rs` — subscribe yields typed `RuntimeEvent`s; kind/window filtering is applied locally (including typed `quiet`); `subscribe_frames` surfaces `Quiet`/`InspectFrame`/`Other` (a malformed `quiet` payload falls back to `Other`); `EventStream` skips quiet frames; `QuietEvent` serde round-trips; dropping a stream sends `unsubscribe_events`; lag yields `Lagged`; connection close ends the stream with `Closed`.
 - `tests/framing.rs` — malformed JSON → `Protocol`; a line above `max_frame_len` → `Protocol`; EOF with requests in flight → `Closed`.
 - `tests/version.rs` — `ping` with a mismatched `protocol_version` → `VersionMismatch`; `connect` fails by default, `verify_version(false)` connects.
 - `tests/images.rs` — `decode_image` for PNG and raw RGBA8 (including a non-tight `stride` that must be repacked), plus failure cases (bad base64, unknown format rejected at the wire boundary, truncated PNG) and client-owned extras for length/stride/dimension mismatches.
@@ -126,6 +129,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
   - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }`; `EventKind` serialises as a snake_case string; `EventPayload::to_data() -> Result<Value>`
   - `ErrorPayload { code: adesk_core::ErrorCode, message: String, data: Option<Value> }` (`data` deliberately dropped by the client)
   - `ImagePayload { width, height, format, stride, data, scale }` with a `Png`/`Rgba8` format enum and base64 `data`
+  - `QuietEvent { window_id: Option<WindowId>, quiet_ms: u64 }` (serde derive; re-exported at the client root)
 
 ## Known Issues
 
@@ -134,10 +138,10 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 - **Proto canonicalises request params.** `Method::from_parts` re-encodes params through proto's typed structs, so defaults are filled: `subscribe_events` with `EventFilter::all()` arrives as `{"kinds":[<the 11 names>]}`, and `wait_for_*` always carry `include_image:false`. Assert the client-level serialisation (`serde_json::to_value(&request)`) where the frozen spec says a key is omitted.
 - **`decode_image` cannot observe an unknown format.** `adesk_proto::ImageFormat` is a closed `Png`/`Rgba8` enum, so an unknown `format` is rejected by the wire codec before `decode_image` runs, and `decode_image` matches exhaustively. A decode-time unknown-format error needs `#[serde(other)] Unknown` in `adesk-proto` (root-owned). `tests/images.rs` pins the actual boundary behaviour.
 - `docs/protocol.md` §5.7 does not specify the data shape of an `inspect_frame` event; the client assumes `{"image": ImagePayload}` and falls back to `AgpEvent::Other` if the payload does not fit.
-- `docs/protocol.md` §5.6 lists 11 `EventKind` values while `adesk_core::EventKind` has 9; the client's filter enum carries all 11 and `AgpEvent::Other` preserves any frame it cannot type.
-  `EventStream` (from `subscribe_events`) silently drops those `Other` frames even when the filter selects them, so `quiet`/`surface_damage` are only observable through `subscribe_frames`/`AgpEventStream`.
+- `docs/protocol.md` §5.6 lists 11 `EventKind` values while `adesk_core::EventKind` has 9; the filter enum carries all 11.
+  Wire `quiet` frames are typed as `AgpEvent::Quiet`; `surface_damage` is a subscription-only filter alias that no frame carries, so any `surface_damage` frame stays `AgpEvent::Other`.
+  `EventStream` (from `subscribe_events`) skips non-core frames — including `quiet` — even when the filter selects them, so those frames are observable only through `subscribe_frames`/`AgpEventStream`.
 - **The payload's `format` type is not re-exported.** `adesk_client::ImageFormat` is the *request* enum; `ImagePayload::format` is `adesk_proto::ImageFormat`, which the crate does not re-export, so matching on it requires a direct `adesk-proto` dependency — otherwise use `decode_image`/`ImagePayload::decode_data`.
-- `docs/protocol.md` §4 shows `image` inside `Observation` while `adesk-core::Observation` has no such field; see Design Decisions for how `ObserveResult` tolerates both layouts. Root may want to pin one layout.
 - The client's `wait_for_*` requests omit `include_image` (proto canonicalises it to `false` on the wire); if a consumer needs a post-wait image it must call `observe` or `capture_window`.
 
 ## Notes for Agents
@@ -150,7 +154,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 ## Status
 
 Implementation-complete: zero `todo!()`, no skeleton-phase `allow` attributes (the only one left is the harness's `#![allow(dead_code)]`, explained above).
-`bash scripts/dev.sh cargo test -p adesk-client` is green: 61 integration tests (api 30, events 7, images 10, errors 3, framing 3, socket_path 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
+`bash scripts/dev.sh cargo test -p adesk-client` is green: 67 tests — 66 integration tests (api 30, events 12, images 10, errors 3, framing 3, socket_path 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
 `adesk-agent` and `adesk-testkit` may build on this surface.
 
 ## See Also
