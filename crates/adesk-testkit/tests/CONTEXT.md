@@ -24,7 +24,3 @@ The suite is implemented and passes under the dev shell (`cargo test -p adesk-te
 - Never hard-code the output size: use `expected_window_geometry` / `TestRuntime::tiled_rect()`.
 - The harness serializes process-env-scoped runtimes in one test binary itself, so no `--test-threads=1` is required.
 - The frozen acceptance specs (`api_surface.rs`, `assertions.rs`, `fixtures.rs`, `runtime.rs`, `wayland_client.rs`) must not be edited; add new behavior proof in new test files.
-
-## Known Issues
-
-- The module-level doc comments in the frozen specs still describe the Phase-1 skeleton ("bodies are `todo!()`", "expected to fail at runtime until Phase 2"), and `wayland_client.rs` still claims `--test-threads=1` is required. Both are stale — the specs must not be edited, so ignore the comments.

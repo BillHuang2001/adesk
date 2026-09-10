@@ -1,11 +1,9 @@
 //! Compile-shape guards for the harness's public API.
 //!
-//! Binds the main entry points to their exact signatures, so a breaking change to the
-//! testkit's public surface fails to compile here instead of silently changing the tests'
-//! meaning, and checks the runtime-free constants and builder semantics.
-//!
-//! Phase 1 requires only that this file **compiles**. The constant/builder assertions hold
-//! today (they use no `todo!()` body); the rest of the suite must pass once Phase 2 lands.
+//! Frozen acceptance spec for the implemented harness. Binds the main entry points to their
+//! exact signatures, so a breaking change to the testkit's public surface fails to compile
+//! here instead of silently changing the tests' meaning, and checks the runtime-free
+//! constants and builder semantics.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
