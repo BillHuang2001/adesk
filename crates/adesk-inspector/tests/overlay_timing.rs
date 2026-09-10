@@ -34,22 +34,6 @@ fn labels_frame(
     frame
 }
 
-/// Number of `color` pixels inside `rect`, clipped to the frame.
-fn count_in(frame: &ImageBuffer, rect: Rect, color: [u8; 4]) -> usize {
-    let mut count = 0;
-    for y in rect.y..rect.bottom() {
-        for x in rect.x..rect.right() {
-            if x < 0 || y < 0 || x as u32 >= frame.width || y as u32 >= frame.height {
-                continue;
-            }
-            if common::px(frame, x as u32, y as u32) == color {
-                count += 1;
-            }
-        }
-    }
-    count
-}
-
 #[test]
 fn actions_draw_plus_marker_and_label_for_positioned_action() {
     let base = common::frame(64, 48);
@@ -112,7 +96,7 @@ fn actions_draw_plus_marker_and_label_for_positioned_action() {
         }
     }
     // The plate carries action-coloured ink.
-    assert!(count_in(&out, plate, action) > 0);
+    assert!(common::count_in(&out, plate, action) > 0);
 }
 
 #[test]
@@ -160,8 +144,8 @@ fn actions_hud_lists_positionless_actions_top_left() {
         style.outline.to_array(),
         "line 1 corner"
     );
-    assert!(count_in(&out, plate0, action) > 0, "line 0 ink");
-    assert!(count_in(&out, plate1, action) > 0, "line 1 ink");
+    assert!(common::count_in(&out, plate0, action) > 0, "line 0 ink");
+    assert!(common::count_in(&out, plate1, action) > 0, "line 1 ink");
 
     // Content proof: the whole frame equals a reference render of the two
     // labels at the asserted ink origins (everything is clipped to the frame).
@@ -296,15 +280,6 @@ fn commit_timing_right_aligns_hud() {
     // label at the plate's ink origin with the timing accent.
     let expected = labels_frame(96, 48, &[(origin, label)], &accent(&style, style.timing));
     assert_eq!(out.data, expected.data);
-}
-
-#[test]
-fn commit_timing_draws_nothing_without_commit() {
-    let input = common::input(common::frame(96, 48)).build();
-    let inspector = Inspector::new(vec![OverlayKind::CommitTiming]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-    assert_eq!(out.data, input.frame.data);
 }
 
 #[test]

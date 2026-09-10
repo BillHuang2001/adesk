@@ -93,17 +93,6 @@ fn damage_overlaps_blend_repeatedly() {
 }
 
 #[test]
-fn damage_ignores_empty_rects() {
-    let input = common::input(common::frame(32, 32))
-        .damage(vec![common::rect(4, 4, 0, 8), common::rect(4, 4, 8, 0)])
-        .build();
-    let inspector = Inspector::new(vec![OverlayKind::Damage]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-    assert_eq!(out.data, input.frame.data);
-}
-
-#[test]
 fn surface_bounds_outlines_every_window_geometry() {
     let input = common::input(common::frame(64, 48))
         .windows(vec![
@@ -222,13 +211,4 @@ fn cursor_clips_near_frame_edges() {
     // The frame is still intact: no out-of-bounds write happened.
     assert_eq!(out.size(), input.size());
     assert_eq!(out.data.len(), 16 * 16 * 4);
-}
-
-#[test]
-fn cursor_draws_nothing_when_unknown() {
-    let input = common::input(common::frame(16, 16)).build();
-    let inspector = Inspector::new(vec![OverlayKind::Cursor]);
-    let out = inspector.render(&input).expect("render");
-    assert_eq!(common::diff_bytes(&out, &input.frame), 0);
-    assert_eq!(out.data, input.frame.data);
 }

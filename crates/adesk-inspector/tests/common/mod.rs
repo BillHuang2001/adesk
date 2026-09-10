@@ -1,12 +1,13 @@
 //! Shared fixtures and pixel helpers for the inspector integration tests.
 //!
-//! These helpers are implemented (they are test scaffolding); the assertions
-//! themselves land in Phase 2 with the painters.
+//! Every helper here is exercised by at least one test binary; the module is
+//! compiled once per binary, so `allow(dead_code)` silences the per-binary
+//! "unused" warnings for the subset each one ignores.
 
 #![allow(dead_code)]
 
-use adesk_core::{AppId, ImageBuffer, OverlayKind, Rect, WindowId, WindowInfo, WindowState};
-use adesk_inspector::{InspectionInput, InspectionInputBuilder};
+use adesk_core::{AppId, ImageBuffer, OverlayKind, Point, Rect, WindowId, WindowInfo, WindowState};
+use adesk_inspector::{font, text, Canvas, InspectionInput, InspectionInputBuilder, OverlayStyle};
 
 /// Every overlay kind (core's `OverlayKind` has no `ALL` constant).
 pub const ALL_OVERLAYS: [OverlayKind; 8] = [
@@ -73,13 +74,88 @@ pub fn px(frame: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
     frame.pixel(x, y).expect("pixel within bounds")
 }
 
+/// Number of `color` pixels inside `rect`, clipped to the frame.
+pub fn count_in(frame: &ImageBuffer, rect: Rect, color: [u8; 4]) -> usize {
+    let mut count = 0;
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if x < 0 || y < 0 || x as u32 >= frame.width || y as u32 >= frame.height {
+                continue;
+            }
+            if px(frame, x as u32, y as u32) == color {
+                count += 1;
+            }
+        }
+    }
+    count
+}
+
 /// Number of pixels exactly equal to `color`.
 pub fn count_pixels(frame: &ImageBuffer, color: [u8; 4]) -> usize {
-    frame
-        .data
-        .chunks_exact(4)
-        .filter(|pixel| *pixel == color)
-        .count()
+    count_in(
+        frame,
+        Rect {
+            x: 0,
+            y: 0,
+            w: frame.width,
+            h: frame.height,
+        },
+        color,
+    )
+}
+
+/// Coordinates of every pixel where `a` and `b` differ, in row-major order.
+pub fn changed_pixels(a: &ImageBuffer, b: &ImageBuffer) -> Vec<(u32, u32)> {
+    assert_eq!(a.size(), b.size(), "frames must have the same size");
+    let mut changed = Vec::new();
+    for y in 0..a.height {
+        for x in 0..a.width {
+            if px(a, x, y) != px(b, x, y) {
+                changed.push((x, y));
+            }
+        }
+    }
+    changed
+}
+
+/// Asserts `a` and `b` are pixel-identical inside `region`.
+pub fn assert_region_equal(a: &ImageBuffer, b: &ImageBuffer, region: Rect) {
+    for y in region.y..region.bottom() {
+        for x in region.x..region.right() {
+            assert_eq!(
+                px(a, x as u32, y as u32),
+                px(b, x as u32, y as u32),
+                "pixel ({x}, {y}) must match"
+            );
+        }
+    }
+}
+
+/// Reference composition of one label: the documented layout
+/// (`slot_origin` = plate top-left, ink origin = plate + `pad`) drawn directly
+/// through `text::draw_label`, clipped to the window.
+///
+/// A label painter must produce the same bytes; a mismatch means it deviated
+/// from the layout spec, not from `draw_label`.
+pub fn reference_label(
+    base: &ImageBuffer,
+    window: Rect,
+    slot: u8,
+    label: &str,
+    style: &OverlayStyle,
+) -> ImageBuffer {
+    let pad = style.pad();
+    let step = font::line_height(style.scale()) + pad;
+    let ink_origin = Point {
+        x: window.x + 2 * pad,
+        y: window.y + 2 * pad + i32::from(slot) * step,
+    };
+    let mut out = base.clone();
+    let mut canvas = Canvas::new(&mut out);
+    canvas.with_clip(window, |clipped| {
+        text::draw_label(clipped, ink_origin, label, style);
+    });
+    out
 }
 
 /// Number of differing bytes between two equally sized frames.
