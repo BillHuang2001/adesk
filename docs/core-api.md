@@ -179,7 +179,7 @@ pub struct Observation {
     pub destroyed_windows: Vec<WindowId>,
     pub popups_appeared: Vec<u64>,
     pub popups_disappeared: Vec<u64>,
-    pub elapsed_ms: u64,
+    pub elapsed_ms: u64,                 // ms from the wait's start to resolution (protocol.md §4)
     pub quiet: bool,                     // evidence flag: quiet for the threshold at resolution time
     pub timed_out: bool,
     pub last_commit_seq: u64,

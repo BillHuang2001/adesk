@@ -17,6 +17,14 @@ actions, never any particular LLM or vendor API.
   same connection.
 - A connection is full-duplex. Clients may pipeline requests (multiple in flight);
   request IDs disambiguate responses.
+- Ordering: a connection's requests are *read* in the order they were sent, but only
+  §5.5 input methods are *executed* in that order. Every other request is dispatched
+  concurrently, so responses are written in completion order, not submission order,
+  and a request pipelined behind another one on the same connection is not guaranteed
+  to observe that request's effect. The barrier is the response: once a response has
+  been received, the state it reports is in force for every request issued afterwards
+  (the runtime applies its compositor commands in FIFO order, and a response is
+  written only after the command behind it has been served).
 - Unknown fields in requests MUST be ignored by the server (forward compatibility).
 - Unknown methods MUST produce an `unknown_method` error, never a dropped connection.
 
@@ -94,12 +102,39 @@ Observation = {"window_id": 17 | null, "after_action": 582 | null,
 filter point (window-relative, clipped to the window geometry), coalesced and
 simplified. It is *evidence*, not a guarantee of visual difference.
 
+`elapsed_ms` counts from the moment the runtime issued the wait (the request's
+arrival) to the moment the observation resolved, in the same monotonic domain as
+`ts_ms`; a `{"type": "timeout"}` wait therefore reports roughly its `timeout_ms`.
+
+`ImagePayload.scale` is the factor the runtime applied when it downscaled the
+rendered image: `width / source width`, where the source is the requested `region`
+or else the window geometry. It is `1.0` when nothing was scaled and also when the
+source width is unknown. `stride` is the byte stride of `data` for `rgba8` (always
+tightly packed: `width * 4`) and `null` for `png`, whose `data` is a complete PNG
+file.
+
 `observe`, `wait_for_change` and `wait_for_quiet` return
 `{"observation": {..., "image": ImagePayload | null}}`; `image` is a field *inside*
 the observation object and is `null` when no image was requested
-(`include_image=false`, or the `false` default of the two waits).
+(`include_image=false`, or the `false` default of the two waits). It is rendered
+*after* the observation resolves, so it shows the settled state rather than the
+state at the moment the condition was noticed. Because only `capture_window` and
+`capture_region` take a `format` param, an observation's image is always
+`"format": "png"` with `"stride": null`. Its extent is the whole window unless the
+request crops it: `observe` honours its own `region` and `max_dimension`, while the
+two waits have neither param and therefore attach the full window at natural size.
+An unscoped observation (no `window_id`) renders the runtime's active window, else
+the keyboard-focus window; when there is no such window — or when no window is
+renderable at that moment — `image` is `null` even though an image was requested.
 
 ## 5. Methods
+
+The seven tables below are the complete method set of this runtime: 29 methods, and
+a request naming anything else is answered with `unknown_method` (§1, §6) and never
+dispatched. The set is fixed rather than negotiated — there is no capability
+handshake — but §7 still lets a later runtime add methods without bumping
+`protocol_version`, so a client must treat `unknown_method` as a normal answer, not
+a fatal error.
 
 ### 5.1 Runtime
 
@@ -122,6 +157,10 @@ process (honouring `Terminal=true`), and returns immediately. The resulting
 Wayland toplevel is correlated to `app_id` and announced via a `window_created`
 event carrying the same `launch_id`.
 
+`args` are appended *after* the expanded `Exec` argv (field codes see an empty file
+list, since AGP carries no file arguments); a `Terminal=true` entry then wraps the
+whole command — the app's argv plus `args` — in the terminal.
+
 ### 5.3 Windows
 
 | Method | Params | Result |
@@ -132,9 +171,31 @@ event carrying the same `launch_id`.
 | `close_window` | `{"window_id": u64}` | `{"action_id": u64}` |
 | `get_focus` | `{}` | `{"window_id": u64?, "surface_focus": bool}` |
 
-`activate_window` mutates compositor state directly (keyboard focus + tiling
-reconfiguration). It is never implemented as `Alt+Tab` or any other synthetic
-input.
+`activate_window` mutates compositor state directly (keyboard focus, and with it
+the data-device focus — §5.8). It is never implemented as `Alt+Tab` or any other
+synthetic input. Activation is focus-only: a window is tiled when it maps and when
+the virtual output is resized, so activating an already-mapped window sends its
+client no new `xdg_toplevel.configure`.
+
+The response is a full barrier. It is written only after the compositor has applied
+the activation — the window model's active window, the seat's keyboard focus and
+the data-device focus — and published the matching `window_activated` and
+`focus_changed` events on the event stream, so an awaited response means the
+activation is in force and no follow-up barrier request (`get_focus`,
+`list_windows`, `observe`) is needed. Activating the window that is already active
+is a successful no-op that emits no event; an unknown `window_id` fails with
+`unknown_window` and changes nothing.
+
+The response does not extend to the Wayland side: `wl_keyboard.enter`/`leave` and
+`wl_data_device.selection` reach the affected clients on their own connections, so
+it does not promise that a focused application has *processed* them. Observing the
+application's reaction (a commit, a title change) is the agent's job through
+`observe`/`wait_for_change`.
+
+`list_windows` lists normal toplevels only: an xdg-popup never becomes a
+`WindowInfo`. Popups surface through their owner's `WindowInfo.popup_count`, the
+`popup_appeared`/`popup_disappeared` events, and the popup counters of an
+`Observation`.
 
 ### 5.4 Capture and observation
 
@@ -166,6 +227,15 @@ Semantics:
 - `timed_out` reports that the wait expired before its condition was met, except
   `{"type": "timeout"}`, which reaches its horizon by design and therefore always
   reports `timed_out: false`.
+- `max_dimension`, wherever it is accepted, bounds the image's longest edge: the
+  image is scaled by `max_dimension / longest_edge` with integer half-up rounding
+  per edge, each edge staying at least 1 and never above its unscaled size. A
+  request that already fits, a zero-sized source, or `max_dimension = 0` (the bound
+  is disabled) returns the image unscaled; the aspect ratio is preserved up to that
+  rounding.
+- `include_image` defaults to `true` for `observe` and `false` for the two waits, and
+  only the capture methods choose an image format: an attached image is always `png`,
+  at the extent §4 defines for each method.
 
 ### 5.5 Input (application input, delivered through the Wayland seat)
 
@@ -189,7 +259,8 @@ Semantics:
   origin (windows are tiled at `(0,0)`, but the conversion goes through the
   window model, never hard-coded).
 - Input actions on one connection are executed in submission order; concurrent
-  connections are serialized by the runtime's input queue.
+  connections are serialized by the runtime's input queue. No other method carries
+  that order (§1), so awaiting a response is the only way to order two of them.
 - Every action returns an `action_id` that later observations may reference via
   `after_action`.
 
@@ -227,6 +298,38 @@ that subscription's overlays.
 `OverlayKind` ∈ `window_ids`, `app_ids`, `focus`, `damage`, `surface_bounds`,
 `cursor`, `actions`, `commit_timing`. Overlays are debug-only; agent-facing
 `capture_*` never includes them.
+
+### 5.8 Clipboard (data device)
+
+AGP has no clipboard method: the runtime neither stores nor proxies selection
+contents, and no `RuntimeEvent` carries them. Applications exchange selections
+directly through `wl_data_device_manager`, which the runtime exports as an ordinary
+global (clipboard basics — drag-and-drop is out of v1 scope). What the runtime
+decides is *who may publish* and *who is offered* a selection, and both gates follow
+the keyboard focus: the runtime keeps the data-device (selection) focus identical to
+the keyboard focus.
+
+- `wl_data_device.set_selection` is accepted only from the client whose surface
+  holds the keyboard focus at the moment the request is dispatched; the runtime does
+  not validate the request's `serial`.
+- A selection is announced (`wl_data_offer` + `wl_data_device.selection`) only to
+  the client that currently holds the data-device focus, which is the active
+  window's client — activating a window therefore offers it the current selection.
+
+Consequences:
+
+- A client can publish a selection only while its window is the active one.
+  `activate_window` (§5.3) is how the clipboard role is handed over, and its awaited
+  response guarantees the new focus is applied, so a `set_selection` dispatched
+  after it is accepted.
+- A publication dispatched after the focus moved away is dropped silently: no
+  protocol error, no acknowledgement, no `wl_data_source.cancelled`, and the
+  previous selection stays current. (`cancelled` is sent to a source only when an
+  *accepted* selection supersedes it.)
+- Ordering on the Wayland side is per connection: the runtime dispatches a client's
+  requests in the order it sent them, so an application that publishes once it has
+  observed the focus change (its own `wl_keyboard.enter`) publishes against the new
+  focus.
 
 ## 6. Errors
 

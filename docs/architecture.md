@@ -100,7 +100,14 @@ enum RuntimeCommand {
 }
 ```
 
-- Commands are processed in FIFO order, which gives input actions their causal order.
+- Commands are processed in FIFO order, which gives input actions their causal order
+  and makes every result-bearing command a state barrier: its reply is sent from the
+  same callback that produced the state change, so an awaited reply means the change
+  is applied and a command enqueued afterwards is served after it (`protocol.md` §1,
+  §5.3). Client sockets are flushed immediately *after* the reply, still inside that
+  callback, so the `wl_keyboard`/`wl_data_device` events a command queues may reach
+  the clients just after the reply resolves — the barrier covers compositor state,
+  not what a client has processed yet.
 - A command must never block the loop; render work is synchronous but bounded by the
   output size, and replies are sent immediately after the frame is produced.
 - `RenderedFrame` = `adesk_core::ImageBuffer` + `commit_seq` + damage regions used.
@@ -220,6 +227,24 @@ Seat and input:
 - Input injection uses the same seat path as a real device: set pointer/keyboard focus
   from the window model, send `wl_pointer`/`wl_keyboard` events, and forward to the
   focused client. Key chords are pressed in order and released in reverse.
+- Data device (`wl_data_device_manager`): selections are client-to-client — the
+  compositor stores no payload (`SelectionHandler::SelectionUserData = ()`) and no
+  runtime event carries one. Both gates come from the protocol implementation and
+  follow the keyboard focus: `wl_data_device.set_selection` is accepted only from the
+  client whose surface currently holds the keyboard focus (the runtime does not
+  validate the request's `serial`), and a selection is announced (`wl_data_offer` +
+  `wl_data_device.selection`) only to the client that holds the *data-device* focus.
+  The compositor keeps `data-device focus == keyboard focus` — `State::apply_activate`
+  is the single keyboard-focus path in the crate and moves both in the same call — so
+  a client can publish only while its window is the active one and becomes the
+  selection target exactly when it is activated. A publication dispatched after the
+  focus moved away is dropped silently: no protocol error, no `wl_data_source.cancelled`,
+  and the previous selection stays current (`protocol.md` §5.8).
+- Wayland request ordering is per connection and the loop dispatches clients in the
+  order they sent their requests, while `ActivateWindow` is applied synchronously
+  inside its own callback — so a client that publishes after the focus change reached
+  it (its `wl_keyboard.enter`) always has its `set_selection` dispatched against the
+  new focus, whatever the interleaving of the two calloop sources.
 - The compositor owns no agent semantics: it reports what happened, it does not decide
   when to render or what "quiet" means.
 
@@ -228,8 +253,13 @@ Seat and input:
 - Startup: start compositor thread → wait for ready → bind Unix socket → install
   signal handlers → serve.
 - Per connection: NDJSON reader task + writer task + one dispatcher. Requests are
-  handled concurrently, except input methods, which go through a per-connection
-  ordered queue so `click` → `type_text` causality is preserved.
+  handled concurrently (a semaphore bounds in-flight requests at 64), so responses are
+  written in completion order rather than submission order and pipelining two requests
+  orders nothing; input methods are the exception, going through a per-connection
+  ordered queue so `click` → `type_text` causality is preserved. Awaiting a response
+  is the only cross-request barrier (`protocol.md` §1): `activate_window` answers only
+  after the compositor applied the activation, so a request the client sends once it
+  has that response observes it.
 - The server owns the `ActionRegistry` (ids are allocated here) and the
   `ObserverService`; both are fed by the event pump task.
 - `capture_*` / `observe` map to `RenderWindow` commands; images are encoded
