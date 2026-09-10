@@ -15,7 +15,7 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 ### Connection (`src/client.rs`)
 - `Client` — cheap-to-clone async handle; all methods take `&self`, so one handle can be shared across tasks. Clones share socket, request-id space, pending map and event fan-out.
 - `Client::connect(path)`, `Client::connect_default()`, `Client::connect_with(ConnectOptions) -> Result<Client>`.
-- `Client::socket_path()`, `is_closed()`, `protocol_version()`, `close(self) -> Result<()>` (closes the shared connection; in-flight requests fail with `Closed`).
+- `Client::socket_path()`, `is_closed()`, `close(self) -> Result<()>` (closes the shared connection; in-flight requests fail with `Closed`).
 - `ConnectOptions` (`#[non_exhaustive]`): `path`, `max_frame_len`, `connect_timeout`, `verify_version` (default `true` → post-connect `ping` refuses version skew); builders `new/path/max_frame_len/connect_timeout/verify_version`.
 - `default_socket_path()`: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<system temp dir>/adesk.sock` (the exact fallback expression `adesk_server::default_socket_path()` uses, so the two meet under any `TMPDIR`).
 - `DEFAULT_MAX_FRAME_LEN` (16 MiB), `DEFAULT_CONNECT_TIMEOUT` (5 s).
