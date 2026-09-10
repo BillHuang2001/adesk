@@ -81,6 +81,12 @@ Runs with `./scripts/dev.sh cargo test -p adesk-machine` → 114 passed, 0 faile
 - The `podman inspect` JSON the backend parses is an array of `{ "Id", "Name", "Image", "Created", "State": { "Status", "Pid", "ExitCode" } }`; `State.Status` (`created`/`running`/`stopped`/`exited`/`dead`) maps onto `MachineState`. `tests/podman_stub.rs` emits exactly this shape — keep the two in sync.
 - `MachineStatus::created_at_ms` is monotonic ms from `MockRuntime`'s injectable clock; for `PodmanRuntime` it is a best-effort epoch-derived value parsed from `Created`.
 - Process-spawning tests must fully write+close a stub script before spawning and serialize spawning (a process-wide mutex): writing then immediately exec'ing a just-written script can hit `ETXTBSY` ("Text file busy").
+## Known Issues
+- `MachineError::InvalidSpec` and `MachineError::Io` are never produced by any code path: the CLI's `build_spec` rejects malformed specs with a plain `String`, and every spawn failure maps to `MachineError::Spawn` — the `#[from] std::io::Error` on `Io` has no caller. Both exist as public API only.
+- The `approval` module and `HostCapabilities::allows_mount`/`allows_port`/`HostControlPlane::request_approval` are exercised only by tests; the `adesk-machine` CLI never requests an approval or checks a capability (approval UI is out of scope per `docs/machine.md` §8).
+- `manager.rs`'s `#[cfg(test)] testing::StubRuntime` duplicates the always-compiled `MockRuntime` (lifecycle state machine, `machine-N` id allocation, `not_found`), even though its doc comment claims `MockRuntime` "is not available here" — that comment is stale; `MockRuntime` is public, always compiled and used by the integration tests.
+- `RuntimeKind` (and `ContainerRuntime::kind`) is only touched by tests: the CLI defines its own clap `RuntimeArg` and never converts to/from `RuntimeKind`.
+
 ## Status
 Implementation-complete and green: `error`, `spec`, `state`, `runtime` (trait + `RuntimeKind`), `runtime::mock`, `runtime::podman`, `registry`, `manager`, `host`, `approval` and the `adesk-machine` CLI are all implemented, documented and tested; `src/lib.rs` re-exports the whole surface at the crate root.
 `cargo test -p adesk-machine` = 114 passed / 0 failed; `cargo clippy -p adesk-machine --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-machine --check` and `cargo doc -p adesk-machine --no-deps --document-private-items` are all clean.
