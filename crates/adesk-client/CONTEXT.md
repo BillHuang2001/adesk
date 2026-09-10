@@ -130,7 +130,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
   - `Codec` trait (`encode(&Frame) -> Result<Vec<u8>, _>`, `decode(&[u8]) -> Result<Frame, _>`, both terminator-free) implemented by the unit struct `NdjsonCodec`
   - `Frame::{Request(RequestFrame), Response(ResponseFrame), Event(EventFrame)}`
   - `RequestFrame { id: u64, method: Method }` + `RequestFrame::new`, and `Method::from_parts(name: &str, params: Value) -> Result<Method>` (the typed method vocabulary)
-  - `ResponseFrame { id: u64, outcome: ResponseOutcome }`, `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, `ResultPayload::as_value() -> &Value`
+  - `ResponseFrame { id: u64, outcome: ResponseOutcome }`, `ResponseOutcome::{Result(ResultPayload), Error(ErrorPayload)}`, `ResultPayload(pub Value)`
   - `EventFrame { event: EventKind, seq: u64, ts_ms: u64, data: EventPayload }`; `EventKind` serialises as a snake_case string; `EventPayload::to_data() -> Result<Value>`
   - `ErrorPayload { code: adesk_core::ErrorCode, message: String, data: Option<Value> }` (`data` deliberately dropped by the client)
   - `ImagePayload { width, height, format, stride, data, scale }` with a `Png`/`Rgba8` format enum and base64 `data`
