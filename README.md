@@ -176,17 +176,59 @@ CMD ["adesk-server", "--renderer", "pixman", "--socket", "/run/adesk/adesk.sock"
 
 ## Inspecting as a human
 
-There is no viewer binary or UI. A human uses an AGP client over the same socket:
+Two independent paths let a human observe the desktop.
+
+**Viewer (VAP).** The runtime serves a purpose-built viewer protocol (VAP v1) on a
+second listener, and the workspace ships a headless `adesk-viewer` client:
+
+```sh
+# One-shot capture of the current desktop to a PNG.
+./scripts/dev.sh cargo run -p adesk-viewer -- --capture desktop.png
+
+# Follow the desktop, writing every frame, and replay a small input script.
+./scripts/dev.sh cargo run -p adesk-viewer -- --follow --out-dir shots/ --input script.txt
+```
+
+The viewer listener is a Unix socket by default at the AGP socket's sibling
+(`$XDG_RUNTIME_DIR/adesk-viewer.sock`); `--viewer-tcp <HOST:PORT>` exposes a TCP
+transport for a remote viewer and `--no-viewer` disables it. Viewer input (pointer,
+click, scroll, key, text) is applied through the **same seat path** as agent input and
+returns a normal AGP `action_id`. `adesk-viewer` is headless — it writes PNGs and reads
+input from a script — so a display-capable front-end is still needed to watch the
+desktop interactively. VAP is specified in `docs/viewer.md`.
+
+**Inspector overlays (AGP).** Debug overlays remain AGP-only:
 
 - `inspect_capture` returns **one** PNG of the composed output with debug overlays.
 - `inspect_subscribe` pushes a throttled stream of `inspect_frame` PNG events.
 
 Overlays are selectable: `window_ids`, `app_ids`, `focus`, `damage`, `surface_bounds`,
-`cursor`, `actions`, `commit_timing` (the default set is `window_ids` + `focus` +
-`damage`). The SDK mirrors these as `Client::inspect_capture(...)` and
-`Client::inspect_subscribe(...)`. The image comes back as a base64 PNG (`ImagePayload`)
-over the socket, so the human must decode and save it to view it. Inspection overlays are
-human-only and never appear in the agent's own capture/observation images.
+`cursor`, `actions`, `commit_timing` (default `window_ids` + `focus` + `damage`). The SDK
+mirrors these as `Client::inspect_capture(...)` and `Client::inspect_subscribe(...)`.
+Inspection overlays are human-only and never appear in the agent's own capture images.
+
+## Assistant runtime (AI Machine)
+
+`adesk-machine` provides the host-side runtime that gives each assistant a Linux machine
+it fully owns — root inside, systemd as PID 1, Nix for software — inside a **rootless
+container**, while the host keeps control of the boundary (lifecycle, networking,
+exposed resources, approvals). ADesk runs *inside* the machine; the viewer runs
+*outside* it. The container engine is an abstraction: rootless **Podman** is the first
+backend, with an in-memory `mock` backend for tests and development.
+
+```sh
+# Create/start an ADesk machine over rootless Podman, then inspect it.
+./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman create \
+    --name assistant --image registry.local/adesk:latest --viewer-unix /run/adesk/adesk-viewer.sock:/run/adesk/adesk-viewer.sock
+./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman start assistant
+./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman list
+
+# Everything works without a container engine via the mock runtime.
+./scripts/dev.sh cargo run -p adesk-machine -- --runtime mock list
+```
+
+The design (division of responsibility, the backend seam, viewer exposure over
+mounts/ports, approvals, trust model) is `docs/machine.md`.
 
 ## Layout and docs
 
