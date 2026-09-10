@@ -60,6 +60,11 @@ fn parses_a_full_entry_from_disk_end_to_end() {
     assert_eq!(entry.startup_wm_class.as_deref(), Some("example-wm"));
     assert!(entry.dbus_activatable);
     assert_eq!(entry.try_exec.as_deref(), Some("/usr/bin/example"));
+
+    // The raw layer keeps non-special keys verbatim; absent keys stay absent.
+    let raw = parse_body(FULL);
+    assert_eq!(raw.get("GenericName"), Some("An example"));
+    assert_eq!(raw.get("Missing"), None);
 }
 
 #[test]
@@ -83,6 +88,25 @@ fn raw_lookup_ignores_localized_keys() {
     assert_eq!(raw.get("name"), None, "keys are case-sensitive");
     assert_eq!(raw.localized("Name", Some("fr")), Some("Francais"));
     assert_eq!(raw.localized("Name", None), Some("Base"));
+
+    // `localized` is key-generic and yields `None` when nothing matches.
+    let per_key = parse_body("Name=Base\nName[fr]=F\nComment=Base\nComment[fr]=Commentaire\n");
+    assert_eq!(per_key.localized("Name", Some("fr")), Some("F"));
+    assert_eq!(
+        per_key.localized("Comment", Some("fr")),
+        Some("Commentaire")
+    );
+    assert_eq!(per_key.localized("Missing", Some("fr")), None);
+
+    // A localized-only key resolves for its locale and is invisible otherwise.
+    let localized_only = parse_body("Name[de]=Deutsch\n");
+    assert_eq!(
+        localized_only.localized("Name", Some("de_AT.UTF-8")),
+        Some("Deutsch")
+    );
+    assert_eq!(localized_only.localized("Name", Some("fr")), None);
+    assert_eq!(localized_only.localized("Name", None), None);
+    assert_eq!(localized_only.get("Name"), None);
 }
 
 // --- localization ----------------------------------------------------------
