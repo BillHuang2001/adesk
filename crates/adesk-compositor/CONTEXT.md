@@ -96,7 +96,7 @@ Sibling cross-references (read-only from this node; escalate writes to the paren
 - `../adesk-core/` — domain types and `RuntimeEvent` (implemented).
 - `../adesk-wm/` — window model, tiling policy, focus, coordinate authority (implemented; consumed by `WmBridge`).
 - `../adesk-render/` — crop/downscale/readback/encoding and the `Scene` pipeline used by both render paths (implemented).
-- `../adesk-testkit/` — integration harness the test plan depends on (Phase 4).
+- `../adesk-testkit/` — implemented integration harness the suites consume: in-process runtime, temp `XDG_RUNTIME_DIR`, Wayland test client (input and clipboard recorders), image assertions, event tap.
 
 ## Design Decisions
 
