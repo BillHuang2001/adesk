@@ -14,7 +14,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - Queries (sync, never wait): `snapshot() -> ObserverSnapshot`, `window_state(WindowId) -> Option<WindowTemporalState>`, `window_ids() -> Vec<WindowId>`, `watermark() -> u64`, `now_ms() -> u64`, `is_quiet(WindowId, quiet_ms) -> Option<bool>`.
 ### Specs (`src/spec.rs`)
 - `WaitSpec { window_id, since_commit, timeout_ms }`, `QuietSpec { window_id, quiet_ms, timeout_ms, after_action }`, `ObserveSpec { window_id, after_action, until, timeout_ms }`; all with `Default` (protocol defaults), `new()` and chainable setters; `ObserveSpec::default().until` is `Condition::Quiet { quiet_ms: 250 }`.
-- `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()`.
+- `Condition { Change, Quiet { quiet_ms }, Timeout }` + `quiet_threshold_ms()` (public helper: `Quiet` → its own `quiet_ms`; `Change`/`Timeout` → the `DEFAULT_QUIET_MS` constant).
 - Image parameters (`include_image`, `region`, `max_dimension`) are deliberately absent: the server renders after the wait resolves.
 ### Actions (`src/actions.rs`)
 - `ActionKind` (13 variants, `ALL`, `is_input()`, `as_str()` = AGP method name), `ActionRecord { id, kind, window_id, position, seq, ts_ms }`.
