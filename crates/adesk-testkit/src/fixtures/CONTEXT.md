@@ -20,6 +20,13 @@ Everything a test needs to pretend an application is installed and launch it: `.
 - `write_raw` rejects absolute paths but does not resolve `..`: relative paths must stay inside the share root by caller discipline (`write_entry` rejects escaping stems before writing).
 - Every process wait is deadline-bounded; `TestApp::exit` kills on deadline and returns the resulting (signal) status, so callers must assert `status.success()`.
 - Integration tests of this package may also use `env!("CARGO_BIN_EXE_adesk-test-app")`.
+- **No exec-path override.** `TestAppSpec::desktop_entry` and `TestApp::spawn` hard-code `helper_bin_path("adesk-test-app")` (`HELPER_APP`); no public constructor takes a caller-supplied program path, and `TestAppSpec::with_arg` only appends arguments. A downstream crate that needs its own fixture binary must compose the `DesktopEntryFixture` by hand (its `exec` field is public) and register it via `FixtureDir::write_entry` + `TestRuntimeConfig::with_fixture_dir`, then launch it over AGP instead of `TestApp::spawn`.
+
+## Notes for Agents
+
+- No exec-path override exists: `TestAppSpec::desktop_entry` (`mod.rs:477`) and `TestApp::spawn` (`mod.rs:523`) both hardcode `helper_bin_path(HELPER_APP)` with `HELPER_APP = "adesk-test-app"` (`mod.rs:67`); `TestAppSpec` has no program-path setter and no env var overrides the program.
+  The only reuse seam for a downstream crate that wants to point a fixture at its own binary is to bypass `TestAppSpec::desktop_entry`/`TestApp::spawn` and build a `DesktopEntryFixture` by hand (`exec` is a public field, `mod.rs:199`) written via `FixtureDir::write_entry`/`write_raw`.
+- `TestAppSpec::cli_args` (`mod.rs:451`) is the single encoder of the helper CLI grammar; the matching decoder lives in the `adesk-test-app` binary (`src/bin/adesk-test-app.rs`), not in this module.
 
 ## Routing Table
 

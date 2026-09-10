@@ -61,11 +61,24 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 - `tests/wire.rs` (23) — golden JSON for every `ClientMessage`/`ServerMessage` variant (comparing parsed `Value`s, so key order is irrelevant), the exact `"type"` tags, `ControlOwner`/`KeyAction` wire names, `CursorState` constructors, defaults, and the `PROTOCOL_VERSION`/`is_compatible_version`/`check_version` helpers.
 - `tests/codec.rs` (14) — round-trip every message both through the free `encode_*`/`decode_*` functions and through the serde impls; single-line-object checks; unknown `"type"` → `Unknown` (both directions, incl. a cross-direction tag); unknown fields ignored (top level and nested payload); malformed JSON / non-object / missing or non-string `type` / schema mismatch → `Malformed`; version mismatch → `VersionMismatch` with `error_code() == ProtocolVersionMismatch`.
 - One doctest in `lib.rs` shows an `encode_client`/`decode_client` round-trip.
+- The only test scaffolding is in-file: `tests/codec.rs`'s `every_client_message()`/`every_server_message()` fixture vectors and `tests/wire.rs`'s `client()`/`server()` (`serde_json::to_value`) + `sample_window()` builders.
+- No test here defines transport plumbing: no `read_line`/`write_line`, no `BufReader`/socket/duplex, no fake peer, no line-splitting helper (NDJSON framing is transport-owned, e.g. `adesk-viewer::transport`).
+- `tests/wire.rs` exercises the `Serialize` impls directly (`serde_json::to_value`) and never calls `encode_*`/`decode_*`; only `tests/codec.rs` does.
 - Total: 23 + 14 + 1 doctest = **38 tests**.
+- No shared test module (`tests/common/` does not exist): each file defines its own helpers.
+  `wire.rs` defines `client(&ClientMessage) -> Value` (17-19), `server(&ServerMessage) -> Value` (22-24) — the local analog of `adesk-proto`'s `wire<T: Serialize>` — and the `sample_window() -> WindowInfo` fixture (26-39).
+  `codec.rs` defines `every_client_message()` (16-77) and `every_server_message()` (79-152); the latter inlines a `WindowInfo` fixture (80-91) copied from `sample_window()`.
+  There is no `image_payload()`/`observation()`/`damage()`/`app_info()`/`rect()`/`size()`/`position()` builder: `ImagePayload`, `Rect`, `Size` and `KeySpec` are built inline at each call site.
+- `wire.rs` re-pins (via the sibling crates' own serde impls, so byte-identical) the AGP/core shapes it embeds: `ImagePayload` `{"width","height","format","stride","data","scale"}` (355-362, 377-378), `Rect` `{"x","y","w","h"}` (396), `Size` `{"w","h"}` (331), `KeySpec` single/chord (198, 205), `RendererKind`/`ImageFormat` (332, 377, 577-583) and `WindowInfo` (392-403). It does NOT pin `Position`, `Condition`, `app_launched`/`RuntimeEvent` payloads or any AGP frame/envelope — this crate carries no event layer.
 ## Notes for Agents
 - The framing (NDJSON, one object per line, 32 MiB cap) belongs to the transport, not this crate; `encode_*` return line-ready strings without a trailing newline (mirror `adesk-proto::encode_frame`).
 - Do not add `ImageFormat`-style closed enums without a catch-all: the viewer must stay forward-compatible.
 - `ViewerHello.client` is `#[serde(default)]`; every other handshake/frame/state field is required on the wire (the optional `id`/`x`/`y`/`bye.reason` are omitted when `None`, never `null`).
+- `tests/` has no `common/` module (unlike `adesk-client`, `adesk-server`, `adesk-observer`, `adesk-inspector`), so `wire.rs` and `codec.rs` each rebuild the same fixtures: the `WindowInfo` literal (window 17 / firefox / GitHub / 1280x800) appears at `tests/wire.rs:26` and inline at `tests/codec.rs:80`, and ~14 message instances (`ServerHello`, `ViewerFrame`, `DesktopState`, `PointerMove`, `Key`, `Bye`, `Unknown`, `InputAck`, `Error`, `Control`, ...) are constructed identically in both files; `codec.rs`'s `every_client_message`/`every_server_message` corpora could be the single source. `adesk-proto/tests/` has the same gap and re-declares an identical `window_info()`/`wire()` helper.
+
+## Known Issues
+- Two `ViewerProtoError` variants are unreachable in the whole workspace: `Json` (every decode path maps a JSON failure to `Malformed`, and no crate `?`s a `serde_json::Error` into this type) and `Unknown` (constructed only by `./tests/codec.rs`); `dead_code` never fires on a public enum variant, so nothing flags them.
+- `serde_json` is declared in both `[dependencies]` and `[dev-dependencies]`; the dev-dependency entry is redundant (integration tests already see normal dependencies — `adesk-proto` has no `[dev-dependencies]` and its tests use `serde_json`).
 ## Status
 Implemented and green: `src/lib.rs`, `src/error.rs`, `src/types.rs`, `src/message.rs`, `src/codec.rs`.
 `./scripts/dev.sh cargo test -p adesk-viewer-proto` = 38 passed / 0 failed (23 `tests/wire.rs`, 14 `tests/codec.rs`, 1 doctest);

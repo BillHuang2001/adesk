@@ -74,6 +74,11 @@ Runs with `./scripts/dev.sh cargo test -p adesk-machine` → 114 passed, 0 faile
 - `./tests/spec_translation.rs` — `build_create_argv` for the default and a fully-populated spec; each `NetworkMode`; viewer exposure → `--volume`/`--publish`.
 - `./tests/approvals.rs` — `AutoApprove`/`AutoDeny`, pre-approval short-circuit, `HostCapabilities` mount/port matching, `HostControlPlane::request_approval`.
 - `./tests/podman_stub.rs` (`#[cfg(unix)]`) — a temp `#!/bin/sh` stub through `PodmanRuntime::with_program` pins the argv and the non-zero-exit → `MachineError::Backend` mapping.
+### Test-suite duplication (audit finding, current state)
+- ~23 of the 74 lib unittests have a near-equivalent integration test: `src/manager.rs` tests (7/10) vs `tests/lifecycle.rs`; `src/host.rs` tests (7/9) vs `tests/approvals.rs`; `src/runtime/podman.rs` (4/13) vs `tests/spec_translation.rs` (byte-identical `build_create_argv` expectations) and (2/13) vs `tests/podman_stub.rs`; `src/approval.rs` (3/6) vs `tests/approvals.rs`.
+- Two in-memory doubles model the same created→running→stopped lifecycle: production `MockRuntime` (`src/runtime/mock.rs`, used by the integration tests) and the `#[cfg(test)]`-only `StubRuntime` (`src/manager.rs` `mod testing`, used by the manager/host unit tests). `StubRuntime::seed` (register a backend-side name without the manager cache) is the one thing the lib double does that `MockRuntime` does not expose directly.
+- Process-spawning stub scaffolding is duplicated: `SPAWN_LOCK` + a temp `#!/bin/sh` writer exist both in `tests/podman_stub.rs` and inline in `src/runtime/podman.rs`; the `Recording`/`RecordingDeny` approver is likewise defined in both `src/approval.rs` and `tests/approvals.rs`.
+- No `#[ignore]`d tests; no wall-clock sleeps, real `podman` invocation or network in any test (all stub tests use `with_program`, never `PodmanRuntime::new`).
 ## Notes for Agents
 - `adesk-machine` does not depend on `adesk-core` or any GUI crate; the ADesk kernel binary name is data (`MachineSpec::command`), not a dependency.
 - The default `MachineSpec` describes the ADesk machine (image + command running `adesk-server` + a viewer socket mount); keep that default coherent with `docs/machine.md` §3/§5.
@@ -81,6 +86,12 @@ Runs with `./scripts/dev.sh cargo test -p adesk-machine` → 114 passed, 0 faile
 - The `podman inspect` JSON the backend parses is an array of `{ "Id", "Name", "Image", "Created", "State": { "Status", "Pid", "ExitCode" } }`; `State.Status` (`created`/`running`/`stopped`/`exited`/`dead`) maps onto `MachineState`. `tests/podman_stub.rs` emits exactly this shape — keep the two in sync.
 - `MachineStatus::created_at_ms` is monotonic ms from `MockRuntime`'s injectable clock; for `PodmanRuntime` it is a best-effort epoch-derived value parsed from `Created`.
 - Process-spawning tests must fully write+close a stub script before spawning and serialize spawning (a process-wide mutex): writing then immediately exec'ing a just-written script can hit `ETXTBSY` ("Text file busy").
+## Known Issues
+- `MachineError::InvalidSpec` and `MachineError::Io` are never produced by any code path: the CLI's `build_spec` rejects malformed specs with a plain `String`, and every spawn failure maps to `MachineError::Spawn` — the `#[from] std::io::Error` on `Io` has no caller. Both exist as public API only.
+- The `approval` module and `HostCapabilities::allows_mount`/`allows_port`/`HostControlPlane::request_approval` are exercised only by tests; the `adesk-machine` CLI never requests an approval or checks a capability (approval UI is out of scope per `docs/machine.md` §8).
+- `manager.rs`'s `#[cfg(test)] testing::StubRuntime` duplicates the always-compiled `MockRuntime` (lifecycle state machine, `machine-N` id allocation, `not_found`), even though its doc comment claims `MockRuntime` "is not available here" — that comment is stale; `MockRuntime` is public, always compiled and used by the integration tests.
+- `RuntimeKind` (and `ContainerRuntime::kind`) is only touched by tests: the CLI defines its own clap `RuntimeArg` and never converts to/from `RuntimeKind`.
+
 ## Status
 Implementation-complete and green: `error`, `spec`, `state`, `runtime` (trait + `RuntimeKind`), `runtime::mock`, `runtime::podman`, `registry`, `manager`, `host`, `approval` and the `adesk-machine` CLI are all implemented, documented and tested; `src/lib.rs` re-exports the whole surface at the crate root.
 `cargo test -p adesk-machine` = 114 passed / 0 failed; `cargo clippy -p adesk-machine --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-machine --check` and `cargo doc -p adesk-machine --no-deps --document-private-items` are all clean.

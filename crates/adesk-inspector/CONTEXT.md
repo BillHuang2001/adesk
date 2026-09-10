@@ -79,6 +79,9 @@ Painters preserve input order for windows, damage rects and action markers.
   `adesk-render`, `thiserror` and `tracing`, all referenced via `[workspace.dependencies]`.
   Depending on `adesk-render` pulls its renderer stack transitively, but the inspector uses only
   its pure crop/downscale ops (see `./src/post.rs`).
+- No dev-dependencies: `tests/common/mod.rs` and the per-test-file helpers are crate-local by
+  design. Do not add `adesk-testkit` for pixel helpers — it would pull async/Smithay/Wayland
+  into a crate that must stay pure.
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay far below the ~1000-line threshold.
 - Overlays are drawn only in `paint::CANONICAL_ORDER`, never in caller order; the same
   `InspectionInput` must always produce the same bytes.
@@ -174,6 +177,15 @@ post-processing to the server and drop the dependency.
   `overlay_geometry` 8, `overlay_labels` 12, `overlay_timing` 6 — plus 2 lib doctests (one `no_run`).
 - Run with `./scripts/dev.sh cargo test -p adesk-inspector` (bare `cargo` cannot link outside the
   Nix dev shell).
+
+## Known Issues
+
+- Unreferenced public API (verified with a workspace-wide `rg`: no caller in this crate, in `adesk-server`, or in any other member): `Inspector::with_style` (`./src/inspector.rs`), `ActionKind::has_position` and `InspectionInputBuilder::active_window` (`./src/input.rs`), `Canvas::size` and `Canvas::set_clip` (`./src/canvas.rs`), `Color::TRANSPARENT`, `Color::BLACK`, `Color::with_alpha` and both `Color` ↔ `[u8; 4]` `From` impls (`./src/color.rs`), `Glyph::row` (`./src/font.rs`), and `paint::CANONICAL_ORDER` (`./src/paint/mod.rs`, named only from doc links — `order_index` is what encodes the order at runtime).
+- Test-only public API (exercised by `./tests/`, no production consumer): `Inspector::render_from_source`, `InspectionRequest::{new, region, max_dimension, is_identity}`, `InspectionInputBuilder::cursor_at`, `InspectionInput::size`, `Canvas::line`.
+- `Error::Render` (`./src/error.rs`) is never constructed: `./src/post.rs` delegates to the infallible `adesk_render::crop`/`downscale`, so the `#[from]` arm exists only for a hand-written value (the server's error-mapping tests).
+- `Inspector::render` allocates an `ImageBuffer::new_rgba` (which writes alpha `255` into every pixel) and then `render_into` overwrites every byte with the input frame — the zero-fill pass is wasted work.
+- `paint/mod.rs` encodes the overlay order three times: `CANONICAL_ORDER`, the `order_index` match arms, and the `overlay` dispatch; only the dispatch is mandatory.
+- A second, independent implementation of the same §5.7 overlays lives in `adesk-compositor` (`src/render/elements.rs`: `overlay_color`, `border_rects`, `with_alpha`). Its palette disagrees with `OverlayStyle` for the same `OverlayKind` (`focus` yellow vs green, `surface_bounds` green vs white, `cursor` orange vs yellow), and the server only ever sends `RenderOutput { overlays: vec![] }`, so that compositor path has no production caller.
 
 ## Notes for Agents
 

@@ -140,7 +140,7 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 ## Packaging / deployment
 
 - There is no container/OCI/Docker packaging and no CI config in the repo (no `Dockerfile`/`Containerfile`, `.github/`, `.gitlab-ci`, Jenkins, CircleCI, Makefile or justfile).
-- The only build/dev tooling is `flake.nix` (a `devShells.default` dev shell; it exposes no `packages`/`apps` output) and `scripts/dev.sh` (an `exec nix develop <root> -c "$@"` wrapper).
+- The only build/dev tooling is `flake.nix` and `scripts/dev.sh` (an `exec nix develop <root> -c "$@"` wrapper). The flake exposes `devShells.default`, `packages.<system>.{default,adesk}` (a `rustPlatform.buildRustPackage` over the workspace's `Cargo.lock`, installing the `adesk-server`/`adesk-viewer`/`adesk-machine`/`adesk-agent` binaries) and `nixosModules.{default,adesk}` (the module in `./nix/adesk-module.nix`, which runs `adesk-server` as a systemd service with an optional companion agent).
 - The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`, plus viewer `ADESK_VIEWER_SOCKET` / `ADESK_VIEWER_TCP`), so it is service/container friendly.
 - Two more headless binaries ship: `adesk-viewer` (VAP client: connects to the viewer endpoint, writes frames as PNG, drives scripted input) and `adesk-machine` (host-side AI Machine lifecycle CLI over a `podman` or `mock` runtime).
 - Socket path resolution: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; the process needs a writable `XDG_RUNTIME_DIR` (Wayland socket) at runtime.
@@ -189,4 +189,4 @@ Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, 
 | Viewer server session, client SDK, headless viewer binary | `crates/adesk-viewer/` |
 | AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
 | Protocol/viewer/machine specs, architecture decisions | `docs/` |
-| Dev shell, build wrapper | `flake.nix`, `scripts/` |
+| Flake packages + NixOS module, dev shell, build wrapper | `flake.nix`, `nix/`, `scripts/` |

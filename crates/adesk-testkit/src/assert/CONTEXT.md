@@ -18,6 +18,17 @@ Assertions panic with detailed messages (`assert_eq!` semantics); everything els
 - No sleeps: waits wrap `tokio::sync::broadcast::Receiver::recv` in `tokio::time::timeout`.
 - `EventAssert::seen` records every event observed, in arrival order, for `assert_seen_order`.
 
+## Notes for Agents
+
+- `image.rs` is the crate's only image I/O module and the only user of the `image` crate.
+- PNG is encode-only: `ImageAssert::save_png` repacks stride-padded pixels into a tightly packed RGBA8 `Vec`, hands it to `image::RgbaImage::from_raw` and calls `save`. There is no PNG decoder anywhere in `adesk-testkit` — the round-trip self-test inspects only the 8-byte PNG signature.
+- All comparisons go per logical pixel through `adesk_core::ImageBuffer::pixel`, so row padding and the stride value itself are never compared; there is no byte-level/row-memcmp diff, no diff image output and no percentage-threshold helper.
+- `matches_pattern*` is exact against `FillPattern::at(x, y, size)`; the `_tol`/`matches_solid` variants are per-channel `abs_diff <= tolerance`. `differs_from*` is the negation of the private `equal_within(left, right, tolerance)`.
+
+## Known Issues
+
+- `TestkitError::ImageMismatch` (declared in `../error.rs`) is never constructed: pixel comparisons panic instead while PNG writes return `TestkitError::Io`.
+
 ## Routing Table
 
 Leaf module: `image.rs` (pixels), `event.rs` (event streams).
