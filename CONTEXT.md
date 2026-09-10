@@ -93,6 +93,11 @@ End-to-end tests live in `crates/adesk-server/tests/`; protocol-level compositor
 ## Conventions
 
 - Rust 2021, `rust-version = 1.80`, workspace version `0.1.0`.
+- The whole workspace is `cargo fmt --all --check` clean under rustfmt 1.9.0 defaults
+  (there is no `rustfmt.toml`); keep it that way.
+- The whole workspace is rustdoc-warning-free
+  (`cargo doc --workspace --no-deps --document-private-items`). Prefer plain code spans
+  over links for private items, and bare `[`Item`]` over explicit targets already in scope.
 - File size: ~1000 lines is the concern threshold; split along module boundaries
   rather than growing a file. Cohesive test modules may exceed it.
 - Public API surface is what `CONTEXT.md` documents; keep internals `pub(crate)`.
