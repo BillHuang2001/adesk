@@ -1,18 +1,28 @@
 //! Global binding and version negotiation for the test client.
 //!
-//! The client requires exactly three globals: `wl_compositor` (v4+), `wl_shm` (v1+) and
-//! `xdg_wm_base` (v1+). Each is bound at `min(server_version, interface_max)`, where
-//! `interface_max` is the highest version the pinned bindings know (`wl_compositor` 7,
-//! `wl_shm` 3, `xdg_wm_base` 7 for wayland-client 0.31 / wayland-protocols 0.32). A
+//! The client requires exactly four globals: `wl_compositor` (v4+), `wl_shm` (v1+),
+//! `xdg_wm_base` (v1+) and `wl_seat` (v1+). Each is bound at
+//! `min(server_version, interface_max)`, where `interface_max` is the highest version the
+//! pinned bindings know (`wl_compositor` 7, `wl_shm` 3, `xdg_wm_base` 7 for
+//! wayland-client 0.31 / wayland-protocols 0.32, and `wl_seat` 11 for wayland-client 0.31;
+//! the pinned bindings are generated from the protocol XML at compile time, so the seat
+//! bound here is version-negotiated with the runtime like any other global). A
 //! missing global, or a `wl_shm` that never advertised `ARGB8888`, is a hard
 //! [`TestkitError::Unsupported`](crate::TestkitError::Unsupported) rather than a silent downgrade: the harness must fail
 //! loudly when the runtime cannot do what the tests need.
+//!
+//! `wl_seat` is what makes input observable over the real protocol path: the client creates
+//! `wl_pointer`/`wl_keyboard` from it as soon as the seat advertises those capabilities, and
+//! records every event they deliver (see [`super::input`]). The requirement is only v1 —
+//! every recorded event exists there — so a runtime that exposes an older seat still gets
+//! input recording rather than a "capability missing" failure; the negotiated version is
+//! reported by [`Globals::seat_version`] for tests that assert protocol features.
 
 use std::collections::HashSet;
 use std::ops::RangeInclusive;
 
 use wayland_client::globals::{BindError, GlobalList};
-use wayland_client::protocol::{wl_compositor, wl_shm};
+use wayland_client::protocol::{wl_compositor, wl_seat, wl_shm};
 use wayland_client::{Dispatch, Proxy, QueueHandle};
 use wayland_protocols::xdg::shell::client::xdg_wm_base;
 
@@ -36,6 +46,20 @@ const MAX_SHM_VERSION: u32 = 3;
 const REQUIRED_XDG_WM_BASE_VERSION: u32 = 1;
 /// Highest `xdg_wm_base` version the pinned bindings know.
 const MAX_XDG_WM_BASE_VERSION: u32 = 7;
+/// Minimum `wl_seat` version the test client requires.
+///
+/// v1 already carries everything the client records: `capabilities`/`name`,
+/// `wl_pointer.enter`/`leave`/`motion`/`button`/`axis` and
+/// `wl_keyboard.keymap`/`enter`/`leave`/`key`/`modifiers`.
+const REQUIRED_SEAT_VERSION: u32 = 1;
+/// Highest `wl_seat` version the pinned bindings know (a bind above this panics).
+///
+/// wayland-client 0.31 generates its protocol bindings from the protocol XML at compile
+/// time, and that XML declares `wl_seat` v11. Binding up to the interface maximum is the
+/// negotiation rule the other globals use: the runtime's advertised version wins when it is
+/// lower, and a higher version only means the compositor may send extra events the client
+/// ignores (see `state::Dispatch<wl_seat::WlSeat, ()>`).
+const MAX_SEAT_VERSION: u32 = 11;
 
 /// The globals the test client bound, with the versions negotiated at connect time.
 ///
@@ -49,12 +73,16 @@ pub struct Globals {
     pub(crate) shm: wl_shm::WlShm,
     /// The bound `xdg_wm_base`.
     pub(crate) xdg_wm_base: xdg_wm_base::XdgWmBase,
+    /// The bound `wl_seat`.
+    pub(crate) seat: wl_seat::WlSeat,
     /// Negotiated `wl_compositor` version.
     pub(crate) compositor_version: u32,
     /// Negotiated `wl_shm` version.
     pub(crate) shm_version: u32,
     /// Negotiated `xdg_wm_base` version.
     pub(crate) xdg_wm_base_version: u32,
+    /// Negotiated `wl_seat` version.
+    pub(crate) seat_version: u32,
     /// SHM formats advertised before the first roundtrip completed.
     pub(crate) shm_formats: HashSet<wl_shm::Format>,
 }
@@ -75,6 +103,13 @@ impl Globals {
         self.xdg_wm_base_version
     }
 
+    /// The negotiated `wl_seat` version.
+    ///
+    /// The client binds `wl_seat` from v1 (everything it records exists there), so this is
+    /// the runtime's advertised version capped at the pinned bindings' interface maximum.
+    pub fn seat_version(&self) -> u32 {
+        self.seat_version
+    }
     /// Whether `wl_shm` advertised `ARGB8888`.
     ///
     /// The test client commits every buffer as `Argb8888`, so
@@ -104,8 +139,9 @@ impl Globals {
 ///
 /// 1. `list.bind::<wl_compositor::WlCompositor, ClientState, ()>(qhandle,
 ///    REQUIRED_COMPOSITOR_VERSION..=MAX_COMPOSITOR_VERSION, ())`, likewise `wl_shm`
-///    (`1..=3`) and `xdg_wm_base` (`1..=7`). `GlobalList::bind` returns the lower of the
-///    advertised version and the requested maximum, which is the negotiation rule.
+///    (`1..=3`), `xdg_wm_base` (`1..=7`) and `wl_seat` (`1..=11`). `GlobalList::bind`
+///    returns the lower of the advertised version and the requested maximum, which is the
+///    negotiation rule.
 /// 2. `BindError::NotPresent` maps to
 ///    [`TestkitError::Unsupported`](crate::TestkitError::Unsupported)("compositor does not advertise `<interface>`") and
 ///    `BindError::UnsupportedVersion` to `Unsupported`("`<interface>` vN is too old;
@@ -131,11 +167,17 @@ pub(crate) fn bind_globals(
         qhandle,
         REQUIRED_XDG_WM_BASE_VERSION..=MAX_XDG_WM_BASE_VERSION,
     )?;
+    let seat = bind_required::<wl_seat::WlSeat>(
+        list,
+        qhandle,
+        REQUIRED_SEAT_VERSION..=MAX_SEAT_VERSION,
+    )?;
 
     Ok(Globals {
         compositor_version: compositor.version(),
         shm_version: shm.version(),
         xdg_wm_base_version: xdg_wm_base.version(),
+        seat_version: seat.version(),
         // `wl_shm.format` events are dispatched after this snapshot is taken, so record
         // the formats the harness can write; the caller refines `ClientState::shm_formats`
         // from the real events and re-checks `supports_argb8888()` after the first
@@ -144,6 +186,7 @@ pub(crate) fn bind_globals(
         compositor,
         shm,
         xdg_wm_base,
+        seat,
     })
 }
 
