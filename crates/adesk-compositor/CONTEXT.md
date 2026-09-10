@@ -203,7 +203,13 @@ Smoke tests (`tests/compositor_smoke.rs`; 3 tests, public API only, no `adesk-te
 - They bind a real Wayland socket, so each test installs a private `0700` temp `XDG_RUNTIME_DIR` (restored on drop) and holds a process-wide mutex for its whole body, because the env var is process-global and the tests share one binary.
 - This is required in this sandbox: `/run/user/1000` is a **read-only filesystem**, so the ambient `XDG_RUNTIME_DIR` cannot host a socket.
 
-Integration tests: defined, not yet implemented — `tests/integration_plan.md` (5 scenarios) needs `adesk-testkit` helpers; ground rules are a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap assertions instead of sleeps, GL-only tests behind `ADESK_TEST_GL=1`.
+Integration tests (implemented; driven through the `adesk-testkit` dev-dependency on a real in-process compositor, temp `XDG_RUNTIME_DIR`, `RendererKind::Pixman`, event-tap ordering with explicit deadlines and no sleeps): 15 tests in four files, and `tests/integration_plan.md` maps each scenario to its suite — the plan holds the §1–§5 specs and names the file per scenario group, while each suite's module doc names the scenario it implements.
+
+- `tests/window_lifecycle.rs` (2): §1 a window appears with a tiling configure (event order, `QueryState`, `RenderWindow` pixels matching the committed pattern) and §2 focus follows activation (activation/focus event order with the reply after both events, no re-configure on activation, unknown `WindowId` → `unknown_window`).
+- `tests/input_delivery.rs` (6): §3 the real seat path — a normalized `PointerMove` lands on the window model's point, press/release are two ordered `wl_pointer.button` events, `wl_pointer.axis` is negative-vertical and framed, `ctrl+c` arrives as an ordered chord press with a reverse release, and a released chord or an injection with no focused window is `invalid_request` without panicking.
+- `tests/popups.rs` (2): §4 popup lifecycle — `popup_appeared`/`popup_disappeared` name the owner, the popup's pixels compose into the owner's `RenderWindow` under the window's one commit counter, and destroying the owner with a popup open reports the popup's disappearance first.
+- `tests/clipboard.rs` (5): §5 two real connections exchanging `wl_data_device` selections — exact bytes read back, a second `set_selection` supersedes the first offer, an unrequested mime is not delivered, activation moves the selection target, and no runtime event carries clipboard payload.
+- All four suites are pixman-only; the crate's GL-only path stays behind `ADESK_TEST_GL=1` (the lib `render::headless` clear-frame test).
 
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
