@@ -14,7 +14,8 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - `set_output_size(size: Size) -> Vec<WmAction>` — re-tiles every mapped window.
 - `on_map(request: MapRequest) -> (WindowId, Vec<WmAction>)` — assigns the id, returns `[ConfigureWindow, Activate]`.
 - `on_destroy(id) -> Vec<WmAction>` — MRU fallback via `[ActivatePrevious { id }]` when the active window goes away.
-- `on_title(id, title: Option<String>) -> Vec<WmAction>`, `on_commit(id, commit_seq: u64, damage: &Region) -> Vec<WmAction>`.
+- `on_title(id, title: Option<String>) -> Vec<WmAction>`, `on_app_id(id, app_id: Option<AppId>) -> Vec<WmAction>`, `on_commit(id, commit_seq: u64, damage: &Region) -> Vec<WmAction>`.
+- `on_app_id` handles a late `xdg_toplevel.app_id` (a client may set it after the first buffer commit): it stores exactly the passed value, so `None` clears it. Metadata-only — no actions, no re-configure, no damage; unknown ids are ignored.
 - `on_popup_added(id) -> Vec<WmAction>`, `on_popup_removed(id) -> Vec<WmAction>`.
 - `activate(id) -> Vec<WmAction>` — `[Activate { id }]`, `[None]` when already active, `[]` when unknown.
 - `active_window() -> Option<WindowId>`, `window(id) -> Option<&WindowRecord>`, `require_window(id) -> Result<&WindowRecord>`, `windows() -> &[WindowRecord]`, `window_by_surface(SurfaceKey) -> Option<WindowId>`, `window_info(id) -> Option<WindowInfo>`.
