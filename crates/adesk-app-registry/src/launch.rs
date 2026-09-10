@@ -50,15 +50,6 @@ impl LaunchEnv {
         Self::default()
     }
 
-    /// Reads `WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR` from the process environment.
-    pub fn from_process() -> LaunchEnv {
-        LaunchEnv {
-            wayland_display: std::env::var(WAYLAND_DISPLAY_VAR).ok(),
-            xdg_runtime_dir: std::env::var(XDG_RUNTIME_DIR_VAR).ok(),
-            extra: Vec::new(),
-        }
-    }
-
     /// Sets the `WAYLAND_DISPLAY` override.
     pub fn with_wayland_display(mut self, value: impl Into<String>) -> LaunchEnv {
         self.wayland_display = Some(value.into());
@@ -215,15 +206,6 @@ mod tests {
     use super::*;
     use std::ffi::OsStr;
 
-    /// Snapshot of the two Wayland variables, taken without touching the process
-    /// environment (tests must not mutate it).
-    fn process_wayland_env() -> (Option<String>, Option<String>) {
-        (
-            std::env::var(WAYLAND_DISPLAY_VAR).ok(),
-            std::env::var(XDG_RUNTIME_DIR_VAR).ok(),
-        )
-    }
-
     fn args_of(command: &std::process::Command) -> Vec<String> {
         command
             .get_args()
@@ -327,23 +309,6 @@ mod tests {
                 ("K".to_string(), "last".to_string()),
             ]
         );
-    }
-
-    #[test]
-    fn launch_env_from_process_matches_the_environment() {
-        // Snapshot first: `from_process` must not mutate anything, and the test
-        // must not mutate the environment other tests may observe.
-        let (wayland, runtime) = process_wayland_env();
-        let env = LaunchEnv::from_process();
-
-        assert_eq!(env.wayland_display, wayland);
-        assert_eq!(env.xdg_runtime_dir, runtime);
-        assert!(env.extra.is_empty());
-        assert_eq!(
-            env.overrides().len(),
-            usize::from(wayland.is_some()) + usize::from(runtime.is_some())
-        );
-        assert_eq!(process_wayland_env(), (wayland, runtime));
     }
 
     #[test]
