@@ -49,6 +49,7 @@ Binding contracts: `docs/architecture.md` §4 (window model and tiling policy), 
 - Apply `ConfigureWindow { id, rect }` by configuring the toplevel to `rect.size()` and placing its surface tree at `(rect.x, rect.y)` in output space; apply `Activate`/`ActivatePrevious` by moving keyboard focus and emitting `WindowActivated { window_id: id, previous }` + `FocusChanged`, where `previous` is the compositor's focus target before the action (`None` for `ActivatePrevious`, whose predecessor is already destroyed); `None` emits nothing.
 - Destroy (unmap and destroy are not distinguished in v1): emit `WindowDestroyed { window_id: id }` first, then apply `wm.on_destroy(id)`.
 - Title / commit / popups: call `on_title`, `on_commit`, `on_popup_added`/`on_popup_removed` and emit `TitleChanged`, `SurfaceCommit { commit_seq, damage }`, `PopupAppeared`/`PopupDisappeared`.
+- Late app id: when `WmBridge::app_id_changed` observes `xdg_toplevel.app_id` set after the first buffer commit, call `wm.on_app_id(id, app_id)`; it returns no actions, so nothing is configured or damaged — only the read-model (`WindowInfo.app_id`, `list_windows`) changes.
 - Input: `wm.resolve_position(id, position)` yields the output `Point` for the seat; `None` means reply `unknown_window`.
 - `activate_window`: `wm.require_window(id)?` (yields `unknown_window`), then apply `wm.activate(id)`; an empty list is unreachable after the check, `[None]` means already active (emit no event).
 - `list_windows`: `wm.windows().iter().map(WindowRecord::info).collect()` plus `wm.active_window()`.
