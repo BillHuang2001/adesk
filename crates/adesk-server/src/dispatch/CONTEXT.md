@@ -74,7 +74,7 @@ Shared internal helpers (not public API):
 ## Notes for Agents
 
 - `windows.rs` owns `state`, `reserve_seq`, `command_error` and `unknown_window`; do not reintroduce copies in other files.
-- `inspect.rs`'s push loop stops when its subscription id disappears from `InspectRegistry::list()`, so `unsubscribe_events` must remove it there (it does).
+- `inspect.rs`'s push loop stops when its subscription id disappears from `InspectRegistry::list()`, so `unsubscribe_events` must remove it there (it does); whichever way the loop ends (unsubscribe, closed sink, render failure) it then deregisters its own subscription id, so a stopped stream never stays in `InspectRegistry`.
 - `input.rs` resolves window-relative and normalized coordinates through the window model's geometry from `QueryState`; never hard-code an origin.
 - `capture.rs` and `inspect.rs` render on demand only; there is no per-event rendering anywhere in this directory.
 - `launch_app` returns immediately after the spawn (plus a best-effort `NoteLaunch` ack); it never waits or polls for a window. The toplevel arrives later as a `WindowCreated` carrying `launch_id` (compositor ledger and/or `event_pump::correlate_window`); `WindowInfo.app_id` stays the client-set xdg app_id, so correlate by `launch_id`/`pid`, not by `app_id`.
