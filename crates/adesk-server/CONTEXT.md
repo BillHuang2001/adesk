@@ -137,7 +137,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 
 - **Signal handlers are installed by `Server::start`**, including in test processes; repeated installation is harmless (`tokio::signal` supports multiple listeners), but tests must not send SIGINT to the test runner.
 - **Window-creating E2E is not covered yet**: the suites in `./tests/` run against an empty runtime (no Wayland client ever connects), so tiling, focus transitions and input delivery are not exercised here; that coverage now lives in the `adesk-testkit` and `adesk-agent` suites. Launch correlation *is* covered by injecting a synthetic `WindowCreated` into the compositor's broadcast.
-- **No E2E case exercises keyboard methods without `window_id`** (the no-focus path that must answer `invalid_request`, `input.rs::activate_if_needed` returns early and the compositor reports "no window has keyboard focus"), and no case exercises a *successful* injection — every §5.5 E2E call targets an unknown window.
+- **No E2E case in `./tests/` exercises a *successful* §5.5 injection**: every input call here fails by design (unknown window, or no keyboard focus when `window_id` is absent); delivered input is exercised by the `adesk-testkit` / `adesk-agent` E2E suites, where a Wayland client connects.
 
 ## Test Strategy
 
