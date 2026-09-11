@@ -8,5 +8,21 @@
 //!
 //! It pairs with the headless `adesk-viewer` binary (frames → PNG, scripted
 //! input); this crate owns the interactive GUI instead.
+//!
+//! The crate is split into GTK-free, unit-testable modules and (later) a GTK
+//! layer that builds the widgets on top of them:
+//! - [`cli`] — command-line parsing and viewer-endpoint resolution.
+//! - [`error`] — the crate error type [`GuiError`] and the [`Result`] alias.
+//! - [`image`] — decoding VAP image payloads to tightly packed RGBA8.
+//! - [`mapping`] — the pure widget ↔ normalized coordinate letterbox math.
+//! - [`taskbar`] — the pure task-bar view model derived from a desktop state.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+pub mod cli;
+pub mod error;
+pub mod image;
+pub mod mapping;
+pub mod taskbar;
+
+pub use error::{GuiError, Result};
