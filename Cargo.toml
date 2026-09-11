@@ -31,6 +31,7 @@ adesk-agent = { path = "crates/adesk-agent" }
 adesk-testkit = { path = "crates/adesk-testkit" }
 adesk-viewer-proto = { path = "crates/adesk-viewer-proto" }
 adesk-viewer = { path = "crates/adesk-viewer" }
+adesk-viewer-gui = { path = "crates/adesk-viewer-gui" }
 adesk-machine = { path = "crates/adesk-machine" }
 
 # --- wayland / smithay stack ---
@@ -67,6 +68,13 @@ rustix = { version = "1", features = ["pipe"] }
 
 # --- agent LLM providers ---
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+
+# --- GTK4/libadwaita viewer front-end (`adesk-viewer-gui`) ---
+# Only the GUI crate uses these; the headless runtime/server crates never do.
+gtk4 = "0.11"
+# libadwaita 0.9 renamed its library target to `libadwaita`; alias it back to the
+# conventional `adw` crate name so `use adw::prelude::*` works.
+adw = { package = "libadwaita", version = "0.9" }
 
 [profile.release]
 debug = 1

@@ -1,0 +1,40 @@
+# adesk-viewer-gui — GTK4/libadwaita desktop front-end for the ADesk VAP viewer.
+#
+# Dependency versions are declared once in the root workspace manifest
+# ([workspace.dependencies]); this crate only references them so versions can
+# never drift. Unlike the headless `adesk-viewer` crate, this one links GTK4 and
+# libadwaita; only the dev shell / package provide those native libraries.
+[package]
+name = "adesk-viewer-gui"
+description = "ADesk viewer GUI: a GTK4/libadwaita desktop front-end for the VAP viewer (VAP)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "adesk_viewer_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "adesk-viewer-gui"
+path = "src/main.rs"
+
+[dependencies]
+adesk-core.workspace = true
+adesk-proto.workspace = true
+adesk-viewer.workspace = true
+adesk-viewer-proto.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+gtk4.workspace = true
+adw.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -28,6 +28,16 @@
         seatd            # libseat + seatd daemon
         dbus             # reserved for future AT-SPI integration
       ];
+
+      # Native libraries only the GTK4/libadwaita viewer front-end
+      # (`adesk-viewer-gui`) needs. Kept separate from `adeskLibraries` so the
+      # headless runtime/server binaries never gain a GTK dependency, while the
+      # package and the dev shell both still get them. `gtk4`/`libadwaita`
+      # propagate their own pkg-config deps (pango, cairo, gdk-pixbuf, ...).
+      adeskGuiLibraries = pkgs: with pkgs; [
+        gtk4
+        libadwaita
+      ];
     in
     {
       # `nix build .#adesk` (or `.#default`) builds every ADesk binary —
@@ -87,6 +97,7 @@
       devShells = forAllSystems (pkgs:
         let
           libs = adeskLibraries pkgs;
+          guiLibs = adeskGuiLibraries pkgs;
         in
         {
           default = pkgs.mkShell {
@@ -100,9 +111,9 @@
               rust-analyzer
               cmake
             ];
-            buildInputs = libs;
+            buildInputs = libs ++ guiLibs;
             shellHook = ''
-              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath libs}:$LD_LIBRARY_PATH"
+              export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath (libs ++ guiLibs)}:$LD_LIBRARY_PATH"
               # libxkbcommon looks for the XKB data files here.
               export XKB_CONFIG_ROOT="${pkgs.xkeyboard-config}/share/X11/xkb"
               export XKB_CONFIG_EXTRA_PATH="${pkgs.xkeyboard-config}/share/X11/xkb"

@@ -100,6 +100,8 @@ The first message from each side of a connection is a `hello`.
 - `button` reuses the AGP vocabulary: `"left" | "right" | "middle" | "side" | "extra"`.
 - `state` is `"pressed" | "released"`, or `"tap"` for `key` (press + release).
 - `keys` is an AGP `KeySpec` (a single string or a chord array, `docs/protocol.md` §3).
+- `window_id` is an AGP `WindowId` (`docs/protocol.md` §3): the target of
+  `activate_window`.
 - `id`, when present, is echoed in the matching `input_ack`/`error`.
 
 ## 5. Semantics
@@ -114,6 +116,13 @@ The first message from each side of a connection is a `hello`.
   same seat/input code the AGP §5.5 input methods use; it produces an AGP
   `action_id` and (when deliverable) a `RuntimeEvent` exactly like agent input.
   A viewer click is never a special code path.
+- **Window switching is runtime-native, not synthesized input.** `activate_window`
+  changes compositor window state directly (exactly like AGP §5.3
+  `activate_window`) and is acknowledged with an `input_ack` carrying the recorded
+  AGP `action_id`; an unknown id answers `error` with `unknown_window` and the
+  connection stays open. This is what lets a human viewer switch between tiled
+  windows (the runtime shows one toplevel at a time), and it is never a code path
+  the AI cannot also take.
 - **Coordinates are output-relative and the target is the active window.** A
   viewer points at the desktop, so input targets the runtime's active window
   (viewer input carries no `window_id`); pointer positions resolve to output
