@@ -158,6 +158,15 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 - `RendererKind::Auto`'s GL→pixman fallback arm has no test: forcing `create_gl()` to fail
   needs either a production test seam or process-global EGL env mutation. See
   `crates/adesk-compositor/CONTEXT.md`.
+- GTK4/libadwaita (for `adesk-viewer-gui`) come only from the dev shell / package
+  (`flake.nix` `adeskGuiLibraries`); outside it the GUI crate cannot build or link.
+- The GUI binary needs a real display to *run*, so its widget glue is untested;
+  only its GTK-free modules (CLI, letterbox mapping, task-bar model, keystroke
+  routing, image decode) have display-free unit tests. The VAP connection is
+  one-shot — a dropped connection shows a banner but does not auto-reconnect.
+- The server does not push `state` except in reply to `request_state` (the spec's
+  advisory per-change push is not implemented), so a viewer refreshes the window
+  list by pulling `request_state` rather than via a server push stream.
 
 ## Status
 The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
@@ -170,7 +179,7 @@ Feature-gated suites are green as well: `cargo test -p adesk-agent --features te
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 77 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
-There is no GUI viewer: `adesk-viewer` is headless — it connects over VAP, writes received frames as PNG and drives input from a script — so an interactive human still needs a display-capable front-end that speaks VAP.
+An interactive human front-end exists: `adesk-viewer-gui` is a GTK4/libadwaita app (the workspace's only GTK crate) that connects over VAP, renders the streamed desktop frames, routes pointer/key/scroll/text through the same seat path the agent uses, and adds a window task bar whose clicks switch windows through the runtime-native VAP `activate_window` message (added end to end in `adesk-viewer-proto` / `adesk-viewer` / `adesk-server`, `docs/viewer.md` §4/§5). The headless `adesk-viewer` binary remains for frames→PNG and scripted input.
 Inspector debug overlays (`inspect_capture` / `inspect_subscribe`) remain AGP-only: the VAP viewer streams plain desktop frames (overlays are negotiated on the wire but not composited into v1 frames), so overlay inspection still requires an AGP client (`crates/adesk-server/src/dispatch/inspect.rs`).
 Explicitly outside v1 scope (objective step 9): AT-SPI accessibility, XWayland, drag-and-drop, richer clipboard support, and multi-window visibility.
 `adesk-testkit` now provides a fixture exec-path override (`TestAppSpec::with_exec`), so a downstream crate can point a fixture at its own program and reuse `TestAppSpec::desktop_entry`;
