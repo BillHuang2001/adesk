@@ -128,7 +128,8 @@ window task bar, and human pointer/key/text routed through the same VAP seat pat
 
 ## Build & test
 
-System libraries (libxkbcommon, pixman, EGL/GLES, libwayland, libudev) come from the
+System libraries (libxkbcommon, pixman, EGL/GLES, libwayland, libudev, and GTK4 +
+libadwaita for `adesk-viewer-gui`) come from the
 Nix dev shell. **Always** build through the wrapper:
 
 ```sh
