@@ -69,6 +69,7 @@ Design invariants:
 | `crates/adesk-testkit/` | Dev-only test harness: in-process runtime, Wayland test client, fixtures, image assertions. |
 | `crates/adesk-viewer-proto/` | Viewer Attachment Protocol (VAP) v1: viewer↔runtime wire messages, codec. No I/O. |
 | `crates/adesk-viewer/` | Viewer: desktop-streaming server session + async client SDK + headless `adesk-viewer` binary. |
+| `crates/adesk-viewer-gui/` | GTK4/libadwaita desktop viewer front-end: frame view, window task bar, human input over VAP. The only GTK crate. |
 | `crates/adesk-machine/` | AI Machine runtime: rootless-container backend seam, machine lifecycle manager, host control plane. |
 
 End-to-end tests live in `crates/adesk-server/tests/`; protocol-level compositor tests in
