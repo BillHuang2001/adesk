@@ -83,7 +83,9 @@ container (`adesk-machine`) with ADesk running inside it, and a Viewer outside i
 observes the desktop and provides limited human input over a purpose-built protocol
 (VAP, `adesk-viewer-proto` / `adesk-viewer`). ADesk's viewer endpoint lives in
 `adesk-server` (`src/viewer/`) and reuses the same seat/input path as agent input; the
-`adesk-viewer` binary is a headless VAP client (frames → PNG, scripted input).
+`adesk-viewer` binary is a headless VAP client (frames → PNG, scripted input), while
+`adesk-viewer-gui` is the interactive GTK4/libadwaita front-end (a desktop window, a
+window task bar, and human pointer/key/text routed through the same VAP seat path).
 
 ## Cross-crate contracts
 
