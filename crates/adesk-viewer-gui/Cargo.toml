@@ -29,8 +29,8 @@ adesk-viewer-proto.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
-gtk4.workspace = true
-adw.workspace = true
+gtk4 = { workspace = true, features = ["v4_8"] }
+adw = { workspace = true, features = ["v1_4"] }
 image.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

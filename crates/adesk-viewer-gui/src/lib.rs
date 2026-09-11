@@ -9,13 +9,18 @@
 //! It pairs with the headless `adesk-viewer` binary (frames → PNG, scripted
 //! input); this crate owns the interactive GUI instead.
 //!
-//! The crate is split into GTK-free, unit-testable modules and (later) a GTK
-//! layer that builds the widgets on top of them:
+//! The crate is split into GTK-free, unit-testable modules and a GTK layer that
+//! builds the widgets on top of them:
 //! - [`cli`] — command-line parsing and viewer-endpoint resolution.
 //! - [`error`] — the crate error type [`GuiError`] and the [`Result`] alias.
 //! - [`image`] — decoding VAP image payloads to tightly packed RGBA8.
 //! - [`mapping`] — the pure widget ↔ normalized coordinate letterbox math.
 //! - [`taskbar`] — the pure task-bar view model derived from a desktop state.
+//!
+//! The GTK-facing modules are crate-private: `keystroke` (the pure keystroke
+//! routing state machine), `bridge` (the tokio ↔ GLib bridge), `frame_view` and
+//! `task_bar_view` (the widgets) and `app` (the application and event loop). The
+//! public entry point is [`run`].
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -25,4 +30,45 @@ pub mod image;
 pub mod mapping;
 pub mod taskbar;
 
+mod app;
+mod bridge;
+mod frame_view;
+mod keystroke;
+mod task_bar_view;
+
 pub use error::{GuiError, Result};
+
+use clap::Parser;
+
+/// Parses the command line, installs logging, resolves the viewer endpoint and
+/// runs the GTK application.
+///
+/// The subscriber is installed from [`cli::Cli::log`] (also `ADESK_LOG`) as an
+/// env-filter; an invalid directive falls back to `info`, and an already
+/// installed subscriber is ignored rather than panicking. A configuration error
+/// (e.g. an unparseable `--tcp`) is reported and mapped to a failing
+/// `glib::ExitCode`; a `clap` usage error exits the process first.
+pub fn run() -> gtk4::glib::ExitCode {
+    let cli = cli::Cli::parse();
+    install_logging(&cli.log);
+
+    let target = match cli.target() {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::error!(%error, "invalid viewer endpoint");
+            return gtk4::glib::ExitCode::FAILURE;
+        }
+    };
+
+    app::run_application(target)
+}
+
+/// Installs the `tracing-subscriber` from `filter`, tolerating a bad directive
+/// and an already-installed subscriber.
+fn install_logging(filter: &str) {
+    let env_filter = tracing_subscriber::EnvFilter::try_new(filter)
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(env_filter)
+        .try_init();
+}
