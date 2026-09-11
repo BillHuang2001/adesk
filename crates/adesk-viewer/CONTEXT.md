@@ -12,8 +12,9 @@ The crate is transport-agnostic (any `AsyncRead + AsyncWrite` stream), never lin
 Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Name>`).
 
 ### Errors (`src/error.rs`)
-- `ViewerError` (`thiserror`): `Io`, `Protocol(ViewerProtoError)`, `Closed`, `Handshake(String)`, `Backend(String)`, `VersionMismatch { client, server }`, `Transport(String)`.
+- `ViewerError` (`thiserror`): `Io`, `Protocol(ViewerProtoError)`, `Closed`, `Handshake(String)`, `Backend { code: ErrorCode, message: String }`, `VersionMismatch { client, server }`, `Transport(String)`.
 - `Result<T, E = ViewerError>`.
+- `Backend` carries the AGP `ErrorCode` the backend failure maps to, which the session sends as the VAP `error` code (`docs/viewer.md` §6) — so an unknown window keeps `unknown_window` on the wire.
 - `VersionMismatch` mirrors `ViewerProtoError`'s field meaning: `client` is the peer's version, `server` is `PROTOCOL_VERSION`.
 
 ### Backend seam (`src/backend.rs`)
@@ -21,12 +22,13 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
   - `fn display(&self) -> ServerHello` — output size, runtime version, renderer, initial cursor, control owner (used for the handshake reply).
   - `async fn render_frame(&self) -> Result<ViewerFrame>` — render the current desktop into an `ImagePayload` + cursor + active window.
   - `async fn desktop_state(&self) -> Result<DesktopState>` — window list + active window.
-  - `async fn apply_input(&self, input: ViewerInput) -> Result<Option<ActionId>>` — apply one viewer input through the seat; `Some(action_id)` when the runtime recorded an action.
+  - `async fn apply_input(&self, input: ViewerInput) -> Result<Option<ActionId>>` — apply one viewer action; pointer/key/text input goes through the seat, `ViewerInput::ActivateWindow` changes compositor window state directly. `Some(action_id)` when the runtime recorded an action.
   - `fn change_signal(&self) -> ChangeSignal { ChangeSignal::never() }` — notified when the desktop changes (a commit/damage/window event), so frames are pushed on demand.
   - `async fn set_control(&self, owner: ControlOwner) -> Result<()> { Ok(()) }` — advisory ownership handshake (a no-op by default).
-- `ViewerInput` — the input subset the backend sees (no handshake/protocol traffic): `PointerMove { x, y }`, `PointerButton { button, state, x, y }`, `Scroll { dx, dy, x, y }`, `Key { keys, action }`, `Text { text }`.
-  - Positions are **normalized** `0.0..=1.0` output coordinates and optional; there is no `window_id` — the runtime resolves them to output pixels through its window model.
-  - `button` is an `adesk_core::Button`, `keys` an `adesk_proto::KeySpec`, `action` a `KeyAction`.
+- `ViewerInput` — the viewer actions the backend sees (no handshake/protocol traffic): `PointerMove { x, y }`, `PointerButton { button, state, x, y }`, `Scroll { dx, dy, x, y }`, `Key { keys, action }`, `Text { text }`, `ActivateWindow { window_id }`.
+  - Positions are **normalized** `0.0..=1.0` output coordinates and optional; the pointer/key/text variants carry no `window_id` — the runtime resolves them to output pixels and targets its active window through its window model.
+  - `ActivateWindow` names a window explicitly and is **runtime-native**: the backend changes compositor window state directly (exactly like AGP §5.3 `activate_window`), never synthesized input (`docs/viewer.md` §5).
+  - `button` is an `adesk_core::Button`, `keys` an `adesk_proto::KeySpec`, `action` a `KeyAction`, `window_id` an `adesk_core::WindowId`.
 - `ChangeSignal` — cheap-clone "desktop changed" notifier: `new()`, `never()`, `notify()`, `async changed(&self)`.
 
 ### Server session (`src/server.rs`, `src/session.rs`)
@@ -44,7 +46,7 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ### Client SDK (`src/client.rs`)
 - `ViewerTarget::{Unix(PathBuf), Tcp(SocketAddr)}` + `Display`.
-- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `target() -> &ViewerTarget`, `socket_path() -> Option<&Path>`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame()`, `request_state()`, `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(KeySpec, KeyAction)`, `text(text)`, `set_control(owner)`, `input_ack() -> impl Stream<Item = (Option<u64>, ActionId)>`, `async close(self) -> Result<()>`.
+- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `target() -> &ViewerTarget`, `socket_path() -> Option<&Path>`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame()`, `request_state()`, `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(KeySpec, KeyAction)`, `text(text)`, `activate_window(WindowId)`, `set_control(owner)`, `input_ack() -> impl Stream<Item = (Option<u64>, ActionId)>`, `async close(self) -> Result<()>`.
 - `ConnectOptions` (`#[non_exhaustive]`): `target`, `max_frame_len`, `connect_timeout`, `handshake_timeout`, `client_name`, `overlays`, `min_interval_ms`, `verify_version` (default `true`); `new` + `with_*` builders.
 - `DEFAULT_CONNECT_TIMEOUT` / `DEFAULT_HANDSHAKE_TIMEOUT` (5 s each), `DEFAULT_MAX_FRAME_LEN` (re-exported from `transport`).
 
@@ -55,9 +57,9 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ### Input scripts (`src/script.rs`)
 - `parse_script(&str) -> Result<Vec<ScriptCommand>, ScriptError>`; every `ScriptError` variant carries the 1-based `line` it occurred on.
-- `ScriptCommand`: `Move { x, y }`, `Click { button }`, `Down { button }`, `Up { button }`, `Scroll { dx, dy }`, `Key { keys, action }`, `Text { text }`, `Control { owner }`, `Wait { ms }`, `Capture { path }`.
+- `ScriptCommand`: `Move { x, y }`, `Click { button }`, `Down { button }`, `Up { button }`, `Scroll { dx, dy }`, `Key { keys, action }`, `Text { text }`, `ActivateWindow { window_id }`, `Control { owner }`, `Wait { ms }`, `Capture { path }`.
 - Grammar — one command per line, whitespace-separated tokens, blank lines and `#` comments ignored:
-  `move X Y`, `click [BUTTON]` (left when omitted), `down BUTTON`, `up BUTTON`, `scroll DX DY`, `key KEYS...` (one token = key, several = chord, always a tap), `type TEXT` (rest of line verbatim), `control ai|human`, `wait MS`, `capture FILE` (single token).
+  `move X Y`, `click [BUTTON]` (left when omitted), `down BUTTON`, `up BUTTON`, `scroll DX DY`, `key KEYS...` (one token = key, several = chord, always a tap), `type TEXT` (rest of line verbatim), `activate WINDOW_ID` (numeric AGP window id; the runtime-native window switch), `control ai|human`, `wait MS`, `capture FILE` (single token).
 
 ### Binary (`src/main.rs`)
 - `adesk-viewer` (clap): transport `--unix <PATH>` (default `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else `<temp_dir>/adesk-viewer.sock`) / `--tcp <HOST:PORT>` (mutually exclusive); `--fps <N>` (→ `min_interval_ms = 1000 / N`, `0` = unpaced); `--overlays <LIST>`; `--log <FILTER>` (env `ADESK_LOG`, default `info`).
@@ -119,12 +121,12 @@ Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`
 
 ## Test Strategy
 No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex stream or a `tempfile` Unix socket.
-- `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
-- `tests/client.rs` — 10 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream (`frames()` push on a desktop change), every input method incl. `scroll`/`text`/`set_control`, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
-- `tests/script.rs` — 15 tests for the input-script grammar and error line numbers (this suite fully covers the parser; `src/script.rs` has no inline tests).
-- Inline unit tests: 46 in the lib target (backend, transport, capture, session, server, client, test_support) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
+- `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant (incl. `activate_window`) forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
+- `tests/client.rs` — 11 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream (`frames()` push on a desktop change), every input method incl. `scroll`/`text`/`activate_window`/`set_control`, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
+- `tests/script.rs` — 16 tests for the input-script grammar and error line numbers (this suite fully covers the parser; `src/script.rs` has no inline tests).
+- Inline unit tests: 47 in the lib target (backend, transport, capture, session, server, client, error, test_support) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
 - `tests/CONTEXT.md` records the remaining audit notes and coverage gaps in this suite (the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`; no TCP-transport or multi-connection-fan-out test); read it before adding parser/session tests.
-- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **98 passed / 0 failed / 0 ignored** (46 lib + 15 bin + 10 client + 15 script + 12 session; 0 doc-tests).
+- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **101 passed / 0 failed / 0 ignored** (47 lib + 15 bin + 11 client + 16 script + 12 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
 ## Known Issues

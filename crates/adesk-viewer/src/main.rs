@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use clap::{ArgGroup, Parser};
 use futures::StreamExt;
 
-use adesk_core::{ButtonState, OverlayKind};
+use adesk_core::{ButtonState, OverlayKind, WindowId};
 use adesk_viewer::{
     parse_script, save_frame_png, ConnectOptions, FrameWriter, ScriptCommand, ViewerClient,
     ViewerError, ViewerTarget,
@@ -386,6 +386,9 @@ async fn apply(client: &ViewerClient, command: ScriptCommand) -> Result<(), View
         ScriptCommand::Scroll { dx, dy } => client.scroll(dx, dy, None).await,
         ScriptCommand::Key { keys, action } => client.key(keys, action).await,
         ScriptCommand::Text { text } => client.text(text).await,
+        ScriptCommand::ActivateWindow { window_id } => {
+            client.activate_window(WindowId(window_id)).await
+        }
         ScriptCommand::Control { owner } => client.set_control(owner).await,
         ScriptCommand::Wait { ms } => {
             tokio::time::sleep(Duration::from_millis(ms)).await;

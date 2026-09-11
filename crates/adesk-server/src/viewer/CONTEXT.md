@@ -12,7 +12,7 @@ Rendering is on demand: a frame is produced only when a session asks for one, an
 ## API Surface (all `pub(crate)`; nothing here is `pub`)
 
 - `start(config: &ServerConfig, context: &ServerContext) -> Result<Option<PathBuf>, ServerError>` (`mod.rs`) — binds the transports and spawns the accept loops, returning the resolved Unix socket path or `None` when the endpoint is disabled. Bound *before* `Server::start` returns, so a returned `RunningServer` means VAP accepts connections.
-- `ViewerBackendImpl` (`backend.rs`) — `new(ServerContext)` builds it and spawns the change pump (must be called inside a tokio runtime). Implements all six `ViewerBackend` methods: the four required ones (`display`, `render_frame`, `desktop_state`, `apply_input`) and *both* defaults (`change_signal`, `set_control`).
+- `ViewerBackendImpl` (`backend.rs`) — `new(ServerContext)` builds it and spawns the change pump (must be called inside a tokio runtime). Implements all six `ViewerBackend` methods: the four required ones (`display`, `render_frame`, `desktop_state`, `apply_input`) and *both* defaults (`change_signal`, `set_control`). A private `activate_window` method backs the `ViewerInput::ActivateWindow` arm by calling `crate::dispatch::windows::activate_window` through the shared `InputQueue`.
 - `ViewerListener` (`listener.rs`) — `bind(unix_path, Option<SocketAddr>) -> Result<ViewerListener>` and `spawn_accept_loops(listener, context, backend)`. `ViewerListener { unix: SocketListener, tcp: Option<TcpListener> }`; `unix_path()` is only used inside `listener.rs`.
 
 ## Routing Table
@@ -34,15 +34,15 @@ Rendering is on demand: a frame is produced only when a session asks for one, an
 - `mod viewer` is declared `pub mod viewer` in `src/lib.rs` but exposes **zero** public items — every item is `pub(crate)`.
 - The two accept loops must not own teardown: only the AGP accept loop runs `crate::shutdown::run`. These tasks hold the shutdown token and stop accepting; the socket file is removed by `shutdown::run`, with `SocketListener`'s RAII drop (keyed on the `(device, inode)` pair) as fallback.
 - Both transports are served by one generic `accept_loop<T: ViewerTransport>`; `UnixTransport`/`TcpTransport` are private and differ only in the accepted stream type and the `PeerInfo` variant. `spawn_accept_loops` spawns one `accept_loop` per bound transport.
-- `apply_input` requires a target window (`snapshot.keyboard_focus.or(snapshot.active_window_id)`; VAP carries no `window_id`). No window ⇒ `invalid_request("no window is active")`, never a panic and never a silent drop. Keyboard input activates the target first; pointer input never does.
+- The pointer/key/text `apply_input` arms require a target window, resolved by the free `input_target` helper (`snapshot.keyboard_focus.or(snapshot.active_window_id)`; VAP carries no `window_id` for them). No window ⇒ `invalid_request("no window is active")`, never a panic and never a silent drop. Keyboard input activates the target first; pointer input never does. The `ViewerInput::ActivateWindow` arm is the exception: it names a window explicitly and is runtime-native, so it resolves no target and delegates to `crate::dispatch::windows::activate_window` (which reports `unknown_window` for an unknown id).
 - The backend owns one `ChangeSignal` (fed by the pump in `spawn_change_pump`) and one `InputQueue` shared by every connection, so input from concurrent viewers stays in submission order.
 
 ## Known Issues
 
 - `listener.rs:74` calls `ViewerServer::new(backend).with_config(ViewerServerConfig::default())` — a no-op, because `ViewerServer::new` already installs `ViewerServerConfig::default()`. The `ViewerServerConfig` import exists only for that call.
 - `backend.rs::render_frame` hand-rolls `images::encode_png` + `ImagePayload::from_png(.., 1.0)`; `crate::images::encode(image, ImageFormat::Png, 1.0)` does exactly that in one call.
-- `apply_input` re-implements the §5.5 *orchestration* (parse key → `record_action` → `activate_if_needed` → `send_unit`) that `dispatch/input.rs` handlers also perform, per `ViewerInput` arm. It reuses the `pub(crate)` seat helpers, so the duplication is at the sequence level, not the command level.
-- There are no in-module `#[cfg(test)]` tests in any of these three files; the only coverage is the 7 E2E tests in `tests/viewer.rs`. The TCP accept arm and the Unix arm's error branch, `spawn_change_pump`/`is_desktop_change`, `cursor_state`/`normalize`, `no_active_window` and `not_a_single_key` have no direct test.
+- `apply_input` re-implements the §5.5 *orchestration* (parse key → `record_action` → `activate_if_needed` → `send_unit`) that `dispatch/input.rs` handlers also perform, per `ViewerInput` arm. It reuses the `pub(crate)` seat helpers, so the duplication is at the sequence level, not the command level. The `ActivateWindow` arm is not duplicated at all: it reuses `dispatch::windows::activate_window` wholesale.
+- There are no in-module `#[cfg(test)]` tests in any of these three files; the only coverage is the 9 E2E tests in `tests/viewer.rs`. The TCP accept arm and the Unix arm's error branch, `spawn_change_pump`/`is_desktop_change`, `cursor_state`/`normalize`, `no_active_window`, `not_a_single_key` and the `input_target` helper's `unknown_window` branch have no direct test.
 
 ## Notes for Agents
 

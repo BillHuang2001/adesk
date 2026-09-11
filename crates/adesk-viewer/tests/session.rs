@@ -17,7 +17,7 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size};
+use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size, WindowId};
 use adesk_proto::{KeySpec, RendererKind};
 use adesk_viewer::{PeerInfo, ViewerError, ViewerInput, ViewerServer, ViewerServerConfig};
 use adesk_viewer_proto::{
@@ -347,6 +347,9 @@ async fn every_input_variant_is_forwarded_in_order() {
         ClientMessage::Text {
             text: "hello".to_owned(),
         },
+        ClientMessage::ActivateWindow {
+            window_id: WindowId(17),
+        },
     ];
 
     for message in &messages {
@@ -381,6 +384,9 @@ async fn every_input_variant_is_forwarded_in_order() {
             },
             ViewerInput::Text {
                 text: "hello".to_owned(),
+            },
+            ViewerInput::ActivateWindow {
+                window_id: WindowId(17),
             },
         ]
     );

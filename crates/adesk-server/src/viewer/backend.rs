@@ -13,7 +13,7 @@
 use std::sync::Mutex;
 
 use adesk_compositor::{CompositorError, KeyCode, RendererName, RuntimeCommand};
-use adesk_core::{ActionId, ButtonState, KeyState, Position, Rect, RuntimeEvent, Size};
+use adesk_core::{ActionId, ButtonState, KeyState, Position, Rect, RuntimeEvent, Size, WindowId};
 use adesk_observer::ActionKind;
 use adesk_viewer::{ChangeSignal, Result as ViewerResult, ViewerBackend, ViewerError, ViewerInput};
 use adesk_viewer_proto::{
@@ -22,8 +22,9 @@ use adesk_viewer_proto::{
 use tokio::sync::broadcast;
 
 use crate::context::ServerContext;
+use crate::dispatch::RequestContext;
 use crate::error::ServerError;
-use crate::session::InputQueue;
+use crate::session::{InputQueue, Session};
 
 /// The runtime side of every viewer connection.
 pub(crate) struct ViewerBackendImpl {
@@ -68,6 +69,31 @@ impl ViewerBackendImpl {
             }
             None => CursorState::hidden(),
         }
+    }
+
+    /// Applies a viewer `activate_window` (`docs/viewer.md` §5).
+    ///
+    /// This reuses the runtime-native AGP §5.3 path verbatim
+    /// ([`crate::dispatch::windows::activate_window`]): it changes compositor
+    /// window state directly, records the `ActionId` and never synthesizes input.
+    /// The call runs through the shared [`InputQueue`], so it stays ordered with
+    /// the connection's other input. The throwaway [`Session`] is unused by
+    /// `activate_window` (it reads no `ctx.session` field).
+    async fn activate_window(&self, window_id: WindowId) -> ViewerResult<Option<ActionId>> {
+        let session = Session::new(0);
+        let ctx = RequestContext {
+            server: &self.context,
+            session: &session,
+        };
+        let action = self
+            .input
+            .run(crate::dispatch::windows::activate_window(
+                &ctx,
+                adesk_proto::ActivateWindowParams { window_id },
+            ))
+            .await
+            .map_err(backend_error)?;
+        Ok(Some(action.action_id))
     }
 }
 
@@ -135,12 +161,39 @@ fn viewer_position(x: Option<f64>, y: Option<f64>, output: Size, rect: Rect) -> 
     }
 }
 
-/// Wraps a server failure as a VAP backend failure.
+/// Wraps a server failure as a VAP backend failure, preserving its AGP code.
 ///
-/// VAP carries only an `ErrorCode` + message, so the runtime's classification
-/// travels as the message text (`ViewerError::Backend`).
+/// VAP reports a backend failure as an `error` message whose `code` reuses the AGP
+/// [`adesk_core::ErrorCode`] vocabulary (`docs/viewer.md` §6), so the runtime's
+/// classification travels both as that code and as the message text
+/// ([`ServerError::code`]).
 fn backend_error(error: ServerError) -> ViewerError {
-    ViewerError::Backend(error.to_string())
+    ViewerError::Backend {
+        code: error.code(),
+        message: error.to_string(),
+    }
+}
+
+/// Resolves the window a pointer/key/text viewer input targets, its geometry and
+/// the output size.
+///
+/// Every such input targets the window the compositor's `inject_*` resolves
+/// against: the keyboard focus, else the active window (`docs/viewer.md` §5). No
+/// candidate window is `invalid_request`; a candidate that vanished is
+/// `unknown_window`.
+async fn input_target(server: &ServerContext) -> ViewerResult<(WindowId, Rect, Size)> {
+    let snapshot = crate::dispatch::windows::state(server)
+        .await
+        .map_err(backend_error)?;
+    let target = snapshot
+        .keyboard_focus
+        .or(snapshot.active_window_id)
+        .ok_or_else(|| backend_error(no_active_window()))?;
+    let rect = snapshot
+        .window(target)
+        .map(|window| window.geometry)
+        .ok_or_else(|| backend_error(crate::dispatch::windows::unknown_window(target)))?;
+    Ok((target, rect, server.compositor.output_size()))
 }
 
 /// The failure a viewer input hits when no window can receive it.
@@ -218,23 +271,11 @@ impl ViewerBackend for ViewerBackendImpl {
 
     async fn apply_input(&self, input: ViewerInput) -> ViewerResult<Option<ActionId>> {
         let server = &self.context;
-        // Every viewer input targets the window the compositor's `inject_*`
-        // resolves against: the keyboard focus, else the active window.
-        let snapshot = crate::dispatch::windows::state(server)
-            .await
-            .map_err(backend_error)?;
-        let target = snapshot
-            .keyboard_focus
-            .or(snapshot.active_window_id)
-            .ok_or_else(|| backend_error(no_active_window()))?;
-        let rect = snapshot
-            .window(target)
-            .map(|window| window.geometry)
-            .ok_or_else(|| backend_error(crate::dispatch::windows::unknown_window(target)))?;
-        let output = server.compositor.output_size();
 
         match input {
+            ViewerInput::ActivateWindow { window_id } => self.activate_window(window_id).await,
             ViewerInput::PointerMove { x, y } => {
+                let (target, rect, output) = input_target(server).await?;
                 // `pointer_move` always carries both fractions.
                 let position = crate::dispatch::input::output_fraction_position(x, y, output, rect);
                 let action_id = server.observer.record_action(
@@ -256,6 +297,7 @@ impl ViewerBackend for ViewerBackendImpl {
                 x,
                 y,
             } => {
+                let (target, rect, output) = input_target(server).await?;
                 let position = viewer_position(x, y, output, rect);
                 let kind = match state {
                     ButtonState::Pressed => ActionKind::MouseDown,
@@ -274,6 +316,7 @@ impl ViewerBackend for ViewerBackendImpl {
                 Ok(Some(action_id))
             }
             ViewerInput::Scroll { dx, dy, x, y } => {
+                let (target, rect, output) = input_target(server).await?;
                 let position = viewer_position(x, y, output, rect);
                 let action_id =
                     server
@@ -292,6 +335,7 @@ impl ViewerBackend for ViewerBackendImpl {
                 Ok(Some(action_id))
             }
             ViewerInput::Key { keys, action } => {
+                let (target, _, _) = input_target(server).await?;
                 let (key, state, kind) = match action {
                     KeyAction::Tap => (
                         parse_key_chord(&keys, target)?,
@@ -337,6 +381,7 @@ impl ViewerBackend for ViewerBackendImpl {
                 Ok(Some(action_id))
             }
             ViewerInput::Text { text } => {
+                let (target, _, _) = input_target(server).await?;
                 let action_id =
                     server
                         .observer

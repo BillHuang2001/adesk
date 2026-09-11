@@ -255,6 +255,34 @@ async fn input_methods_reach_the_backend() {
 }
 
 #[tokio::test]
+async fn activate_window_reaches_the_backend_and_is_acknowledged() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // Subscribe *before* sending so the ack cannot be missed.
+    let acks = client.input_ack();
+    pin_mut!(acks);
+
+    client
+        .activate_window(WindowId(9))
+        .await
+        .expect("activate_window");
+
+    let ack = tokio::time::timeout(STEP_TIMEOUT, acks.next())
+        .await
+        .expect("input_ack must not hang")
+        .expect("the ack stream must stay open");
+    assert_eq!(ack, (None, ACTION));
+
+    assert_eq!(
+        harness.backend.recorded_inputs(),
+        vec![ViewerInput::ActivateWindow {
+            window_id: WindowId(9)
+        }]
+    );
+}
+
+#[tokio::test]
 async fn frames_stream_pushes_a_frame_on_a_desktop_change() {
     let harness = start_server();
     let client = connect(&harness).await;

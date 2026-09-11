@@ -14,9 +14,9 @@ use common::{
     activate_window_message, bye_message, bye_server_message, bye_without_reason, client,
     control_message, error_message, frame_message, hello_message, input_ack_with_id,
     input_ack_without_id, key_tap_message, pointer_button_pressed, pointer_move_message,
-    request_frame_with_id, request_frame_without_id, request_state_with_id, request_state_without_id,
-    scroll_message, server, server_hello_message, set_control_message, state_empty,
-    state_with_window, text_message, unknown_client_message, unknown_server_message,
+    request_frame_with_id, request_frame_without_id, request_state_with_id,
+    request_state_without_id, scroll_message, server, server_hello_message, set_control_message,
+    state_empty, state_with_window, text_message, unknown_client_message, unknown_server_message,
 };
 use serde_json::{json, Value};
 

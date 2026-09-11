@@ -16,7 +16,7 @@ use adesk_proto::KeySpec;
 use adesk_viewer::{parse_script, ScriptCommand, ScriptError};
 use adesk_viewer_proto::{ControlOwner, KeyAction};
 
-/// A script using all ten command keywords parses to the exact command vector.
+/// A script using all eleven command keywords parses to the exact command vector.
 #[test]
 fn parses_a_full_script() {
     let source = "\
@@ -27,6 +27,7 @@ up side
 scroll -1 2.5
 key ctrl c
 type hello world
+activate 17
 control ai
 wait 250
 capture /tmp/frame-1.png
@@ -52,6 +53,7 @@ capture /tmp/frame-1.png
             ScriptCommand::Text {
                 text: "hello world".to_owned()
             },
+            ScriptCommand::ActivateWindow { window_id: 17 },
             ScriptCommand::Control {
                 owner: ControlOwner::Ai
             },
@@ -201,6 +203,26 @@ fn type_takes_the_rest_of_the_line_verbatim() {
             text: "#leading".to_owned()
         }]
     );
+}
+
+/// `activate` takes exactly one numeric AGP window id; failures carry the line.
+#[test]
+fn activate_takes_a_numeric_window_id() {
+    assert_eq!(
+        parse_script("activate 17").unwrap(),
+        vec![ScriptCommand::ActivateWindow { window_id: 17 }]
+    );
+    assert!(matches!(
+        parse_script("# c\nactivate abc"),
+        Err(ScriptError::BadNumber { value, line }) if value == "abc" && line == 2
+    ));
+    assert!(matches!(
+        parse_script("activate"),
+        Err(ScriptError::MissingArgs {
+            command: "activate",
+            line: 1
+        })
+    ));
 }
 
 /// `control` accepts exactly the lowercase owners `ai` and `human`.

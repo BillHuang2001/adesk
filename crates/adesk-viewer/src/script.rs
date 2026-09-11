@@ -80,6 +80,15 @@ pub enum ScriptCommand {
         /// The characters to type.
         text: String,
     },
+    /// Activate (focus) `window_id`, making it the visible toplevel.
+    ///
+    /// Runtime-native: this changes compositor window state directly (exactly
+    /// like AGP `activate_window`) and is never synthesized input
+    /// (`docs/viewer.md` §5).
+    ActivateWindow {
+        /// The numeric AGP window id to activate.
+        window_id: u64,
+    },
     /// Announce who owns viewer input.
     Control {
         /// The announced owner.
@@ -124,7 +133,8 @@ pub enum ScriptError {
         /// 1-based line number of the offending line.
         line: usize,
     },
-    /// A numeric argument (`X`, `Y`, `DX`, `DY` or `MS`) could not be parsed.
+    /// A numeric argument (`X`, `Y`, `DX`, `DY`, `MS` or `WINDOW_ID`) could not be
+    /// parsed.
     #[error("line {line}: `{value}` is not a valid number")]
     BadNumber {
         /// The offending token.
@@ -248,6 +258,15 @@ fn parse_line(line: &str, line_no: usize) -> Result<Option<ScriptCommand>, Scrip
                 .trim_start()
                 .to_owned(),
         },
+        "activate" => {
+            check_arity(&args, "activate", line_no, 1)?;
+            ScriptCommand::ActivateWindow {
+                window_id: args[0].parse::<u64>().map_err(|_| ScriptError::BadNumber {
+                    value: args[0].to_owned(),
+                    line: line_no,
+                })?,
+            }
+        }
         "control" => {
             check_arity(&args, "control", line_no, 1)?;
             ScriptCommand::Control {
