@@ -173,7 +173,7 @@ The original 12 GUI-runtime crates are implementation-complete and independently
 Three new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec; 36 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary; 98 tests) and `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 84 tests).
 `adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; its suite is 219 passed / 0 failed.
 `cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
-`cargo test --workspace --no-fail-fast` = 1359 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
+`cargo test --workspace --no-fail-fast` = 1403 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
 The on-demand capture path reuses a size-keyed pool of offscreen render targets (`adesk_render::TargetPool`, owned per backend by the compositor's `HeadlessRenderer`), so repeated captures of a given size no longer re-allocate a fresh ~4 MiB target each time.
 Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 122 passed.
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 77 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
