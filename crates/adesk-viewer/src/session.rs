@@ -318,6 +318,11 @@ where
         ClientMessage::Text { text } => {
             apply_input(backend, write, ViewerInput::Text { text }).await
         }
+        // Runtime-native window switch (§5): ordered and acknowledged exactly
+        // like input, but it changes compositor state instead of the seat.
+        ClientMessage::ActivateWindow { window_id } => {
+            apply_input(backend, write, ViewerInput::ActivateWindow { window_id }).await
+        }
         // Advisory control handshake (§5).
         ClientMessage::SetControl { owner } => {
             match backend.set_control(owner).await {
@@ -358,10 +363,12 @@ where
     }
 }
 
-/// Applies one viewer input through the backend and answers with `input_ack`
+/// Applies one viewer action through the backend and answers with `input_ack`
 /// when the runtime recorded an action (`docs/viewer.md` §4, §5).
 ///
 /// VAP input messages carry no client `id`, so the ack's `id` is always `None`.
+/// A backend failure keeps its AGP [`ErrorCode`] on the wire (§6) — an unknown
+/// window id is answered with `unknown_window`, not a collapsed code.
 async fn apply_input<B, W>(
     backend: &Arc<B>,
     write: &mut W,
@@ -384,8 +391,16 @@ where
         }
         // Applied but no recorded action: nothing to acknowledge.
         Ok(None) => {}
-        // Undeliverable input answers `error` and keeps the connection open (§6).
-        Err(error) => send_error(write, ErrorCode::InvalidRequest, error.to_string()).await?,
+        // An undeliverable action answers `error` and keeps the connection open
+        // (§6). The backend classifies the failure, so its AGP code travels to the
+        // viewer unchanged.
+        Err(error) => {
+            let code = match &error {
+                ViewerError::Backend { code, .. } => *code,
+                _ => ErrorCode::InvalidRequest,
+            };
+            send_error(write, code, error.to_string()).await?;
+        }
     }
     Ok(Disposition::Continue)
 }

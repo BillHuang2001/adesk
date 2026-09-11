@@ -8,7 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use adesk_core::{ActionId, Size};
+use adesk_core::{ActionId, ErrorCode, Size};
 use adesk_proto::{ImagePayload, RendererKind};
 use adesk_viewer_proto::{ControlOwner, CursorState, DesktopState, ServerHello, ViewerFrame};
 
@@ -95,7 +95,10 @@ impl ViewerBackend for FakeBackend {
 
     async fn render_frame(&self) -> Result<ViewerFrame> {
         if self.fail_render.load(Ordering::SeqCst) {
-            return Err(ViewerError::Backend("renderer failed".to_owned()));
+            return Err(ViewerError::Backend {
+                code: ErrorCode::RenderFailed,
+                message: "renderer failed".to_owned(),
+            });
         }
         let (w, h) = (self.output.w, self.output.h);
         let data = vec![0u8; (w * h * 4) as usize];

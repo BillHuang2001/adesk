@@ -5,7 +5,7 @@
 //! decoded into the `Unknown` variant rather than being an error, so a peer stays
 //! forward-compatible (§1, §7); see [`crate::codec`] for the text entry points.
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode};
+use adesk_core::{ActionId, Button, ButtonState, ErrorCode, WindowId};
 use adesk_proto::KeySpec;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
@@ -69,6 +69,14 @@ pub enum ClientMessage {
     Text {
         /// The text to type.
         text: String,
+    },
+    /// Activate (focus) the window with this id (`activate_window`).
+    ///
+    /// A runtime-native window-management action, not synthesized input
+    /// (`docs/viewer.md` §4, §5).
+    ActivateWindow {
+        /// The window to activate (an AGP `WindowId`).
+        window_id: WindowId,
     },
     /// Announce who owns input (`"ai"` | `"human"`).
     SetControl {
@@ -149,6 +157,7 @@ impl ClientMessage {
             ClientMessage::Scroll { .. } => "scroll",
             ClientMessage::Key { .. } => "key",
             ClientMessage::Text { .. } => "text",
+            ClientMessage::ActivateWindow { .. } => "activate_window",
             ClientMessage::SetControl { .. } => "set_control",
             ClientMessage::Bye { .. } => "bye",
             ClientMessage::Unknown { message_type, .. } => message_type,
@@ -210,6 +219,12 @@ impl ClientMessage {
             "text" => {
                 let fields: TextFields = decode(value)?;
                 Ok(ClientMessage::Text { text: fields.text })
+            }
+            "activate_window" => {
+                let fields: WindowIdFields = decode(value)?;
+                Ok(ClientMessage::ActivateWindow {
+                    window_id: fields.window_id,
+                })
             }
             "set_control" => {
                 let fields: OwnerFields = decode(value)?;
@@ -281,6 +296,11 @@ impl ClientMessage {
             ClientMessage::Text { text } => {
                 let mut map = tagged_empty("text");
                 map.insert("text".to_owned(), Value::String(text.clone()));
+                Value::Object(map)
+            }
+            ClientMessage::ActivateWindow { window_id } => {
+                let mut map = tagged_empty("activate_window");
+                map.insert("window_id".to_owned(), field(window_id));
                 Value::Object(map)
             }
             ClientMessage::SetControl { owner } => {
@@ -524,6 +544,12 @@ struct KeyFields {
 #[derive(Deserialize)]
 struct TextFields {
     text: String,
+}
+
+/// Deserializes the `activate_window` field.
+#[derive(Deserialize)]
+struct WindowIdFields {
+    window_id: WindowId,
 }
 
 /// Deserializes the `owner` field shared by `set_control` and `control` (the

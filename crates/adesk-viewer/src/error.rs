@@ -9,7 +9,7 @@
 //! | malformed VAP wire message | [`ViewerError::Protocol`] |
 //! | peer (or local stream) closed | [`ViewerError::Closed`] |
 //! | VAP handshake refused | [`ViewerError::Handshake`] |
-//! | the runtime backend failed | [`ViewerError::Backend`] |
+//! | the runtime backend failed | [`ViewerError::Backend`] (carries the AGP `ErrorCode` the VAP `error` reports) |
 //! | peer speaks a different VAP version | [`ViewerError::VersionMismatch`] |
 //! | NDJSON framing failure | [`ViewerError::Transport`] |
 //!
@@ -18,6 +18,8 @@
 //! protocol and its transport.
 
 use thiserror::Error;
+
+use adesk_core::ErrorCode;
 
 /// Everything that can go wrong in `adesk-viewer`.
 #[derive(Debug, Error)]
@@ -41,8 +43,18 @@ pub enum ViewerError {
 
     /// The runtime backend could not complete an operation: rendering a frame,
     /// reading the desktop state, or applying viewer input.
-    #[error("backend error: {0}")]
-    Backend(String),
+    ///
+    /// `code` is the AGP [`ErrorCode`] the failure maps to; the server session
+    /// forwards it as the VAP `error` code (`docs/viewer.md` §6), so a backend
+    /// failure keeps its classification (`unknown_window`, `invalid_request`, …)
+    /// on the wire instead of collapsing into one code.
+    #[error("backend error: {message}")]
+    Backend {
+        /// The AGP error code the failure maps to (`docs/viewer.md` §6).
+        code: ErrorCode,
+        /// Human-readable description of the failure.
+        message: String,
+    },
 
     /// The peer speaks a different VAP protocol version (`docs/viewer.md` §2, §7).
     ///
@@ -94,5 +106,18 @@ mod tests {
         let text = error.to_string();
         assert!(text.contains("v1"), "{text}");
         assert!(text.contains("v2"), "{text}");
+    }
+
+    #[test]
+    fn backend_errors_carry_their_agp_code() {
+        let error = ViewerError::Backend {
+            code: ErrorCode::UnknownWindow,
+            message: "unknown window 42".to_owned(),
+        };
+        match &error {
+            ViewerError::Backend { code, .. } => assert_eq!(*code, ErrorCode::UnknownWindow),
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert!(error.to_string().contains("unknown window 42"));
     }
 }

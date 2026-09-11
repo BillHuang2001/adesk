@@ -124,6 +124,12 @@ pub fn text_message() -> ClientMessage {
     }
 }
 
+/// `ClientMessage::ActivateWindow { window_id: 17 }`.
+pub fn activate_window_message() -> ClientMessage {
+    ClientMessage::ActivateWindow {
+        window_id: WindowId(17),
+    }
+}
 /// `ClientMessage::SetControl { owner: Human }`.
 pub fn set_control_message() -> ClientMessage {
     ClientMessage::SetControl {

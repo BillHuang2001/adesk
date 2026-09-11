@@ -20,7 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use adesk_core::{ActionId, Button, ButtonState, OverlayKind};
+use adesk_core::{ActionId, Button, ButtonState, ErrorCode, OverlayKind, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
     check_version, decode_server, encode_client, ClientMessage, ControlOwner, DesktopState,
@@ -366,7 +366,7 @@ impl ViewerClient {
                     Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
                 },
                 error = errors.recv() => match error {
-                    Ok(message) => return Err(ViewerError::Backend(message)),
+                    Ok((code, message)) => return Err(ViewerError::Backend { code, message }),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
                 },
@@ -396,7 +396,7 @@ impl ViewerClient {
             tokio::select! {
                 state = &mut receiver => return state.map_err(|_| ViewerError::Closed),
                 error = errors.recv() => match error {
-                    Ok(message) => return Err(ViewerError::Backend(message)),
+                    Ok((code, message)) => return Err(ViewerError::Backend { code, message }),
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
                 },
@@ -462,6 +462,21 @@ impl ViewerClient {
     /// Returns [`ViewerError::Io`] if the message cannot be written.
     pub async fn text(&self, text: impl Into<String>) -> Result<()> {
         self.send(ClientMessage::Text { text: text.into() }).await
+    }
+
+    /// Activates `window_id` (`docs/viewer.md` §4, §5).
+    ///
+    /// Window switching is runtime-native, not synthesized input: the server
+    /// changes compositor window state directly (the same path AGP §5.3 uses).
+    /// Like the other fire-and-forget input methods this only writes the message;
+    /// the server's acknowledgement — an `input_ack` carrying the recorded AGP
+    /// [`ActionId`] — arrives on [`ViewerClient::input_ack`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewerError::Io`] if the message cannot be written.
+    pub async fn activate_window(&self, window_id: WindowId) -> Result<()> {
+        self.send(ClientMessage::ActivateWindow { window_id }).await
     }
 
     /// Announces that `owner` owns input (`docs/viewer.md` §4, §5).
@@ -563,7 +578,9 @@ impl ViewerClient {
     }
 
     /// Subscribes to the error channel, or fails once the connection is gone.
-    fn subscribe_errors(&self) -> Result<broadcast::Receiver<String>> {
+    ///
+    /// Each item is the AGP `ErrorCode` the server reported and its message.
+    fn subscribe_errors(&self) -> Result<broadcast::Receiver<(ErrorCode, String)>> {
         lock(&self.inner.errors)
             .as_ref()
             .map(broadcast::Sender::subscribe)
@@ -605,7 +622,7 @@ struct Inner {
     /// Drop-sender fan-out of `input_ack` messages; `None` once shut down.
     input_acks: Mutex<Option<broadcast::Sender<InputAck>>>,
     /// Drop-sender fan-out of server error messages; `None` once shut down.
-    errors: Mutex<Option<broadcast::Sender<String>>>,
+    errors: Mutex<Option<broadcast::Sender<(ErrorCode, String)>>>,
     /// Pending `request_state` waiters, resolved oldest-first.
     state_waiters: Mutex<VecDeque<oneshot::Sender<DesktopState>>>,
     /// Set once the connection is gone, for a cheap `request_state` early-out.
@@ -711,9 +728,9 @@ async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Tran
                     tracing::trace!("ignoring an unsolicited desktop state message");
                 }
             }
-            ServerMessage::Error { message, .. } => {
+            ServerMessage::Error { code, message, .. } => {
                 if let Some(sender) = lock(&inner.errors).as_ref() {
-                    let _ = sender.send(message);
+                    let _ = sender.send((code, message));
                 }
             }
             ServerMessage::Control { owner } => {

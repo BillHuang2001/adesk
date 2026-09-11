@@ -9,13 +9,15 @@
 //! (`docs/viewer.md` §5, §8).
 //!
 //! Coordinates the backend receives are **normalized output-relative fractions**
-//! (`0.0..=1.0`), never pixels, and viewer input carries **no `window_id`**: the
-//! runtime resolves positions through its window model and targets its active
-//! window (`docs/viewer.md` §4, §5).
+//! (`0.0..=1.0`), never pixels: the runtime resolves positions through its window
+//! model and targets its active window for the pointer/key/text variants. The one
+//! exception is [`ViewerInput::ActivateWindow`], which names a window explicitly
+//! and is a runtime-native window-management action, never synthesized input
+//! (`docs/viewer.md` §4, §5).
 
 use std::sync::Arc;
 
-use adesk_core::{ActionId, Button, ButtonState};
+use adesk_core::{ActionId, Button, ButtonState, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{ControlOwner, DesktopState, KeyAction, ServerHello, ViewerFrame};
 use tokio::sync::Notify;
@@ -46,12 +48,13 @@ pub trait ViewerBackend: Send + Sync + 'static {
     /// Returns the window list and the active window (`docs/viewer.md` §3).
     async fn desktop_state(&self) -> Result<DesktopState>;
 
-    /// Applies one viewer input through the seat (`docs/viewer.md` §5).
+    /// Applies one viewer action (`docs/viewer.md` §5).
     ///
-    /// Returns `Ok(Some(action_id))` when the runtime recorded an AGP action
-    /// (`docs/protocol.md` §5.5); the session echoes it in the matching
-    /// `input_ack`. `Ok(None)` means the input was applied but produced no
-    /// recorded action.
+    /// Pointer/key/text input goes through the seat; [`ViewerInput::ActivateWindow`]
+    /// changes compositor window state directly. Returns `Ok(Some(action_id))`
+    /// when the runtime recorded an AGP action (`docs/protocol.md` §5.5); the
+    /// session echoes it in the matching `input_ack`. `Ok(None)` means the action
+    /// was applied but produced no recorded action.
     async fn apply_input(&self, input: ViewerInput) -> Result<Option<ActionId>>;
 
     /// The "desktop changed" source used to push frames on demand
@@ -72,12 +75,15 @@ pub trait ViewerBackend: Send + Sync + 'static {
     }
 }
 
-/// The input subset a [`ViewerBackend`] sees (`docs/viewer.md` §4).
+/// The viewer actions a [`ViewerBackend`] sees (`docs/viewer.md` §4).
 ///
-/// This is the input-only narrowing of the wire `ClientMessage`: handshake,
+/// This is the action-only narrowing of the wire `ClientMessage`: handshake,
 /// `request_frame`/`request_state`, `bye` and control traffic are handled by the
 /// session and never reach the backend, so the trait stays stable if the protocol
-/// grows non-input messages. All coordinates are normalized output fractions.
+/// grows non-action messages. All coordinates are normalized output fractions and
+/// the pointer/key/text variants target the runtime's *active* window;
+/// [`ViewerInput::ActivateWindow`] is the runtime-native window switch (§5) — a
+/// compositor state change, not synthesized input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerInput {
     /// Move the pointer to a normalized output position (`pointer_move`).
@@ -121,6 +127,15 @@ pub enum ViewerInput {
     Text {
         /// The text to type.
         text: String,
+    },
+    /// Activate a window (`activate_window`).
+    ///
+    /// Runtime-native: the backend changes compositor window state directly,
+    /// exactly like AGP §5.3 `activate_window`, and never synthesizes input
+    /// (`docs/viewer.md` §5).
+    ActivateWindow {
+        /// The window to make active and visible.
+        window_id: WindowId,
     },
 }
 
@@ -266,6 +281,17 @@ mod tests {
             key,
             ViewerInput::Text {
                 text: String::new()
+            }
+        );
+
+        let activate = ViewerInput::ActivateWindow {
+            window_id: WindowId(17),
+        };
+        assert_eq!(activate.clone(), activate);
+        assert_ne!(
+            activate,
+            ViewerInput::ActivateWindow {
+                window_id: WindowId(18)
             }
         );
     }

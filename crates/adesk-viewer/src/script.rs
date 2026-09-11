@@ -16,6 +16,7 @@
 //! scroll DX DY
 //! key KEYS...       # one token is a key, two or more are a chord
 //! type TEXT         # the rest of the line, taken verbatim
+//! activate WINDOW_ID
 //! control ai|human
 //! wait MS
 //! capture FILE      # FILE is a single token (paths may not contain spaces)
@@ -23,8 +24,10 @@
 //!
 //! `BUTTON` is an AGP button wire name (`left|right|middle|side|extra`,
 //! `adesk_core::Button`); `control` accepts the lowercase owners `ai` and
-//! `human`. Parsing never panics: every malformed line yields a [`ScriptError`]
-//! tagged with the 1-based line number it occurred on.
+//! `human`; `activate` takes one numeric AGP window id and is the runtime-native
+//! window switch (`docs/viewer.md` §5). Parsing never panics: every malformed
+//! line yields a [`ScriptError`] tagged with the 1-based line number it occurred
+//! on.
 
 use std::path::PathBuf;
 

@@ -3,7 +3,7 @@
 
 mod common;
 
-use adesk_core::{Button, ButtonState, ErrorCode, OverlayKind, Size};
+use adesk_core::{Button, ButtonState, ErrorCode, OverlayKind, Size, WindowId};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
     check_version, is_compatible_version, ClientMessage, ControlOwner, CursorState, KeyAction,
@@ -11,12 +11,12 @@ use adesk_viewer_proto::{
     DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
 };
 use common::{
-    bye_message, bye_server_message, bye_without_reason, client, control_message, error_message,
-    frame_message, hello_message, input_ack_with_id, input_ack_without_id, key_tap_message,
-    pointer_button_pressed, pointer_move_message, request_frame_with_id, request_frame_without_id,
-    request_state_with_id, request_state_without_id, scroll_message, server, server_hello_message,
-    set_control_message, state_empty, state_with_window, text_message, unknown_client_message,
-    unknown_server_message,
+    activate_window_message, bye_message, bye_server_message, bye_without_reason, client,
+    control_message, error_message, frame_message, hello_message, input_ack_with_id,
+    input_ack_without_id, key_tap_message, pointer_button_pressed, pointer_move_message,
+    request_frame_with_id, request_frame_without_id, request_state_with_id, request_state_without_id,
+    scroll_message, server, server_hello_message, set_control_message, state_empty,
+    state_with_window, text_message, unknown_client_message, unknown_server_message,
 };
 use serde_json::{json, Value};
 
@@ -185,6 +185,20 @@ fn client_text_set_control_and_bye_golden() {
 }
 
 #[test]
+fn client_activate_window_golden() {
+    // A flat object with exactly the `type` tag and the one `window_id` field.
+    assert_eq!(
+        client(&activate_window_message()),
+        json!({"type": "activate_window", "window_id": 17})
+    );
+    let value = client(&ClientMessage::ActivateWindow {
+        window_id: WindowId(4242),
+    });
+    assert_eq!(value, json!({"type": "activate_window", "window_id": 4242}));
+    assert!(value.get("id").is_none(), "activate_window carries no `id`");
+}
+
+#[test]
 fn client_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "x": 1});
     assert_eq!(client(&unknown_client_message()), value);
@@ -217,6 +231,7 @@ fn client_message_type_tags() {
             },
             "text",
         ),
+        (activate_window_message(), "activate_window"),
         (
             ClientMessage::SetControl {
                 owner: ControlOwner::Ai,

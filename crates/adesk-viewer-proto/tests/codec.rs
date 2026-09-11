@@ -165,6 +165,15 @@ fn unknown_fields_in_a_known_message_are_ignored() {
             reason: Some("done".to_owned()),
         }
     );
+
+    let decoded =
+        decode_client(r#"{"type": "activate_window", "window_id": 17, "future": true}"#).unwrap();
+    assert_eq!(
+        decoded,
+        ClientMessage::ActivateWindow {
+            window_id: WindowId(17),
+        }
+    );
 }
 
 #[test]
@@ -214,6 +223,7 @@ fn malformed_lines_are_rejected() {
         r#"{"type": null}"#,               // non-string type
         r#"{"type": "key"}"#,              // known tag, missing keys
         r#"{"type": "pointer_button"}"#,   // known tag, missing fields
+        r#"{"type": "activate_window"}"#,  // known tag, missing window_id
         r#"{"type": "bye", "reason": 5}"#, // wrong field type
     ];
     for line in cases {
