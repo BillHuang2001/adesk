@@ -26,7 +26,6 @@ adesk-core.workspace = true
 adesk-proto.workspace = true
 adesk-viewer.workspace = true
 adesk-viewer-proto.workspace = true
-anyhow.workspace = true
 clap.workspace = true
 futures.workspace = true
 gtk4 = { workspace = true, features = ["v4_8"] }

@@ -208,7 +208,6 @@ dependencies = [
  "adesk-proto",
  "adesk-viewer",
  "adesk-viewer-proto",
- "anyhow",
  "clap",
  "futures",
  "gtk4",

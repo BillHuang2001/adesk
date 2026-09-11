@@ -85,6 +85,9 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
     });
 
     window.present();
+    // Give the frame view keyboard focus up front so typing works without a
+    // preceding click (a click re-grabs it anyway).
+    frame_view.widget().grab_focus();
 
     let handle = glib::spawn_future_local(event_loop_fn(events, frame_view, task_bar, banner));
     *event_loop.borrow_mut() = Some(handle);
