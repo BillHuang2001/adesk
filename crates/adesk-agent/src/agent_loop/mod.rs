@@ -293,6 +293,16 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
     /// [`WatchStopReason::WakeupBudget`] after [`WatchConfig::max_wakeups`]
     /// handled wakeups; `None` on either budget means unbounded. Metrics and
     /// step history are cumulative across the whole watch run.
+    ///
+    /// The wait filter point is threaded across waits instead of being
+    /// re-captured each time: the first wait starts from [`WatchConfig::since_seq`]
+    /// (`None` = only events published after the watch starts, `Some(0)` = also
+    /// a notification already pending when the watch started), and after **every**
+    /// wait resolves — timed out or not — the filter point becomes that wait's
+    /// [`crate::WaitOutcome::seq`], the runtime's watermark at resolution. Because
+    /// the watermark is monotonically non-decreasing, this neither replays an
+    /// event already delivered nor drops one published between the end of one
+    /// wait and the start of the next.
     pub async fn run_watch(
         &mut self,
         task: &TaskDescription,
@@ -302,6 +312,11 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
 
         let mut wakeups: Vec<Wakeup> = Vec::new();
         let mut idle_waits: u32 = 0;
+        // Filter point threaded across waits: the first wait starts from the
+        // configured point (or the runtime's watermark when it begins); every
+        // resolved wait advances it to the runtime's watermark at resolution, so
+        // an event published between two waits is neither replayed nor dropped.
+        let mut filter_seq = watch.since_seq;
 
         let stop_reason = loop {
             let request = WaitForEventsRequest {
@@ -309,13 +324,13 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                 window_id: None,
                 timeout_ms: watch.wait_timeout_ms,
                 max_events: watch.max_events,
-                since_seq: None,
+                since_seq: filter_seq,
             };
             let wait = bounded_call(self.config.step_timeout_ms, 0, async {
                 self.client.wait_for_events(&request).await
             })
             .await?;
-
+            filter_seq = Some(wait.seq);
             if wait.timed_out {
                 // Idle: nothing arrived within the horizon. Stay idle unless the
                 // idle budget is spent.

@@ -21,6 +21,13 @@
 //! mode is bounded by [`WatchConfig::max_wakeups`] and
 //! [`WatchConfig::max_idle_waits`] (both optional).
 //!
+//! The first wait's filter point is [`WatchConfig::since_seq`] (`None` = only
+//! events published after the watch starts; `Some(0)` = also deliver a
+//! notification that was already pending). After every wait resolves,
+//! [`crate::AgentLoop::run_watch`] advances the filter point to the runtime's
+//! watermark at resolution ([`crate::WaitOutcome::seq`]), so an event published
+//! between the end of one wait and the start of the next is never dropped.
+//!
 //! [`crate::AgentLoop::run_watch`] is driven from [`crate::agent_loop`]; the metrics
 //! and step history of the loop are **cumulative across the whole watch run**,
 //! so a report of the last handled wakeup carries every step taken since the
@@ -57,6 +64,21 @@ pub struct WatchConfig {
     /// default) is unbounded.
     #[serde(default)]
     pub max_idle_waits: Option<u32>,
+    /// Filter point for the **first** idle wait.
+    ///
+    /// `None` (the default) means "only events published after the watch
+    /// starts": the runtime captures its watermark when the first wait begins,
+    /// so a notification posted *before* the agent's first wait (e.g. while the
+    /// process was starting) is not delivered. `Some(n)` additionally collects
+    /// events already pending with `seq > n`, so `Some(0)` catches any pending
+    /// notification.
+    ///
+    /// Only the first wait uses this value: [`crate::AgentLoop::run_watch`]
+    /// advances the filter point to the runtime's watermark at each wait's
+    /// resolution ([`crate::WaitOutcome::seq`]), so an event published between
+    /// two waits is never dropped.
+    #[serde(default)]
+    pub since_seq: Option<u64>,
 }
 
 impl Default for WatchConfig {
@@ -67,6 +89,7 @@ impl Default for WatchConfig {
             max_events: 32,
             max_wakeups: None,
             max_idle_waits: None,
+            since_seq: None,
         }
     }
 }

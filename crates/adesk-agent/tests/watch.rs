@@ -231,3 +231,85 @@ async fn wait_for_events_is_issued_with_the_wake_filter() {
          timeout_ms=4000 max_events=8 since_seq=None"
     );
 }
+
+/// The filter point is threaded across waits: after a wakeup whose batch
+/// carried `seq = N`, the **next** `wait_for_events` request carries
+/// `since_seq = Some(N)` (the runtime's watermark at that wait's resolution)
+/// instead of re-capturing the watermark when the new wait begins. That is what
+/// stops an event published between two waits from being dropped.
+#[tokio::test]
+async fn filter_point_advances_to_the_watermark_after_a_wakeup() {
+    let provider = Arc::new(MockProvider::scripted(vec![
+        AgentDecision::ListWindows,
+        finish(true, "handled"),
+    ]));
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        // The wake batch resolves at watermark 5.
+        woke(vec![notification_event(5)], 5),
+        ScriptedResponse::Windows(empty_windows()),
+        idle(5),
+    ]);
+    let handle = client.clone();
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), LoopConfig::default());
+
+    let watch = WatchConfig {
+        max_idle_waits: Some(1),
+        ..WatchConfig::default()
+    };
+    let outcome = agent
+        .run_watch(&task(), &watch)
+        .await
+        .expect("watch succeeds");
+
+    assert_eq!(outcome.stop_reason, WatchStopReason::IdleBudget);
+    assert_eq!(handle.call_count(ClientMethod::WaitForEvents), 2);
+    // The first wait starts from the configured point — `None` here, i.e. the
+    // runtime's watermark when the wait begins.
+    assert_eq!(
+        handle.calls()[1].summary,
+        "kinds=Some([Notification, NotificationAction]) window_id=None \
+         timeout_ms=30000 max_events=32 since_seq=None"
+    );
+    // The second wait is pinned to the first wait's resolution watermark, so an
+    // event published in between (`seq > 5`) is still collected.
+    assert_eq!(
+        handle.calls()[3].summary,
+        "kinds=Some([Notification, NotificationAction]) window_id=None \
+         timeout_ms=30000 max_events=32 since_seq=Some(5)"
+    );
+    assert_eq!(handle.remaining(), 0, "every canned response was consumed");
+}
+
+/// `WatchConfig::since_seq` seeds the filter point of the **first** idle wait,
+/// so a notification posted before the watch starts (`Some(0)`) is delivered.
+#[tokio::test]
+async fn configured_since_seq_is_used_for_the_first_wait() {
+    let provider = Arc::new(MockProvider::scripted(vec![finish(true, "done")]));
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        woke(vec![notification_event(1)], 1),
+    ]);
+    let handle = client.clone();
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), LoopConfig::default());
+
+    let watch = WatchConfig {
+        since_seq: Some(0),
+        max_wakeups: Some(1),
+        ..WatchConfig::default()
+    };
+    let outcome = agent
+        .run_watch(&task(), &watch)
+        .await
+        .expect("watch succeeds");
+
+    assert_eq!(outcome.stop_reason, WatchStopReason::WakeupBudget);
+    assert_eq!(handle.call_count(ClientMethod::WaitForEvents), 1);
+    assert_eq!(
+        handle.calls()[1].summary,
+        "kinds=Some([Notification, NotificationAction]) window_id=None \
+         timeout_ms=30000 max_events=32 since_seq=Some(0)"
+    );
+}

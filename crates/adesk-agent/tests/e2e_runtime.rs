@@ -33,6 +33,7 @@
 //! | `image_pipeline_png_downscale` | captures are valid PNGs, `max_dimension` bounds the longest edge without upscaling, `visual_tokens` matches |
 //! | `determinism_identical_metrics` | the same script twice yields identical metrics apart from timing |
 //! | `capstone_launch_window_observe_input_capture` | launch → observe → click → capture on a real launched app, with its own pixels and the causal action id |
+//! | `watch_notification_wake_handle_then_idle` | a real §5.9 `post_notification` wakes a live watch, the standing job runs against the runtime, and the loop returns to idle |
 //!
 //! ## Suite layout
 //!
@@ -71,15 +72,16 @@ mod e2e_support;
 use adesk_agent::{
     estimate_visual_tokens, ActionKind, AgentClient, AgentDecision, AgentLoop, CaptureRequest,
     ClickRequest, MockProvider, ObserveCondition, ObserveRequest, Scenario, ScenarioId,
-    ScriptEntry, StepStatus, StopReason, PROTOCOL_VERSION,
+    ScriptEntry, StepStatus, StopReason, WatchConfig, WatchStopReason, PROTOCOL_VERSION,
 };
-use adesk_core::{AppId, Button, Position, WindowId};
+use adesk_core::{AppId, Button, EventKind, Position, RuntimeEvent, WindowId};
 use adesk_proto::ImageFormat;
 use adesk_testkit::{
     EventAssert, Expected, FillPattern, FixtureDir, ImageAssert, PopupSpec, Size, TestPopup,
     TestRuntime, TestRuntimeConfig,
 };
 use e2e_support::*;
+use std::sync::Arc;
 
 // ---------------------------------------------------------------- tests
 
@@ -871,6 +873,96 @@ async fn capstone_launch_window_observe_input_capture() -> TestResult {
     let listed = connect(&runtime).await?.get_window(window_id).await?;
     assert_eq!(listed.app_id, Some(app_id));
     assert_eq!(listed.geometry, runtime.tiled_rect());
+
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Title of the notification the watch test posts and then expects back.
+const WAKE_TITLE: &str = "agent-e2e-wake";
+
+/// Idle/watch mode against a real runtime: a notification posted over AGP §5.9
+/// wakes a live `run_watch`, the standing job (`list_windows` + `finish`) really
+/// talks to the runtime, and the loop returns to idle.
+///
+/// The notification is posted **before** the watch starts and the first wait is
+/// seeded with `since_seq: Some(0)`, so a notification published before the
+/// agent's first wait is delivered — deterministically, with no sleep and no
+/// polling. `max_wakeups: None` + `max_idle_waits: Some(1)` makes the "returns to
+/// idle" leg observable: after handling the wakeup the loop waits again and stops
+/// on the idle budget. The post travels on its own connection so the blocking
+/// §5.10 wait cannot contend with it.
+#[tokio::test]
+async fn watch_notification_wake_handle_then_idle() -> TestResult {
+    let runtime = runtime().await?;
+
+    // A separate connection posts the notification before the watch begins.
+    let poster = connect(&runtime).await?;
+    let posted = poster
+        .sdk()
+        .post_notification(adesk_client::PostNotificationRequest::new(WAKE_TITLE).source("user"))
+        .await?;
+    assert!(posted.seq > 0, "posting a notification bumps the event seq");
+
+    // The standing job really runs against the runtime: refresh windows, then finish.
+    let provider = Arc::new(MockProvider::scripted(vec![
+        AgentDecision::ListWindows,
+        AgentDecision::Finish {
+            success: true,
+            summary: String::from("handled the wake"),
+        },
+    ]));
+    let client = connect(&runtime).await?;
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), loop_config());
+
+    let watch = WatchConfig {
+        since_seq: Some(0),
+        wake_kinds: Some(vec![EventKind::Notification, EventKind::NotificationAction]),
+        wait_timeout_ms: 300,
+        max_wakeups: None,
+        max_idle_waits: Some(1),
+        ..WatchConfig::default()
+    };
+    let outcome = agent
+        .run_watch(&task("handle the posted notification"), &watch)
+        .await?;
+
+    assert_eq!(outcome.stop_reason, WatchStopReason::IdleBudget);
+    assert!(
+        outcome.idle_waits >= 1,
+        "the loop returned to idle after handling: {outcome:?}"
+    );
+    assert_eq!(outcome.wakeups.len(), 1, "exactly one notification woke it");
+    let wakeup = &outcome.wakeups[0];
+    assert!(
+        wakeup.events.iter().any(|event| matches!(
+            event,
+            RuntimeEvent::Notification { notification, .. } if notification.title == WAKE_TITLE
+        )),
+        "the runtime delivered the posted notification: {:?}",
+        wakeup.events
+    );
+    assert!(
+        wakeup.outcome.success,
+        "the standing job succeeded: {wakeup:?}"
+    );
+    assert!(
+        wakeup.outcome.history.len() >= 2,
+        "the standing job ran list_windows + finish against the runtime: {:?}",
+        wakeup.outcome.history
+    );
+
+    // The wake event reached the provider's bounded context.
+    let contexts = provider.contexts();
+    assert!(!contexts.is_empty());
+    assert!(
+        contexts
+            .iter()
+            .any(|context| context.recent_events.iter().any(|event| {
+                event.kind == EventKind::Notification && event.detail.contains(WAKE_TITLE)
+            })),
+        "the wake event reached the provider context"
+    );
 
     runtime.shutdown().await?;
     Ok(())
