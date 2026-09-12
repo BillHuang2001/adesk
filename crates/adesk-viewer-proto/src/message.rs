@@ -11,8 +11,11 @@ use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
-use crate::types::{ControlOwner, DesktopState, KeyAction, ServerHello, ViewerFrame, ViewerHello};
-use crate::{Result, ViewerProtoError};
+use crate::types::{
+    ControlOwner, DesktopState, KeyAction, RecordingEncoder, RecordingStatus, ServerHello,
+    ViewerFrame, ViewerHello,
+};
+use crate::{Result, ViewerProtoError, DEFAULT_RECORD_FPS};
 
 /// A message from a Viewer to the ADesk runtime (`docs/viewer.md` §2, §4).
 #[derive(Debug, Clone, PartialEq)]
@@ -88,6 +91,30 @@ pub enum ClientMessage {
         /// Optional human-readable reason.
         reason: Option<String>,
     },
+    /// Begin a screen recording (`docs/viewer.md` §4). `id` is echoed by the
+    /// matching `recording`/`error`.
+    StartRecording {
+        /// Optional client id, echoed by the matching reply.
+        id: Option<u64>,
+        /// Optional destination path; the runtime picks one when absent.
+        path: Option<String>,
+        /// Frames per second; an absent wire field defaults to
+        /// [`DEFAULT_RECORD_FPS`] on decode.
+        fps: u32,
+        /// Encoder preference; an absent wire field defaults to
+        /// [`RecordingEncoder::Auto`] on decode.
+        encoder: RecordingEncoder,
+    },
+    /// Stop the active screen recording. `id` is echoed.
+    StopRecording {
+        /// Optional client id, echoed by the matching reply.
+        id: Option<u64>,
+    },
+    /// Report the current recording status. `id` is echoed.
+    RequestRecording {
+        /// Optional client id, echoed by the matching reply.
+        id: Option<u64>,
+    },
     /// A message whose `"type"` this build does not recognise (forward
     /// compatibility, §1). The original JSON object is preserved verbatim.
     Unknown {
@@ -128,6 +155,15 @@ pub enum ServerMessage {
         /// The client id being answered, when known.
         id: Option<u64>,
     },
+    /// The current recording status, answering `start_recording`,
+    /// `stop_recording` or `request_recording` (`docs/viewer.md` §4). `id`
+    /// echoes the request when it carried one.
+    Recording {
+        /// The client id being answered, when the request carried one.
+        id: Option<u64>,
+        /// The reported recording status.
+        status: RecordingStatus,
+    },
     /// The server is ending the connection.
     Bye {
         /// Why the connection is ending.
@@ -160,6 +196,9 @@ impl ClientMessage {
             ClientMessage::ActivateWindow { .. } => "activate_window",
             ClientMessage::SetControl { .. } => "set_control",
             ClientMessage::Bye { .. } => "bye",
+            ClientMessage::StartRecording { .. } => "start_recording",
+            ClientMessage::StopRecording { .. } => "stop_recording",
+            ClientMessage::RequestRecording { .. } => "request_recording",
             ClientMessage::Unknown { message_type, .. } => message_type,
         }
     }
@@ -238,6 +277,23 @@ impl ClientMessage {
                     reason: fields.reason,
                 })
             }
+            "start_recording" => {
+                let fields: StartRecordingFields = decode(value)?;
+                Ok(ClientMessage::StartRecording {
+                    id: fields.id,
+                    path: fields.path,
+                    fps: fields.fps.unwrap_or(DEFAULT_RECORD_FPS),
+                    encoder: fields.encoder,
+                })
+            }
+            "stop_recording" => {
+                let fields: IdFields = decode(value)?;
+                Ok(ClientMessage::StopRecording { id: fields.id })
+            }
+            "request_recording" => {
+                let fields: IdFields = decode(value)?;
+                Ok(ClientMessage::RequestRecording { id: fields.id })
+            }
             other => Ok(ClientMessage::Unknown {
                 message_type: other.to_owned(),
                 value,
@@ -315,6 +371,31 @@ impl ClientMessage {
                 }
                 Value::Object(map)
             }
+            ClientMessage::StartRecording {
+                id,
+                path,
+                fps,
+                encoder,
+            } => {
+                let mut map = tagged_empty("start_recording");
+                insert_optional_id(&mut map, *id);
+                if let Some(path) = path {
+                    map.insert("path".to_owned(), Value::String(path.clone()));
+                }
+                map.insert("fps".to_owned(), Value::from(*fps));
+                map.insert("encoder".to_owned(), field(encoder));
+                Value::Object(map)
+            }
+            ClientMessage::StopRecording { id } => {
+                let mut map = tagged_empty("stop_recording");
+                insert_optional_id(&mut map, *id);
+                Value::Object(map)
+            }
+            ClientMessage::RequestRecording { id } => {
+                let mut map = tagged_empty("request_recording");
+                insert_optional_id(&mut map, *id);
+                Value::Object(map)
+            }
             ClientMessage::Unknown { value, .. } => value.clone(),
         }
     }
@@ -332,6 +413,7 @@ impl ServerMessage {
             ServerMessage::Control { .. } => "control",
             ServerMessage::InputAck { .. } => "input_ack",
             ServerMessage::Error { .. } => "error",
+            ServerMessage::Recording { .. } => "recording",
             ServerMessage::Bye { .. } => "bye",
             ServerMessage::Unknown { message_type, .. } => message_type,
         }
@@ -378,6 +460,13 @@ impl ServerMessage {
                     reason: fields.reason,
                 })
             }
+            "recording" => {
+                let fields: RecordingFields = decode(value)?;
+                Ok(ServerMessage::Recording {
+                    id: fields.id,
+                    status: fields.status,
+                })
+            }
             other => Ok(ServerMessage::Unknown {
                 message_type: other.to_owned(),
                 value,
@@ -412,6 +501,14 @@ impl ServerMessage {
             ServerMessage::Bye { reason } => {
                 let mut map = tagged_empty("bye");
                 map.insert("reason".to_owned(), Value::String(reason.clone()));
+                Value::Object(map)
+            }
+            ServerMessage::Recording { id, status } => {
+                let mut map = tagged_empty("recording");
+                insert_optional_id(&mut map, *id);
+                if let Value::Object(fields) = field(status) {
+                    map.extend(fields);
+                }
                 Value::Object(map)
             }
             ServerMessage::Unknown { value, .. } => value.clone(),
@@ -587,4 +684,30 @@ struct ErrorFields {
 #[derive(Deserialize)]
 struct ServerByeFields {
     reason: String,
+}
+
+/// Deserializes `start_recording` fields (`docs/viewer.md` §4).
+///
+/// The `fps`/`encoder` wire fields are optional; the caller applies
+/// [`DEFAULT_RECORD_FPS`] / [`RecordingEncoder::Auto`] when they are absent.
+#[derive(Deserialize)]
+struct StartRecordingFields {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    fps: Option<u32>,
+    #[serde(default)]
+    encoder: RecordingEncoder,
+}
+
+/// Deserializes `recording` fields: the `id?` reply echo plus the flattened
+/// [`RecordingStatus`] (whose four counters are required, §4).
+#[derive(Deserialize)]
+struct RecordingFields {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(flatten)]
+    status: RecordingStatus,
 }

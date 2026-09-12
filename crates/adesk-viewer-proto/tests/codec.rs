@@ -8,7 +8,8 @@ use adesk_core::{ErrorCode, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
     check_version, decode_client, decode_server, encode_client, encode_server, ClientMessage,
-    KeyAction, ServerMessage, ViewerHello, ViewerProtoError,
+    KeyAction, RecordingEncoder, RecordingStatus, ServerMessage, ViewerHello, ViewerProtoError,
+    DEFAULT_RECORD_FPS,
 };
 use common::{every_client_message, every_server_message};
 use serde_json::{json, Value};
@@ -174,6 +175,97 @@ fn unknown_fields_in_a_known_message_are_ignored() {
             window_id: WindowId(17),
         }
     );
+
+    let decoded = decode_client(
+        r#"{"type": "start_recording", "id": 5, "path": "/x", "fps": 12,
+        "encoder": "gpu", "future": true}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded,
+        ClientMessage::StartRecording {
+            id: Some(5),
+            path: Some("/x".to_owned()),
+            fps: 12,
+            encoder: RecordingEncoder::Gpu,
+        }
+    );
+
+    let decoded = decode_client(r#"{"type": "stop_recording", "id": 6, "extra": true}"#).unwrap();
+    assert_eq!(decoded, ClientMessage::StopRecording { id: Some(6) });
+
+    let decoded = decode_server(
+        r#"{"type": "recording", "recording": false, "fps": 30, "frames": 0,
+        "duration_ms": 0, "future": "ignored"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded,
+        ServerMessage::Recording {
+            id: None,
+            status: RecordingStatus::idle(),
+        }
+    );
+}
+
+// --- recording messages ---------------------------------------------------
+
+#[test]
+fn start_recording_defaults_the_absent_optionals() {
+    // No fields at all: `fps`/`encoder` default, `id`/`path` stay absent.
+    let decoded = decode_client(r#"{"type": "start_recording"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        ClientMessage::StartRecording {
+            id: None,
+            path: None,
+            fps: DEFAULT_RECORD_FPS,
+            encoder: RecordingEncoder::Auto,
+        }
+    );
+
+    // Only `path` present: the counters still default.
+    let decoded = decode_client(r#"{"type": "start_recording", "path": "/tmp/rec.webm"}"#).unwrap();
+    assert_eq!(
+        decoded,
+        ClientMessage::StartRecording {
+            id: None,
+            path: Some("/tmp/rec.webm".to_owned()),
+            fps: DEFAULT_RECORD_FPS,
+            encoder: RecordingEncoder::Auto,
+        }
+    );
+
+    // Explicit values are honoured.
+    let decoded = decode_client(
+        r#"{"type": "start_recording", "id": 9, "path": "/tmp/rec.webm",
+        "fps": 24, "encoder": "software"}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        decoded,
+        ClientMessage::StartRecording {
+            id: Some(9),
+            path: Some("/tmp/rec.webm".to_owned()),
+            fps: 24,
+            encoder: RecordingEncoder::Software,
+        }
+    );
+}
+
+#[test]
+fn recording_round_trips_its_optional_fields() {
+    let with_error = encode_server(&ServerMessage::Recording {
+        id: Some(4),
+        status: RecordingStatus::idle().with_error("encoder unavailable".to_owned()),
+    });
+    assert_eq!(
+        decode_server(&with_error).unwrap(),
+        ServerMessage::Recording {
+            id: Some(4),
+            status: RecordingStatus::idle().with_error("encoder unavailable".to_owned()),
+        }
+    );
 }
 
 #[test]
@@ -213,18 +305,20 @@ fn malformed_lines_are_rejected() {
         "",
         "   ",
         "not json",
-        "{\"type\":\"text\"",              // unterminated
-        "[1, 2]",                          // not an object
-        "\"text\"",                        // not an object
-        "42",                              // not an object
-        "{}",                              // missing type
-        r#"{"x": 1}"#,                     // missing type
-        r#"{"type": 5}"#,                  // non-string type
-        r#"{"type": null}"#,               // non-string type
-        r#"{"type": "key"}"#,              // known tag, missing keys
-        r#"{"type": "pointer_button"}"#,   // known tag, missing fields
-        r#"{"type": "activate_window"}"#,  // known tag, missing window_id
-        r#"{"type": "bye", "reason": 5}"#, // wrong field type
+        "{\"type\":\"text\"",                                 // unterminated
+        "[1, 2]",                                             // not an object
+        "\"text\"",                                           // not an object
+        "42",                                                 // not an object
+        "{}",                                                 // missing type
+        r#"{"x": 1}"#,                                        // missing type
+        r#"{"type": 5}"#,                                     // non-string type
+        r#"{"type": null}"#,                                  // non-string type
+        r#"{"type": "key"}"#,                                 // known tag, missing keys
+        r#"{"type": "pointer_button"}"#,                      // known tag, missing fields
+        r#"{"type": "activate_window"}"#,                     // known tag, missing window_id
+        r#"{"type": "bye", "reason": 5}"#,                    // wrong field type
+        r#"{"type": "start_recording", "encoder": "bogus"}"#, // unknown encoder
+        r#"{"type": "start_recording", "fps": "fast"}"#,      // wrong field type
     ];
     for line in cases {
         assert!(
@@ -242,6 +336,8 @@ fn malformed_lines_are_rejected() {
         r#"{"type": "input_ack"}"#, // known tag, missing fields
         r#"{"type": "error"}"#,     // known tag, missing fields
         r#"{"type": "control", "owner": "nobody"}"#, // unknown enum value
+        r#"{"type": "recording"}"#, // known tag, missing the required counters
+        r#"{"type": "recording", "recording": true, "fps": 30, "frames": 0}"#, // missing duration_ms
     ];
     for line in server_cases {
         assert!(

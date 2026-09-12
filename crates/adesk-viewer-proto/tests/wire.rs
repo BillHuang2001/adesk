@@ -7,16 +7,19 @@ use adesk_core::{Button, ButtonState, ErrorCode, OverlayKind, Size, WindowId};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
     check_version, is_compatible_version, ClientMessage, ControlOwner, CursorState, KeyAction,
-    ServerHello, ServerMessage, ViewerFrame, ViewerHello, ViewerProtoError,
-    DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
+    RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello,
+    ViewerProtoError, DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, DEFAULT_RECORD_FPS,
+    PROTOCOL_VERSION,
 };
 use common::{
     activate_window_message, bye_message, bye_server_message, bye_without_reason, client,
     control_message, error_message, frame_message, hello_message, input_ack_with_id,
     input_ack_without_id, key_tap_message, pointer_button_pressed, pointer_move_message,
-    request_frame_with_id, request_frame_without_id, request_state_with_id,
-    request_state_without_id, scroll_message, server, server_hello_message, set_control_message,
-    state_empty, state_with_window, text_message, unknown_client_message, unknown_server_message,
+    recording_idle, recording_message, request_frame_with_id, request_frame_without_id,
+    request_recording_message, request_state_with_id, request_state_without_id, scroll_message,
+    server, server_hello_message, set_control_message, start_recording_message,
+    start_recording_minimal, state_empty, state_with_window, stop_recording_message, text_message,
+    unknown_client_message, unknown_server_message,
 };
 use serde_json::{json, Value};
 
@@ -43,6 +46,7 @@ fn protocol_version_is_one_and_checked() {
 #[test]
 fn defaults_match_the_spec() {
     assert_eq!(DEFAULT_MIN_INTERVAL_MS, 100);
+    assert_eq!(DEFAULT_RECORD_FPS, 30);
     assert_eq!(
         DEFAULT_OVERLAYS,
         &[
@@ -199,6 +203,57 @@ fn client_activate_window_golden() {
 }
 
 #[test]
+fn client_start_recording_golden() {
+    assert_eq!(
+        client(&start_recording_message()),
+        json!({
+            "type": "start_recording",
+            "id": 9,
+            "path": "/tmp/rec.webm",
+            "fps": 24,
+            "encoder": "software"
+        })
+    );
+    // Absent optionals are omitted; `fps`/`encoder` always serialize.
+    let value = client(&start_recording_minimal());
+    assert_eq!(
+        value,
+        json!({"type": "start_recording", "fps": 30, "encoder": "auto"})
+    );
+    assert!(value.get("id").is_none(), "no `id` when absent");
+    assert!(value.get("path").is_none(), "no `path` when absent");
+    assert_eq!(
+        client(&ClientMessage::StartRecording {
+            id: None,
+            path: None,
+            fps: 60,
+            encoder: RecordingEncoder::Gpu,
+        }),
+        json!({"type": "start_recording", "fps": 60, "encoder": "gpu"})
+    );
+}
+
+#[test]
+fn client_stop_and_request_recording_golden() {
+    assert_eq!(
+        client(&stop_recording_message()),
+        json!({"type": "stop_recording", "id": 10})
+    );
+    assert_eq!(
+        client(&ClientMessage::StopRecording { id: None }),
+        json!({"type": "stop_recording"})
+    );
+    assert_eq!(
+        client(&request_recording_message()),
+        json!({"type": "request_recording", "id": 11})
+    );
+    assert_eq!(
+        client(&ClientMessage::RequestRecording { id: None }),
+        json!({"type": "request_recording"})
+    );
+}
+
+#[test]
 fn client_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "x": 1});
     assert_eq!(client(&unknown_client_message()), value);
@@ -239,6 +294,9 @@ fn client_message_type_tags() {
             "set_control",
         ),
         (bye_without_reason(), "bye"),
+        (start_recording_minimal(), "start_recording"),
+        (stop_recording_message(), "stop_recording"),
+        (request_recording_message(), "request_recording"),
         (
             ClientMessage::Unknown {
                 message_type: "mystery".to_owned(),
@@ -362,6 +420,58 @@ fn server_control_input_ack_error_bye_golden() {
 }
 
 #[test]
+fn server_recording_golden() {
+    assert_eq!(
+        server(&recording_message()),
+        json!({
+            "type": "recording",
+            "id": 9,
+            "recording": true,
+            "path": "/tmp/rec.webm",
+            "encoder": "h264",
+            "fps": 30,
+            "frames": 120,
+            "duration_ms": 4000
+        })
+    );
+    // Idle: no `id`/`path`/`encoder`/`error`; the four counters are always present.
+    let value = server(&recording_idle());
+    assert_eq!(
+        value,
+        json!({
+            "type": "recording",
+            "recording": false,
+            "fps": 30,
+            "frames": 0,
+            "duration_ms": 0
+        })
+    );
+    assert!(value.get("id").is_none(), "no `id` when absent");
+    assert!(value.get("path").is_none(), "`path` omitted, never null");
+    assert!(
+        value.get("encoder").is_none(),
+        "`encoder` omitted, never null"
+    );
+    assert!(value.get("error").is_none(), "`error` omitted, never null");
+    // An error status carries `error` and omits the absent optionals.
+    assert_eq!(
+        server(&ServerMessage::Recording {
+            id: Some(4),
+            status: RecordingStatus::idle().with_error("encoder unavailable".to_owned()),
+        }),
+        json!({
+            "type": "recording",
+            "id": 4,
+            "recording": false,
+            "fps": 30,
+            "frames": 0,
+            "duration_ms": 0,
+            "error": "encoder unavailable"
+        })
+    );
+}
+
+#[test]
 fn server_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "y": true});
     assert_eq!(server(&unknown_server_message()), value);
@@ -412,6 +522,7 @@ fn server_message_type_tags() {
             },
             "error",
         ),
+        (recording_idle(), "recording"),
         (
             ServerMessage::Bye {
                 reason: "x".to_owned(),
@@ -454,6 +565,59 @@ fn control_owner_and_key_action_wire_names() {
         json!("released")
     );
     assert_eq!(serde_json::to_value(KeyAction::Tap).unwrap(), json!("tap"));
+}
+
+#[test]
+fn recording_encoder_and_status_defaults() {
+    assert_eq!(
+        serde_json::to_value(RecordingEncoder::Auto).unwrap(),
+        json!("auto")
+    );
+    assert_eq!(
+        serde_json::to_value(RecordingEncoder::Software).unwrap(),
+        json!("software")
+    );
+    assert_eq!(
+        serde_json::to_value(RecordingEncoder::Gpu).unwrap(),
+        json!("gpu")
+    );
+    assert_eq!(RecordingEncoder::default(), RecordingEncoder::Auto);
+
+    let idle = RecordingStatus::idle();
+    assert!(!idle.recording);
+    assert_eq!(idle.fps, DEFAULT_RECORD_FPS);
+    assert_eq!(idle.frames, 0);
+    assert_eq!(idle.duration_ms, 0);
+    assert_eq!(idle.path, None);
+    assert_eq!(idle.encoder, None);
+    assert_eq!(idle.error, None);
+    assert_eq!(RecordingStatus::default(), idle);
+
+    // The optional fields are omitted from the wire form, never emitted as null.
+    assert_eq!(
+        serde_json::to_value(&idle).unwrap(),
+        json!({"recording": false, "fps": 30, "frames": 0, "duration_ms": 0})
+    );
+    assert_eq!(
+        serde_json::to_value(
+            RecordingStatus::idle()
+                .with_recording(true)
+                .with_path("/tmp/rec.webm".to_owned())
+                .with_encoder("h264".to_owned())
+                .with_counts(120, 4000)
+                .with_error("boom".to_owned())
+        )
+        .unwrap(),
+        json!({
+            "recording": true,
+            "path": "/tmp/rec.webm",
+            "encoder": "h264",
+            "fps": 30,
+            "frames": 120,
+            "duration_ms": 4000,
+            "error": "boom"
+        })
+    );
 }
 
 #[test]

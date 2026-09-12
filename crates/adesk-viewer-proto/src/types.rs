@@ -7,7 +7,7 @@ use adesk_core::{OverlayKind, Size, WindowId, WindowInfo};
 use adesk_proto::{ImagePayload, RendererKind};
 use serde::{Deserialize, Serialize};
 
-use crate::{DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION};
+use crate::{DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, DEFAULT_RECORD_FPS, PROTOCOL_VERSION};
 
 /// Viewer → server handshake (`docs/viewer.md` §2).
 ///
@@ -148,4 +148,100 @@ pub enum KeyAction {
     Released,
     /// Press then release.
     Tap,
+}
+
+/// Video-encoder preference of a `start_recording` message (`docs/viewer.md` §4).
+///
+/// `Auto` lets the runtime choose; `Software`/`Gpu` force a path. Wire names:
+/// `"auto"` | `"software"` | `"gpu"`. The default is [`RecordingEncoder::Auto`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordingEncoder {
+    /// Let the runtime pick the encoder.
+    #[default]
+    Auto,
+    /// Force the CPU (software) encoder.
+    Software,
+    /// Force the GPU encoder.
+    Gpu,
+}
+
+/// The status of a recording session, carried by a `recording` message
+/// (`docs/viewer.md` §4).
+///
+/// The four counters (`recording`, `fps`, `frames`, `duration_ms`) are the
+/// message's required fields; `path`, `encoder` and `error` are optional and are
+/// omitted from the wire form when absent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordingStatus {
+    /// Whether a recording is currently in progress.
+    pub recording: bool,
+    /// Destination path, once one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Encoder actually in use (a free-form string, not the request enum).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder: Option<String>,
+    /// Frames per second the recording runs at.
+    pub fps: u32,
+    /// Frames captured so far.
+    pub frames: u64,
+    /// Recording duration so far, in milliseconds.
+    pub duration_ms: u64,
+    /// Failure description, when the session ended in an error.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl RecordingStatus {
+    /// An idle status: not recording, [`DEFAULT_RECORD_FPS`], zero counters and
+    /// no path/encoder/error.
+    pub fn idle() -> RecordingStatus {
+        RecordingStatus {
+            recording: false,
+            path: None,
+            encoder: None,
+            fps: DEFAULT_RECORD_FPS,
+            frames: 0,
+            duration_ms: 0,
+            error: None,
+        }
+    }
+
+    /// Sets whether a recording is in progress.
+    pub fn with_recording(mut self, recording: bool) -> RecordingStatus {
+        self.recording = recording;
+        self
+    }
+
+    /// Sets the destination path.
+    pub fn with_path(mut self, path: String) -> RecordingStatus {
+        self.path = Some(path);
+        self
+    }
+
+    /// Sets the encoder actually in use.
+    pub fn with_encoder(mut self, encoder: String) -> RecordingStatus {
+        self.encoder = Some(encoder);
+        self
+    }
+
+    /// Sets the frame counter and duration.
+    pub fn with_counts(mut self, frames: u64, duration_ms: u64) -> RecordingStatus {
+        self.frames = frames;
+        self.duration_ms = duration_ms;
+        self
+    }
+
+    /// Sets the failure description.
+    pub fn with_error(mut self, error: String) -> RecordingStatus {
+        self.error = Some(error);
+        self
+    }
+}
+
+impl Default for RecordingStatus {
+    fn default() -> RecordingStatus {
+        RecordingStatus::idle()
+    }
 }
