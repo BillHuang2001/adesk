@@ -294,6 +294,35 @@ async fn request_frame_and_request_state_round_trip() {
     bye_and_finish(handle, &mut writer).await;
 }
 
+/// §5/§6: a failing `desktop_state` answers `error` with the `internal` code and
+/// the connection stays open for the next request.
+#[tokio::test]
+async fn request_state_failure_answers_error_and_keeps_the_connection_open() {
+    let backend = backend();
+    backend.set_fail_state(true);
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(&mut writer, &ClientMessage::RequestState { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::Internal);
+            assert_eq!(id, None);
+        }
+        other => panic!("expected an internal error, got {other:?}"),
+    }
+
+    // The connection is still usable afterwards (§6): the next state request
+    // succeeds once the backend recovers.
+    backend.set_fail_state(false);
+    send(&mut writer, &ClientMessage::RequestState { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::State(state) => assert!(state.windows.is_empty()),
+        other => panic!("expected a state, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
 /// §5: a desktop change pushes a frame without a `request_frame`.
 #[tokio::test]
 async fn a_desktop_change_pushes_a_frame_on_demand() {
