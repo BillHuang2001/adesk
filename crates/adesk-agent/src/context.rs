@@ -198,6 +198,25 @@ fn describe_event(event: &RuntimeEvent) -> String {
             }
             detail
         }
+        RuntimeEvent::Notification { notification, .. } => {
+            let mut detail = format!("notification {} posted", notification.id);
+            if let Some(source) = &notification.source {
+                detail.push_str(&format!(" source={source}"));
+            }
+            // The protocol forbids an empty title, so it is always present.
+            detail.push_str(&format!(" title={}", notification.title));
+            detail
+        }
+        RuntimeEvent::NotificationClosed {
+            notification_id,
+            reason,
+            ..
+        } => format!("notification {notification_id} closed ({reason:?})"),
+        RuntimeEvent::NotificationAction {
+            notification_id,
+            action_key,
+            ..
+        } => format!("notification {notification_id} action {action_key} invoked"),
     }
 }
 
