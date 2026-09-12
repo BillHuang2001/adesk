@@ -26,8 +26,8 @@ use adesk_core::{
 };
 use adesk_proto::{ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
-    ClientMessage, ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ServerMessage,
-    ViewerFrame, ViewerHello,
+    ClientMessage, ControlOwner, CursorState, DesktopState, KeyAction, RecordingEncoder,
+    RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello, DEFAULT_RECORD_FPS,
 };
 use serde_json::{json, Value};
 
@@ -149,6 +149,36 @@ pub fn bye_without_reason() -> ClientMessage {
     ClientMessage::Bye { reason: None }
 }
 
+/// `ClientMessage::StartRecording { id: 9, path: "/tmp/rec.webm", fps: 24, Software }`.
+pub fn start_recording_message() -> ClientMessage {
+    ClientMessage::StartRecording {
+        id: Some(9),
+        path: Some("/tmp/rec.webm".to_owned()),
+        fps: 24,
+        encoder: RecordingEncoder::Software,
+    }
+}
+
+/// `ClientMessage::StartRecording` with no optional fields (the decode defaults).
+pub fn start_recording_minimal() -> ClientMessage {
+    ClientMessage::StartRecording {
+        id: None,
+        path: None,
+        fps: DEFAULT_RECORD_FPS,
+        encoder: RecordingEncoder::Auto,
+    }
+}
+
+/// `ClientMessage::StopRecording { id: Some(10) }`.
+pub fn stop_recording_message() -> ClientMessage {
+    ClientMessage::StopRecording { id: Some(10) }
+}
+
+/// `ClientMessage::RequestRecording { id: Some(11) }`.
+pub fn request_recording_message() -> ClientMessage {
+    ClientMessage::RequestRecording { id: Some(11) }
+}
+
 /// `ClientMessage::Unknown { "future_thing", {"type": "future_thing", "x": 1} }`.
 pub fn unknown_client_message() -> ClientMessage {
     ClientMessage::Unknown {
@@ -245,6 +275,26 @@ pub fn unknown_server_message() -> ServerMessage {
     }
 }
 
+/// `ServerMessage::Recording { id: 9, status: active, 120 frames / 4000 ms }`.
+pub fn recording_message() -> ServerMessage {
+    ServerMessage::Recording {
+        id: Some(9),
+        status: RecordingStatus::idle()
+            .with_recording(true)
+            .with_path("/tmp/rec.webm".to_owned())
+            .with_encoder("h264".to_owned())
+            .with_counts(120, 4000),
+    }
+}
+
+/// `ServerMessage::Recording { id: None, status: idle }`.
+pub fn recording_idle() -> ServerMessage {
+    ServerMessage::Recording {
+        id: None,
+        status: RecordingStatus::idle(),
+    }
+}
+
 // --- corpora (round-trip / acceptance fixtures) ---------------------------
 
 /// Every `ClientMessage` variant the codec must round-trip.
@@ -285,6 +335,18 @@ pub fn every_client_message() -> Vec<ClientMessage> {
         set_control_message(),
         bye_message(),
         bye_without_reason(),
+        start_recording_message(),
+        start_recording_minimal(),
+        ClientMessage::StartRecording {
+            id: None,
+            path: Some("/srv/cap.mkv".to_owned()),
+            fps: 60,
+            encoder: RecordingEncoder::Gpu,
+        },
+        stop_recording_message(),
+        ClientMessage::StopRecording { id: None },
+        request_recording_message(),
+        ClientMessage::RequestRecording { id: None },
         unknown_client_message(),
     ]
 }
@@ -313,6 +375,12 @@ pub fn every_server_message() -> Vec<ServerMessage> {
             id: None,
         },
         bye_server_message(),
+        recording_message(),
+        recording_idle(),
+        ServerMessage::Recording {
+            id: Some(4),
+            status: RecordingStatus::idle().with_error("encoder unavailable".to_owned()),
+        },
         unknown_server_message(),
     ]
 }
