@@ -62,7 +62,7 @@ The first message from each side of a connection is a `hello`.
 | `state` | `active_window_id`, `windows`, `focus` | Desktop metadata (window list, focus) |
 | `control` | `owner` | Who owns input: `"ai"` or `"human"` |
 | `input_ack` | `id`, `action_id` | The input message with client id `id` was applied (its AGP `action_id`) |
-| `recording` | `id?`, `recording`, `path?`, `encoder?`, `fps`, `frames`, `duration_ms`, `error?` | Recording status / reply to a recording request (active flag, output path, backend label, frame count, elapsed ms) |
+| `recording` | `id?`, `recording`, `path?`, `encoder?`, `fps`, `frames`, `duration_ms`, `error?` | Recording status / reply to a recording request (active flag, output path, resolved backend label, frame count, elapsed ms) |
 | `error` | `code`, `message`, `id?` | A message could not be applied |
 | `bye` | `reason` | The server is ending the connection |
 
@@ -113,8 +113,8 @@ The first message from each side of a connection is a `hello`.
 {"type": "start_recording", "id": 7, "fps": 30, "encoder": "auto"}
 
 // server -> viewer
-{"type": "recording", "id": 7, "recording": true, "path": "adesk-rec-7.mkv",
- "encoder": "software", "fps": 30, "frames": 0, "duration_ms": 0, "error": null}
+{"type": "recording", "id": 7, "recording": true, "path": "adesk-rec-7.avi",
+ "encoder": "mjpeg", "fps": 30, "frames": 0, "duration_ms": 0}
 ```
 
 ## 5. Semantics
@@ -154,11 +154,15 @@ The first message from each side of a connection is a `hello`.
   path the inspector uses). `start_recording` starts one, `stop_recording`
   finishes it, and `request_recording` asks for the current status without
   changing it.
-- **`encoder` selects the backend.** `"auto"` (the default) prefers a
-  GPU-accelerated H.264 backend (an external `ffmpeg` using a hardware encoder)
-  and falls back to the built-in software Motion-JPEG/AVI backend when no GPU
-  encoder is available; `"software"` forces the built-in backend; `"gpu"`
-  requires a hardware encoder.
+- **`encoder` selects the backend.** In `start_recording` the field is a
+  **request value**: `"auto"` (the default) prefers a GPU-accelerated H.264
+  backend (an external `ffmpeg` using a hardware encoder) and falls back to the
+  built-in software Motion-JPEG/AVI backend when no GPU encoder is available;
+  `"software"` forces the built-in backend; `"gpu"` requires a hardware encoder.
+  In a `recording` reply the same field instead carries the runtime's
+  **resolved backend label** — the encoder actually used, such as `"mjpeg"` for
+  the software backend or `"ffmpeg/h264_vaapi"` for a hardware encoder — which is
+  independent of the request value.
 - **The runtime owns the file.** `path` is optional; when omitted the server
   generates one under its recordings directory, and the resolved path is always
   reported back in `recording.path`.
