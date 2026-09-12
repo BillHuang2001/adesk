@@ -80,7 +80,7 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 - Two `ViewerProtoError` variants are unreachable in the whole workspace: `Json` (every decode path maps a JSON failure to `Malformed`, and no crate `?`s a `serde_json::Error` into this type) and `Unknown` (constructed only by `./tests/codec.rs`); `dead_code` never fires on a public enum variant, so nothing flags them.
 ## Status
 Implemented and green: `src/lib.rs`, `src/error.rs`, `src/types.rs`, `src/message.rs`, `src/codec.rs`.
-`./scripts/dev.sh cargo test -p adesk-viewer-proto` = 37 passed / 0 failed (22 `tests/wire.rs`, 14 `tests/codec.rs`, 1 doctest), with the duplicated fixtures consolidated into the shared `tests/common/mod.rs` module.
+`./scripts/dev.sh cargo test -p adesk-viewer-proto` = 43 passed / 0 failed (26 `tests/wire.rs`, 16 `tests/codec.rs`, 1 doctest), with the duplicated fixtures consolidated into the shared `tests/common/mod.rs` module.
 `cargo clippy -p adesk-viewer-proto --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer-proto --check` and
 `cargo doc -p adesk-viewer-proto --no-deps --document-private-items` are all clean (zero warnings).
 No `todo!()`/`unimplemented!()`, no crate-level `allow`, no panics on the decode path.
