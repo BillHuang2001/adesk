@@ -285,11 +285,13 @@ Semantics:
 
 `EventKind` ∈ `window_created`, `window_destroyed`, `window_activated`, `title_changed`,
 `surface_commit`, `surface_damage`, `focus_changed`, `popup_appeared`,
-`popup_disappeared`, `quiet`, `app_launched`.
+`popup_disappeared`, `quiet`, `app_launched`, `notification`, `notification_closed`,
+`notification_action`.
 
 Emitted event names are `window_created`, `window_destroyed`, `window_activated`,
 `title_changed`, `surface_commit`, `focus_changed`, `popup_appeared`,
-`popup_disappeared` and `app_launched`. `surface_damage` is a subscription filter
+`popup_disappeared`, `app_launched`, `notification`, `notification_closed` and
+`notification_action`. `surface_damage` is a subscription filter
 *alias*, never an emitted event name: it matches `surface_commit` events whose
 `damage` is non-empty, and subscribers still receive frames named `surface_commit`.
 `quiet` is a reserved filterable kind with no emitter in v1 — quietness is observed
