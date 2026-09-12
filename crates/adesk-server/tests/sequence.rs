@@ -57,7 +57,8 @@ use tokio::sync::oneshot;
 mod common;
 
 use common::{
-    expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT, SHORT_TIMEOUT_MS,
+    expect_ok, raw_request, subscription_id, write_desktop_entry, RawClient, TestRuntime,
+    REQUEST_TIMEOUT, SHORT_TIMEOUT_MS,
 };
 
 /// The launch fixture: `Exec` spawns `true` from `PATH` (the Nix dev shell has
@@ -69,30 +70,6 @@ Type=Application
 Name=Sequence Fixture
 Exec=true
 ";
-
-/// Sends one raw request and returns the response carrying the same `id`.
-///
-/// Event frames interleaved on the connection are skipped by
-/// [`RawClient::expect_json_matching`].
-///
-/// # Panics
-///
-/// Panics if the connection closes or no matching response arrives within
-/// [`REQUEST_TIMEOUT`].
-fn raw_request(
-    t: &TestRuntime,
-    raw: &mut RawClient,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    t.block_on_timeout(async {
-        raw.send_json(&json!({ "id": id, "method": method, "params": params }))
-            .await;
-        raw.expect_json_matching(REQUEST_TIMEOUT, |value| value.get("id") == Some(&json!(id)))
-            .await
-    })
-}
 
 /// Samples the runtime's global `seq` watermark on the wire.
 ///
@@ -164,18 +141,6 @@ fn frame_seq(frame: &Value, what: &str) -> u64 {
         .get("seq")
         .and_then(Value::as_u64)
         .unwrap_or_else(|| panic!("{what}: the event frame carries no numeric `seq`: {frame}"))
-}
-
-/// The `subscription_id` of a raw subscribe response.
-///
-/// # Panics
-///
-/// Panics with the whole response when it carries no id.
-fn subscription_id(response: &Value, what: &str) -> u64 {
-    response
-        .pointer("/result/subscription_id")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| panic!("{what}: expected a subscription_id, got {response}"))
 }
 
 /// Predicate selecting the `app_launched` frame of one specific launch.

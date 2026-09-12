@@ -33,61 +33,14 @@ use serde_json::{json, Value};
 
 mod common;
 
-use common::{eventually, expect_ok, write_desktop_entry, RawClient, TestRuntime, REQUEST_TIMEOUT};
-
-/// How long a test waits for a server-side registry effect to settle.
+use common::{
+    eventually, expect_ok, raw_request, subscription_id, write_desktop_entry, TestRuntime,
+    REQUEST_TIMEOUT,
+};/// How long a test waits for a server-side registry effect to settle.
 ///
 /// Registry mutation happens before the response is written, so this only
 /// exists so a broken runtime fails with a clear message instead of hanging.
 const SETTLE: Duration = Duration::from_secs(5);
-
-/// Sends one raw request and returns the response carrying the same `id`.
-///
-/// Event frames interleaved on the connection are skipped by
-/// [`RawClient::expect_json_matching`].
-///
-/// # Panics
-///
-/// Panics if the connection closes or no matching response arrives within
-/// [`REQUEST_TIMEOUT`].
-fn raw_request(
-    t: &TestRuntime,
-    raw: &mut RawClient,
-    id: u64,
-    method: &str,
-    params: Value,
-) -> Value {
-    t.block_on_timeout(async {
-        raw.send_json(&json!({ "id": id, "method": method, "params": params }))
-            .await;
-        raw.expect_json_matching(REQUEST_TIMEOUT, |value| value.get("id") == Some(&json!(id)))
-            .await
-    })
-}
-
-/// The `result` object of a raw response.
-///
-/// # Panics
-///
-/// Panics with the whole response when the server answered an error.
-fn result_of<'a>(response: &'a Value, what: &str) -> &'a Value {
-    match response.get("result") {
-        Some(result) => result,
-        None => panic!("{what}: expected a result, got {response}"),
-    }
-}
-
-/// The `subscription_id` of a raw `subscribe_events` response.
-///
-/// # Panics
-///
-/// Panics with the whole response when it carries no id.
-fn subscription_id(response: &Value, what: &str) -> u64 {
-    result_of(response, what)
-        .get("subscription_id")
-        .and_then(Value::as_u64)
-        .unwrap_or_else(|| panic!("{what}: expected a subscription_id, got {response}"))
-}
 
 #[test]
 fn subscribe_events_returns_a_subscription_id() {

@@ -22,7 +22,9 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
   protocol defaults, raw VAP frames). `futures` is a dev-dependency, but only `viewer.rs` uses it
   (`ViewerClient`'s ack/frame streams); the AGP suites never poll a typed `EventStream`, so they stay on `RawClient`.
 - Helpers: `assert_error_code`, `expect_ok`, `eventually`, `write_desktop_entry`, `output_size()`,
-  `OUTPUT_WIDTH`/`OUTPUT_HEIGHT`, `REQUEST_TIMEOUT`, `SHORT_TIMEOUT_MS`.
+  `OUTPUT_WIDTH`/`OUTPUT_HEIGHT`, `REQUEST_TIMEOUT`, `SHORT_TIMEOUT_MS`, plus the shared raw-wire
+  helpers `raw_request` (send a request, skip interleaved event frames, match the response on `id`)
+  and `subscription_id` (lift `result.subscription_id` from a `subscribe_events` response).
 - `SHORT_TIMEOUT_MS = 100` is the shared short `timeout_ms` for waits and samples whose exact value is
   immaterial: a wait that only needs to expire against an idle runtime, and an `observe(until = timeout)`
   whose horizon is irrelevant. It is strictly below the 250 ms protocol default `quiet_ms`, so a
@@ -53,11 +55,12 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
 | `subscriptions.rs` | §5.6 `subscription_id`, filter acceptance, `inspect_frame` rejection, idempotent unsubscribe, disconnect cleanup, distinct ids; plus launch correlation: a synthetic `WindowCreated` injected into the compositor broadcast is fanned out with the correlator's `launch_id` while the raw broadcast stays `None`. |
 | `shutdown.rs` | idempotent shutdown, socket removal, `wait()`, rebinding the same path, handle drop does not stop the runtime, in-flight `shutting_down`. |
 | `sequence.rs` | §1 seq-monotonicity for server-synthesized events: an `observe(until=timeout)` watermark before a launch; the first `app_launched` strictly above it, the second strictly above the first and above the re-sampled watermark; ≥2 consecutive `inspect_frame` seqs strictly increasing above the pre-subscription watermark; `server_synthesized_seqs_interleave_with_the_compositor_counter` brackets both emission sites with out-of-band `ReserveSeq` probes — every synthesized `seq` above the probe reserved before it, every probe reserved after it above the `seq`. |
+| `notify.rs` | §5.9 notifications + §5.10 event waits: `post_notification` allocates monotonic ids and reveals the stored record (defaults filled, `posted_seq` = the event's `seq`) in a newest-first `list_notifications`; an empty `title` is `invalid_request` and stores nothing; `close_notification` dismisses (gone from the default list, present with `include_dismissed` + `close_reason`/`closed_seq`) and a **second** close is a successful no-op that publishes nothing (no `notification_closed` frame reaches a subscriber, and a `wait_for_events` above its gap `seq` times out); `invoke_notification_action` succeeds on a declared key without dismissing, `invalid_request` on an undeclared one; `close_notification`/`invoke_notification_action` on an unknown id answer `unknown_notification` with `ErrorPayload.data = {"notification_id": id}` and keep the connection open. Each of the three notification kinds reaches its own raw §5.6 subscriber with the exact `data` payload and the reserved `seq`, while a disjoint-only subscriber receives nothing. `wait_for_events` resolves with a notification posted while it is outstanding (typed through `adesk-client`), reports a horizon as `timed_out: true` with `events: []` (a result, never an error), and honours `kinds`/`window_id`/`max_events`/`since_seq` (exclusive, oldest-first, capped at the front). `notification_seqs_interleave_with_the_compositor_counter` brackets the three mutation sites with out-of-band `ReserveSeq` probes (the `sequence.rs` technique), proving one global monotonic `seq` counter with gaps but no reuse. |
 | `viewer.rs` | VAP v1 endpoint (`docs/viewer.md`): §2 handshake (`protocol_version`, the 1280x720 output, `pixman`); §4/§5 `request_frame` (a full-output PNG whose own `IHDR` carries the output size, and a strictly greater `seq` on the second frame) and `request_state` (empty runtime → `active_window_id: null`, `windows: []`); **viewer input through the seat** — a real `WaylandTestClient` toplevel is activated over AGP, then a viewer `pointer_button` and a `key` chord tap each answer an `input_ack` with a fresh `ActionId` and the *client* observes the delivered move/press/release in its own `wl_pointer`/`wl_keyboard` history; `without_viewer()` (no socket path, no socket file, AGP still serves, clean shutdown); teardown removes both socket files and a fresh runtime rebinds the same viewer path; an input with no active window is answered with a VAP `error` (`invalid_request`) that leaves the connection usable. |
 
-Per-file test counts (65 total, all plain sync `#[test]`; no `#[tokio::test]`, no `#[ignore]`):
-`observation.rs` 11, `protocol.rs` 10, `subscriptions.rs` 8, `viewer.rs` 7, `windows.rs` 7,
-`apps.rs` 6, `inspector.rs` 5, `shutdown.rs` 5, `capture.rs` 3, `sequence.rs` 3.
+Per-file test counts (81 total, all plain sync `#[test]`; no `#[tokio::test]`, no `#[ignore]`):
+`viewer.rs` 12, `notify.rs` 11, `observation.rs` 11, `protocol.rs` 10, `subscriptions.rs` 8,
+`windows.rs` 7, `apps.rs` 6, `inspector.rs` 5, `shutdown.rs` 5, `capture.rs` 3, `sequence.rs` 3.
 
 ## Notes for Agents
 
@@ -148,9 +151,7 @@ Per-file test counts (65 total, all plain sync `#[test]`; no `#[tokio::test]`, n
   inside `common/mod.rs`.
 - Viewer-only harness accessors (single target today): `TestRuntime::connect_viewer`, `connect_viewer_raw`,
   `viewer_socket_path`, `runtime_dir`, `wayland_display_name` are reached only from `viewer.rs`;
-  `RawClient::read_json` only from `inspector.rs`, `RawClient::expect_closed` only from `protocol.rs`,
-  `TestRuntime::running` only from `shutdown.rs`.
-- Raw-wire helpers are duplicated per target: `raw_request` (send + match the response on `id`) is
-  byte-identical in `subscriptions.rs` and `sequence.rs`, and `subscription_id` (lift `result.subscription_id`)
-  exists in both with two different bodies.
-  A new raw-wire suite should hoist them into `common/mod.rs` rather than add a third copy.
+  `RawClient::expect_closed` only from `protocol.rs`, `TestRuntime::running` only from `shutdown.rs`;
+  `RawClient::read_json` is reached from `inspector.rs` and `notify.rs` (bounded "nothing arrived" windows).
+- `raw_request` and `subscription_id` live once in `common/mod.rs` (see the helpers bullet above) and are
+  shared by `subscriptions.rs`, `sequence.rs` and `notify.rs` instead of being copied per target.

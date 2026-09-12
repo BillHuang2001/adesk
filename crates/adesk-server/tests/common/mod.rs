@@ -62,7 +62,7 @@ use adesk_compositor::{CompositorConfig, RendererKind};
 use adesk_core::{ErrorCode, Size};
 use adesk_server::{RunningServer, Server, ServerConfig, ServerContext, ServerError, ViewerConfig};
 use adesk_viewer::{ViewerClient, ViewerTarget};
-use serde_json::Value;
+use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::UnixStream;
@@ -735,6 +735,44 @@ impl RawClient {
             self.history[start..].join("\n  ")
         )
     }
+}
+
+/// Sends one raw AGP request and returns the response carrying the same `id`.
+///
+/// Event frames interleaved on the connection are skipped by
+/// [`RawClient::expect_json_matching`], so a suite can read its own response
+/// while events stream on the same connection. Every raw-wire suite shares this
+/// helper rather than copying it.
+///
+/// # Panics
+///
+/// Panics if the connection closes or no matching response arrives within
+/// [`REQUEST_TIMEOUT`].
+pub fn raw_request(
+    t: &TestRuntime,
+    raw: &mut RawClient,
+    id: u64,
+    method: &str,
+    params: Value,
+) -> Value {
+    t.block_on_timeout(async {
+        raw.send_json(&json!({ "id": id, "method": method, "params": params }))
+            .await;
+        raw.expect_json_matching(REQUEST_TIMEOUT, |value| value.get("id") == Some(&json!(id)))
+            .await
+    })
+}
+
+/// The `subscription_id` of a raw `subscribe_events` response.
+///
+/// # Panics
+///
+/// Panics with the whole response when it carries no id.
+pub fn subscription_id(response: &Value, what: &str) -> u64 {
+    response
+        .pointer("/result/subscription_id")
+        .and_then(Value::as_u64)
+        .unwrap_or_else(|| panic!("{what}: expected a subscription_id, got {response}"))
 }
 
 /// Asserts that `result` is the AGP error `expected` (protocol §6).
