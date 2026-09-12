@@ -71,6 +71,7 @@ Design invariants:
 | `crates/adesk-viewer/` | Viewer: desktop-streaming server session + async client SDK + headless `adesk-viewer` binary. |
 | `crates/adesk-viewer-gui/` | GTK4/libadwaita desktop viewer front-end: frame view, window task bar, human input over VAP. The only GTK crate. |
 | `crates/adesk-machine/` | AI Machine runtime: rootless-container backend seam, machine lifecycle manager, host control plane. |
+| `crates/adesk-recorder/` | Screen recording: rendered desktop frames → encoded video file. Pure-Rust Motion-JPEG/AVI software backend (works with no GPU/display/external tool) + optional GPU-accelerated H.264 backend (external `ffmpeg` with a hardware encoder). No compositor/protocol/async coupling — `adesk-server` drives it. |
 
 End-to-end tests live in `crates/adesk-server/tests/`; protocol-level compositor tests in
 `crates/adesk-compositor/tests/`. Both build on `adesk-testkit`.
