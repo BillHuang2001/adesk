@@ -18,10 +18,11 @@ payloads defined in `adesk-proto`).
 pub struct WindowId(pub u64);   // stable, monotonic, never reused
 pub struct ActionId(pub u64);   // one per agent input action
 pub struct LaunchId(pub u64);   // one per launch_app call
+pub struct NotificationId(pub u64); // one per post_notification call
 pub struct AppId(pub String);   // desktop-file id, e.g. "org.mozilla.firefox"
 ```
 
-The three numeric ids are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
+The four numeric ids are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
 `Deserialize` (transparent), with `Display` and `From`/`Into` for their inner type.
 `AppId` is `Clone` (not `Copy`), `Display`, `From<String>`, `From<&str>`, `AsRef<str>`,
 `as_str()`, transparent serde, `Ord`.
@@ -139,6 +140,7 @@ Crop, downscale, PNG encoding and damage-based re-render live in `adesk-render`.
 pub enum EventKind {
     WindowCreated, WindowDestroyed, WindowActivated, TitleChanged,
     SurfaceCommit, FocusChanged, PopupAppeared, PopupDisappeared, AppLaunched,
+    Notification, NotificationClosed, NotificationAction,
 }
 
 pub enum RuntimeEvent {
@@ -152,6 +154,11 @@ pub enum RuntimeEvent {
     PopupAppeared   { seq: u64, ts_ms: u64, window_id: WindowId, popup_id: u64 },
     PopupDisappeared{ seq: u64, ts_ms: u64, window_id: WindowId, popup_id: u64 },
     AppLaunched     { seq: u64, ts_ms: u64, launch_id: LaunchId, app_id: AppId, pid: Option<i32> },
+    Notification    { seq: u64, ts_ms: u64, notification: Notification },
+    NotificationClosed { seq: u64, ts_ms: u64, notification_id: NotificationId,
+                         reason: NotificationCloseReason },
+    NotificationAction { seq: u64, ts_ms: u64, notification_id: NotificationId,
+                         action_key: String },
 }
 impl RuntimeEvent {
     pub fn seq(&self) -> u64;
@@ -195,12 +202,44 @@ wait's scope was quiet for the threshold at resolution time — the condition's 
 for a quiet wait, otherwise the runtime default — so a timed-out `change` wait can
 legitimately carry `quiet: true` (`docs/protocol.md` §5.4).
 
+## Notifications
+
+```rust
+pub enum NotificationUrgency { Low, Normal, Critical }        // default Normal, snake_case
+pub enum NotificationCloseReason { Dismissed, Action, Expired, Closed } // default Dismissed
+
+pub struct NotificationAction { pub key: String, pub label: String }
+
+pub struct Notification {
+    pub id: NotificationId,
+    pub source: Option<String>,
+    pub title: String,
+    pub body: String,
+    pub urgency: NotificationUrgency,
+    pub category: Option<String>,
+    pub actions: Vec<NotificationAction>,
+    pub hints: std::collections::BTreeMap<String, String>,
+    pub posted_seq: u64,
+    pub posted_ts_ms: u64,
+    pub dismissed: bool,
+    pub closed_seq: Option<u64>,
+    pub close_reason: Option<NotificationCloseReason>,
+    pub timeout_ms: Option<u64>,
+}
+```
+
+The field names and shapes are exactly the AGP `Notification` (`docs/protocol.md` §4);
+optional fields serialize as JSON `null` (no `skip_serializing_if`). `hints` is a
+`BTreeMap<String, String>` so `adesk-core` needs no `serde_json` dependency. The
+notification subsystem that produces and stores these lives in `adesk-notify`
+(`docs/notifications.md`); core carries only the vocabulary.
+
 ## Errors
 
 ```rust
 pub enum ErrorCode {
-    InvalidRequest, UnknownMethod, UnknownWindow, UnknownApp, LaunchFailed,
-    CaptureFailed, RenderFailed, Timeout, NotSupported, Busy, Internal,
+    InvalidRequest, UnknownMethod, UnknownWindow, UnknownApp, UnknownNotification,
+    LaunchFailed, CaptureFailed, RenderFailed, Timeout, NotSupported, Busy, Internal,
     ShuttingDown, ProtocolVersionMismatch,
 }
 impl ErrorCode { pub fn as_str(&self) -> &'static str; }   // snake_case wire names
