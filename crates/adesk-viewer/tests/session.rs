@@ -19,10 +19,13 @@ use std::time::Duration;
 
 use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size, WindowId};
 use adesk_proto::{KeySpec, RendererKind};
-use adesk_viewer::{PeerInfo, ViewerError, ViewerInput, ViewerServer, ViewerServerConfig};
+use adesk_viewer::{
+    PeerInfo, RecordRequest, ViewerError, ViewerInput, ViewerServer, ViewerServerConfig,
+};
 use adesk_viewer_proto::{
     decode_server, encode_client, ClientMessage, ControlOwner, CursorState, DesktopState,
-    KeyAction, ServerHello, ServerMessage, ViewerHello, PROTOCOL_VERSION,
+    KeyAction, RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, ViewerHello,
+    PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
@@ -46,6 +49,15 @@ const CAPACITY: usize = 1 << 16;
 /// protocol, not about timing.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// The recording status the fake reports: a finished 12-frame, 400 ms recording
+/// at a fixed path and encoder.
+fn recording_status() -> RecordingStatus {
+    RecordingStatus::idle()
+        .with_path("/tmp/adesk-rec-7.mkv".to_owned())
+        .with_encoder("software".to_owned())
+        .with_counts(12, 400)
+}
+
 /// A fake backend configured for the session suite: an empty 1280×800 Pixman
 /// desktop reported as runtime `"test"`, a fixed frame `ts_ms` of `0` and
 /// `ActionId(7)` recorded for every applied input.
@@ -65,7 +77,8 @@ fn backend() -> Arc<FakeBackend> {
                 windows: Vec::new(),
             })
             .with_action(ActionId(7))
-            .with_ts_ms(Some(0)),
+            .with_ts_ms(Some(0))
+            .with_recording_status(recording_status()),
     )
 }
 
@@ -468,6 +481,118 @@ async fn an_unknown_message_type_is_ignored() {
     match recv_some(&mut reader).await {
         ServerMessage::Frame(_) => {}
         other => panic!("expected a frame after the ignored message, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: `start_recording` is forwarded to the backend as a `RecordRequest` and
+/// answered with a `recording` status that echoes the client id.
+#[tokio::test]
+async fn start_recording_is_forwarded_and_answered() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::StartRecording {
+            id: Some(7),
+            path: Some("/tmp/out.mkv".to_owned()),
+            fps: 15,
+            encoder: RecordingEncoder::Software,
+        },
+    )
+    .await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Recording { id, status } => {
+            assert_eq!(id, Some(7), "the reply echoes the request id");
+            assert!(
+                status.recording,
+                "a started recording reports recording=true"
+            );
+            assert_eq!(status.path.as_deref(), Some("/tmp/adesk-rec-7.mkv"));
+        }
+        other => panic!("expected a recording status, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_recording(),
+        vec![RecordRequest::new()
+            .with_path("/tmp/out.mkv")
+            .with_fps(15)
+            .with_encoder(RecordingEncoder::Software)]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: `stop_recording` and `request_recording` are answered with the
+/// backend's status, echoing each request id.
+#[tokio::test]
+async fn stop_and_request_recording_round_trip() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send(&mut writer, &ClientMessage::StopRecording { id: Some(8) }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Recording { id, status } => {
+            assert_eq!(id, Some(8));
+            assert!(!status.recording, "a stopped recording is not active");
+            assert_eq!(status.frames, 12);
+            assert_eq!(status.duration_ms, 400);
+        }
+        other => panic!("expected a recording status, got {other:?}"),
+    }
+
+    send(
+        &mut writer,
+        &ClientMessage::RequestRecording { id: Some(9) },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Recording { id, status } => {
+            assert_eq!(id, Some(9));
+            assert!(!status.recording);
+            assert_eq!(status.encoder.as_deref(), Some("software"));
+        }
+        other => panic!("expected a recording status, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5/§6: an unavailable recorder answers `error` with code `not_supported`,
+/// echoing the request id, and the connection stays open.
+#[tokio::test]
+async fn start_recording_failure_answers_error_with_the_id() {
+    let backend = backend();
+    backend.set_fail_recording(true);
+    let (handle, mut reader, mut writer) = connected(backend).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::StartRecording {
+            id: Some(5),
+            path: None,
+            fps: 30,
+            encoder: RecordingEncoder::Auto,
+        },
+    )
+    .await;
+
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::NotSupported);
+            assert_eq!(id, Some(5));
+        }
+        other => panic!("expected a not_supported error, got {other:?}"),
+    }
+
+    // The connection is still usable afterwards (§6).
+    send(&mut writer, &ClientMessage::RequestRecording { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, .. } => assert_eq!(code, ErrorCode::NotSupported),
+        other => panic!("expected a not_supported error, got {other:?}"),
     }
 
     bye_and_finish(handle, &mut writer).await;

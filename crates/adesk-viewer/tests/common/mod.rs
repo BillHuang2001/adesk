@@ -8,14 +8,15 @@
 //! used by both — anything only one suite needs lives in that suite's own file,
 //! otherwise the other binary would flag it as dead code.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use adesk_core::{ActionId, Size};
+use adesk_core::{ActionId, ErrorCode, Size};
 use adesk_proto::{ImagePayload, RendererKind};
-use adesk_viewer::{ChangeSignal, ViewerBackend, ViewerInput};
+use adesk_viewer::{ChangeSignal, RecordRequest, ViewerBackend, ViewerError, ViewerInput};
 use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, ServerHello, ViewerFrame, PROTOCOL_VERSION,
+    ControlOwner, CursorState, DesktopState, RecordingStatus, ServerHello, ViewerFrame,
+    PROTOCOL_VERSION,
 };
 
 /// A configurable [`ViewerBackend`] that records every input and control owner it
@@ -24,10 +25,11 @@ use adesk_viewer_proto::{
 /// The builder knobs cover everything the two integration suites vary:
 /// [`with_display`](FakeBackend::with_display),
 /// [`with_desktop`](FakeBackend::with_desktop),
-/// [`with_action`](FakeBackend::with_action) and
-/// [`with_ts_ms`](FakeBackend::with_ts_ms). The defaults describe an empty
-/// 1280×800 Pixman desktop at a fixed timestamp `0`, recording input under
-/// `ActionId(7)`.
+/// [`with_action`](FakeBackend::with_action),
+/// [`with_ts_ms`](FakeBackend::with_ts_ms) and
+/// [`with_recording_status`](FakeBackend::with_recording_status). The defaults
+/// describe an empty 1280×800 Pixman desktop at a fixed timestamp `0`, recording
+/// input under `ActionId(7)` and an idle recording.
 ///
 /// State is behind interior mutability and no lock is ever held across an
 /// `.await`.
@@ -40,6 +42,8 @@ pub struct FakeBackend {
     inputs: Mutex<Vec<ViewerInput>>,
     /// Control owners `set_control` received, in submission order.
     controls: Mutex<Vec<ControlOwner>>,
+    /// `start_recording` requests received, in submission order.
+    record_requests: Mutex<Vec<RecordRequest>>,
     /// The handshake reply's metadata.
     display: ServerHello,
     /// The desktop `desktop_state()` reports; rendered frames reuse its
@@ -49,6 +53,10 @@ pub struct FakeBackend {
     action: ActionId,
     /// Fixed `ViewerFrame::ts_ms`; `None` uses the frame's sequence number.
     ts_ms: Option<u64>,
+    /// The recording status the recording methods report.
+    recording: RecordingStatus,
+    /// When set, every recording method fails with a `not_supported` error.
+    fail_recording: AtomicBool,
 }
 
 impl Default for FakeBackend {
@@ -58,6 +66,7 @@ impl Default for FakeBackend {
             seq: AtomicU64::new(0),
             inputs: Mutex::new(Vec::new()),
             controls: Mutex::new(Vec::new()),
+            record_requests: Mutex::new(Vec::new()),
             display: ServerHello {
                 protocol_version: PROTOCOL_VERSION,
                 runtime_version: "test".to_owned(),
@@ -72,6 +81,8 @@ impl Default for FakeBackend {
             },
             action: ActionId(7),
             ts_ms: Some(0),
+            recording: RecordingStatus::idle(),
+            fail_recording: AtomicBool::new(false),
         }
     }
 }
@@ -103,6 +114,16 @@ impl FakeBackend {
         self
     }
 
+    /// Replaces the recording status the recording methods report.
+    ///
+    /// `start_recording` returns it with `recording` forced to `true`;
+    /// `stop_recording` returns it with `recording` forced to `false`;
+    /// `recording_status` returns it verbatim.
+    pub fn with_recording_status(mut self, recording: RecordingStatus) -> Self {
+        self.recording = recording;
+        self
+    }
+
     /// The inputs recorded so far, in submission order.
     pub fn recorded_inputs(&self) -> Vec<ViewerInput> {
         self.inputs.lock().expect("inputs lock").clone()
@@ -111,6 +132,27 @@ impl FakeBackend {
     /// The control owners recorded so far, in submission order.
     pub fn recorded_controls(&self) -> Vec<ControlOwner> {
         self.controls.lock().expect("controls lock").clone()
+    }
+
+    /// The `start_recording` requests recorded so far, in submission order.
+    pub fn recorded_recording(&self) -> Vec<RecordRequest> {
+        self.record_requests.lock().expect("record lock").clone()
+    }
+
+    /// Makes every recording method fail with a `not_supported` error while
+    /// `fail` is set.
+    pub fn set_fail_recording(&self, fail: bool) {
+        self.fail_recording.store(fail, Ordering::SeqCst);
+    }
+
+    /// The failure every recording method reports while `fail_recording` is set.
+    fn recording_failure(&self) -> Option<ViewerError> {
+        self.fail_recording
+            .load(Ordering::SeqCst)
+            .then(|| ViewerError::Backend {
+                code: ErrorCode::NotSupported,
+                message: "screen recording is not supported by this backend".to_owned(),
+            })
     }
 }
 
@@ -148,5 +190,33 @@ impl ViewerBackend for FakeBackend {
     async fn set_control(&self, owner: ControlOwner) -> adesk_viewer::Result<()> {
         self.controls.lock().expect("controls lock").push(owner);
         Ok(())
+    }
+
+    async fn start_recording(
+        &self,
+        request: RecordRequest,
+    ) -> adesk_viewer::Result<RecordingStatus> {
+        self.record_requests
+            .lock()
+            .expect("record lock")
+            .push(request);
+        if let Some(error) = self.recording_failure() {
+            return Err(error);
+        }
+        Ok(self.recording.clone().with_recording(true))
+    }
+
+    async fn stop_recording(&self) -> adesk_viewer::Result<RecordingStatus> {
+        if let Some(error) = self.recording_failure() {
+            return Err(error);
+        }
+        Ok(self.recording.clone().with_recording(false))
+    }
+
+    async fn recording_status(&self) -> adesk_viewer::Result<RecordingStatus> {
+        if let Some(error) = self.recording_failure() {
+            return Err(error);
+        }
+        Ok(self.recording.clone())
     }
 }

@@ -75,6 +75,35 @@ pub enum ViewerError {
     Transport(String),
 }
 
+impl ViewerError {
+    /// Builds a [`ViewerError::Backend`] failure carrying an AGP [`ErrorCode`].
+    ///
+    /// A backend uses this to classify a failure — for example an unavailable
+    /// screen-recording encoder as [`ErrorCode::NotSupported`]; the server
+    /// session forwards the code (via [`ViewerError::code_or`]) as the VAP
+    /// `error` code (`docs/viewer.md` §6).
+    pub fn backend(code: ErrorCode, message: impl Into<String>) -> ViewerError {
+        ViewerError::Backend {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// The AGP [`ErrorCode`] this failure maps to, or `fallback` when it carries
+    /// none.
+    ///
+    /// Only [`ViewerError::Backend`] carries a backend-chosen classification; any
+    /// other failure maps to `fallback`, so the server session can report a
+    /// backend failure with its own code (`not_supported`, `unknown_window`, …)
+    /// and everything else with a sensible default (`docs/viewer.md` §6).
+    pub fn code_or(&self, fallback: ErrorCode) -> ErrorCode {
+        match self {
+            ViewerError::Backend { code, .. } => *code,
+            _ => fallback,
+        }
+    }
+}
+
 /// Result alias used throughout the crate.
 ///
 /// The error parameter defaults to [`ViewerError`], so `Result<T>` reads the same
@@ -119,5 +148,30 @@ mod tests {
             other => panic!("unexpected variant: {other:?}"),
         }
         assert!(error.to_string().contains("unknown window 42"));
+    }
+
+    #[test]
+    fn backend_constructor_and_code_or_map_the_agp_code() {
+        let error = ViewerError::backend(ErrorCode::NotSupported, "no encoder");
+        match &error {
+            ViewerError::Backend { code, message } => {
+                assert_eq!(*code, ErrorCode::NotSupported);
+                assert_eq!(message, "no encoder");
+            }
+            other => panic!("unexpected variant: {other:?}"),
+        }
+        assert_eq!(error.code_or(ErrorCode::Internal), ErrorCode::NotSupported);
+    }
+
+    #[test]
+    fn code_or_falls_back_for_failures_without_a_backend_code() {
+        assert_eq!(
+            ViewerError::Closed.code_or(ErrorCode::Internal),
+            ErrorCode::Internal
+        );
+        assert_eq!(
+            ViewerError::Transport("x".to_owned()).code_or(ErrorCode::InvalidRequest),
+            ErrorCode::InvalidRequest
+        );
     }
 }

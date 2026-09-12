@@ -1,14 +1,16 @@
 //! Headless `adesk-viewer` binary — a Viewer Attachment Protocol (VAP) client.
 //!
 //! The binary connects to an ADesk runtime's viewer endpoint over a Unix socket
-//! (or TCP), performs the §2 handshake, and then does exactly one of three
+//! (or TCP), performs the §2 handshake, and then does exactly one of four
 //! things (`docs/viewer.md`):
 //! - `--capture <FILE>`: request one frame and write it as a PNG;
 //! - `--follow --out-dir <DIR>`: stream frames into `DIR` as `frame-<seq:08>.png`
 //!   until a frame/time budget is reached or the stream ends;
 //! - `--input <FILE>` / `--input-stdin`: run a small input script
 //!   (see `crates/adesk-viewer/CONTEXT.md`, parsed by `parse_script`) against the
-//!   runtime.
+//!   runtime;
+//! - `--record <FILE>`: start a screen recording of the output and finish it when
+//!   a `--duration-ms` budget elapses or the process receives Ctrl-C.
 //!
 //! It never needs a display, GPU or network: "rendering" one frame means writing
 //! a PNG and input is script-driven. Message bodies and pixel payloads are never
@@ -33,9 +35,10 @@ use futures::StreamExt;
 
 use adesk_core::{ButtonState, OverlayKind, WindowId};
 use adesk_viewer::{
-    parse_script, save_frame_png, ConnectOptions, FrameWriter, ScriptCommand, ViewerClient,
-    ViewerError, ViewerTarget,
+    parse_script, save_frame_png, ConnectOptions, FrameWriter, RecordRequest, ScriptCommand,
+    ViewerClient, ViewerError, ViewerTarget,
 };
+use adesk_viewer_proto::{RecordingEncoder, DEFAULT_RECORD_FPS};
 
 /// Process exit code for a runtime failure (connect/capture/stream/input error).
 const EXIT_FAILURE: u8 = 1;
@@ -52,15 +55,16 @@ const SOCKET_FILE_NAME: &str = "adesk-viewer.sock";
 /// `adesk-viewer` — headless Viewer Attachment Protocol client.
 ///
 /// Connects to an ADesk runtime, then captures one frame (`--capture`), streams
-/// frames to a directory (`--follow`) or runs an input script (`--input` /
-/// `--input-stdin`). Exactly one of those modes is required.
+/// frames to a directory (`--follow`), runs an input script (`--input` /
+/// `--input-stdin`) or records the output (`--record`). Exactly one of those
+/// modes is required.
 #[derive(Debug, Parser)]
 #[command(name = "adesk-viewer", version, long_about = None)]
 #[command(group(
     ArgGroup::new("mode")
         .required(true)
         .multiple(false)
-        .args(["capture", "follow", "input", "input_stdin"])
+        .args(["capture", "follow", "input", "input_stdin", "record"])
 ))]
 struct Cli {
     /// Connect over a Unix domain socket at PATH (default:
@@ -101,7 +105,7 @@ struct Cli {
     #[arg(long, value_name = "N")]
     max_frames: Option<u64>,
 
-    /// With `--follow`, stop after M milliseconds have elapsed.
+    /// With `--follow` or `--record`, stop after M milliseconds have elapsed.
     #[arg(long, value_name = "M")]
     duration_ms: Option<u64>,
 
@@ -112,6 +116,19 @@ struct Cli {
     /// Run the input script read from standard input, then exit.
     #[arg(long)]
     input_stdin: bool,
+
+    /// Record the desktop output to FILE until a `--duration-ms` budget elapses
+    /// or the process receives Ctrl-C, then exit.
+    #[arg(long, value_name = "FILE")]
+    record: Option<PathBuf>,
+
+    /// With `--record`, the recording frame rate in frames per second.
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_RECORD_FPS)]
+    record_fps: u32,
+
+    /// With `--record`, the encoder to request (`auto`, `software`, `gpu`).
+    #[arg(long, value_name = "ENCODER", default_value = "auto")]
+    record_encoder: String,
 }
 
 /// Why a run could not complete, split by the exit code it maps to.
@@ -129,7 +146,27 @@ impl From<ViewerError> for Failure {
     }
 }
 
-/// The single capture/input mode the CLI selected.
+impl std::fmt::Display for Failure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Failure::Runtime(error) => write!(f, "{error}"),
+            Failure::Config(message) => f.write_str(message),
+        }
+    }
+}
+
+impl Failure {
+    /// The process exit code this failure maps to: `1` for a runtime/connection
+    /// failure, `2` for a CLI/config error.
+    fn exit_code(&self) -> u8 {
+        match self {
+            Failure::Runtime(_) => EXIT_FAILURE,
+            Failure::Config(_) => EXIT_USAGE,
+        }
+    }
+}
+
+/// The single capture/input/record mode the CLI selected.
 #[derive(Debug)]
 enum Mode {
     /// Request one frame and write it to the given file.
@@ -148,6 +185,17 @@ enum Mode {
         /// The commands to execute in order.
         commands: Vec<ScriptCommand>,
     },
+    /// Record the desktop output to a file with an optional time budget.
+    Record {
+        /// Destination file.
+        file: PathBuf,
+        /// Recording frame rate in frames per second.
+        fps: u32,
+        /// Encoder preference.
+        encoder: RecordingEncoder,
+        /// Stop after this many milliseconds, when set.
+        duration_ms: Option<u64>,
+    },
 }
 
 #[tokio::main]
@@ -156,13 +204,9 @@ async fn main() -> ExitCode {
     init_tracing(&cli.log);
     match run(&cli).await {
         Ok(()) => ExitCode::SUCCESS,
-        Err(Failure::Runtime(error)) => {
-            eprintln!("adesk-viewer: {error}");
-            ExitCode::from(EXIT_FAILURE)
-        }
-        Err(Failure::Config(message)) => {
-            eprintln!("adesk-viewer: {message}");
-            ExitCode::from(EXIT_USAGE)
+        Err(failure) => {
+            eprintln!("adesk-viewer: {failure}");
+            ExitCode::from(failure.exit_code())
         }
     }
 }
@@ -189,6 +233,18 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
             duration_ms,
         } => follow(&options, &dir, max_frames, duration_ms).await,
         Mode::Script { commands } => apply_script(&options, commands).await,
+        Mode::Record {
+            file,
+            fps,
+            encoder,
+            duration_ms,
+        } => {
+            let request = RecordRequest::new()
+                .with_path(file)
+                .with_fps(fps)
+                .with_encoder(encoder);
+            record(&options, request, duration_ms).await
+        }
     }
 }
 
@@ -249,8 +305,17 @@ fn parse_overlays(list: &str) -> Result<Vec<OverlayKind>, Failure> {
         .collect()
 }
 
-/// Selects the capture/input mode, reading and parsing the script source when
-/// the input modes were chosen.
+/// Parses the `--record-encoder` value into a [`RecordingEncoder`].
+///
+/// The wire names are `"auto"`/`"software"`/`"gpu"`; an unknown name is a config
+/// error.
+fn parse_encoder(name: &str) -> Result<RecordingEncoder, Failure> {
+    serde_json::from_value::<RecordingEncoder>(serde_json::Value::String(name.trim().to_owned()))
+        .map_err(|_| Failure::Config(format!("unknown encoder `{name}`")))
+}
+
+/// Selects the capture/input/record mode, reading and parsing the script source
+/// when the input modes were chosen.
 fn select_mode(cli: &Cli) -> Result<Mode, Failure> {
     if let Some(path) = &cli.capture {
         return Ok(Mode::Capture(path.clone()));
@@ -263,6 +328,14 @@ fn select_mode(cli: &Cli) -> Result<Mode, Failure> {
         return Ok(Mode::Follow {
             dir,
             max_frames: cli.max_frames,
+            duration_ms: cli.duration_ms,
+        });
+    }
+    if let Some(file) = &cli.record {
+        return Ok(Mode::Record {
+            file: file.clone(),
+            fps: cli.record_fps,
+            encoder: parse_encoder(&cli.record_encoder)?,
             duration_ms: cli.duration_ms,
         });
     }
@@ -343,6 +416,67 @@ async fn follow(
     tracing::debug!(frames = written, "viewer capture stream finished");
     client.close().await?;
     Ok(())
+}
+
+/// Connects, starts a recording of the output, records until `duration_ms`
+/// elapses (when set) or the process receives Ctrl-C, then stops and closes
+/// (`docs/viewer.md` §4, §5).
+///
+/// The runtime owns the file: `request.path` is the requested destination and the
+/// status the server returns reports the resolved path and the encoder actually in
+/// use, which are logged here.
+async fn record(
+    options: &ConnectOptions,
+    request: RecordRequest,
+    duration_ms: Option<u64>,
+) -> Result<(), Failure> {
+    let client = ViewerClient::connect_with(options.clone()).await?;
+    let started = client.start_recording(request).await?;
+    tracing::info!(
+        recording = started.recording,
+        path = ?started.path,
+        encoder = ?started.encoder,
+        fps = started.fps,
+        "viewer recording started"
+    );
+
+    wait_for_recording_stop(duration_ms).await;
+
+    let finished = client.stop_recording().await?;
+    tracing::info!(
+        frames = finished.frames,
+        duration_ms = finished.duration_ms,
+        path = ?finished.path,
+        "viewer recording stopped"
+    );
+    client.close().await?;
+    Ok(())
+}
+
+/// Resolves when the recording should stop: after `duration_ms` when a budget is
+/// set, or on Ctrl-C, whichever comes first. With no budget it waits only for
+/// Ctrl-C.
+///
+/// If the Ctrl-C handler cannot be installed the time budget is awaited instead
+/// (waiting forever when no budget is set), so a failure to install the handler
+/// never truncates a recording.
+async fn wait_for_recording_stop(duration_ms: Option<u64>) {
+    let budget = async move {
+        match duration_ms {
+            Some(ms) => tokio::time::sleep(Duration::from_millis(ms)).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(budget);
+    tokio::select! {
+        () = &mut budget => {}
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::debug!(%error, "could not install the Ctrl-C handler");
+                budget.await;
+            }
+        }
+    }
 }
 
 /// Connects and executes a parsed input script in order, then closes.
@@ -463,6 +597,7 @@ mod tests {
         assert!(parse(&["adesk-viewer", "--follow", "--out-dir", "dir"]).is_ok());
         assert!(parse(&["adesk-viewer", "--input", "script.txt"]).is_ok());
         assert!(parse(&["adesk-viewer", "--input-stdin"]).is_ok());
+        assert!(parse(&["adesk-viewer", "--record", "out.mkv"]).is_ok());
     }
 
     #[test]
@@ -476,6 +611,7 @@ mod tests {
             "dir"
         ])
         .is_err());
+        assert!(parse(&["adesk-viewer", "--record", "out.mkv", "--capture", "f.png"]).is_err());
     }
 
     #[test]
@@ -622,5 +758,110 @@ mod tests {
             }
             other => panic!("expected a follow mode, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_encoder_maps_every_wire_name() {
+        assert_eq!(parse_encoder("auto").unwrap(), RecordingEncoder::Auto);
+        assert_eq!(
+            parse_encoder("software").unwrap(),
+            RecordingEncoder::Software
+        );
+        assert_eq!(parse_encoder("gpu").unwrap(), RecordingEncoder::Gpu);
+        assert_eq!(parse_encoder("  gpu ").unwrap(), RecordingEncoder::Gpu);
+    }
+
+    #[test]
+    fn unknown_encoder_is_a_config_error() {
+        assert!(matches!(
+            parse_encoder("nonsense").unwrap_err(),
+            Failure::Config(_)
+        ));
+    }
+
+    #[test]
+    fn select_mode_records_the_record_defaults() {
+        let cli = parse(&["adesk-viewer", "--record", "out.mkv"]).unwrap();
+        match select_mode(&cli).unwrap() {
+            Mode::Record {
+                file,
+                fps,
+                encoder,
+                duration_ms,
+            } => {
+                assert_eq!(file, PathBuf::from("out.mkv"));
+                assert_eq!(fps, DEFAULT_RECORD_FPS);
+                assert_eq!(encoder, RecordingEncoder::Auto);
+                assert_eq!(duration_ms, None);
+            }
+            other => panic!("expected a record mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_mode_records_the_record_budget_and_encoder() {
+        let cli = parse(&[
+            "adesk-viewer",
+            "--record",
+            "out.mkv",
+            "--record-fps",
+            "15",
+            "--record-encoder",
+            "software",
+            "--duration-ms",
+            "3000",
+        ])
+        .unwrap();
+        match select_mode(&cli).unwrap() {
+            Mode::Record {
+                file,
+                fps,
+                encoder,
+                duration_ms,
+            } => {
+                assert_eq!(file, PathBuf::from("out.mkv"));
+                assert_eq!(fps, 15);
+                assert_eq!(encoder, RecordingEncoder::Software);
+                assert_eq!(duration_ms, Some(3000));
+            }
+            other => panic!("expected a record mode, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn select_mode_reports_a_bad_record_encoder_as_config() {
+        let cli = parse(&[
+            "adesk-viewer",
+            "--record",
+            "out.mkv",
+            "--record-encoder",
+            "nonsense",
+        ])
+        .unwrap();
+        assert!(matches!(select_mode(&cli).unwrap_err(), Failure::Config(_)));
+    }
+
+    #[test]
+    fn failure_exit_codes_are_fixed() {
+        assert_eq!(
+            Failure::Runtime(ViewerError::Closed).exit_code(),
+            EXIT_FAILURE
+        );
+        assert_eq!(
+            Failure::Config("bad flag".to_owned()).exit_code(),
+            EXIT_USAGE
+        );
+    }
+
+    #[test]
+    fn failure_display_renders_the_underlying_message() {
+        assert_eq!(
+            Failure::Runtime(ViewerError::Closed).to_string(),
+            ViewerError::Closed.to_string()
+        );
+        assert_eq!(
+            Failure::Config("bad flag".to_owned()).to_string(),
+            "bad flag"
+        );
     }
 }

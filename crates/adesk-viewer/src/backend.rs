@@ -15,14 +15,18 @@
 //! and is a runtime-native window-management action, never synthesized input
 //! (`docs/viewer.md` §4, §5).
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
-use adesk_core::{ActionId, Button, ButtonState, WindowId};
+use adesk_core::{ActionId, Button, ButtonState, ErrorCode, WindowId};
 use adesk_proto::KeySpec;
-use adesk_viewer_proto::{ControlOwner, DesktopState, KeyAction, ServerHello, ViewerFrame};
+use adesk_viewer_proto::{
+    ControlOwner, DesktopState, KeyAction, RecordingEncoder, RecordingStatus, ServerHello,
+    ViewerFrame, DEFAULT_RECORD_FPS,
+};
 use tokio::sync::Notify;
 
-use crate::error::Result;
+use crate::error::{Result, ViewerError};
 
 /// The runtime side of a viewer connection.
 ///
@@ -72,6 +76,106 @@ pub trait ViewerBackend: Send + Sync + 'static {
     async fn set_control(&self, owner: ControlOwner) -> Result<()> {
         let _ = owner;
         Ok(())
+    }
+
+    /// Starts a screen recording of the output (`docs/viewer.md` §4, §5).
+    ///
+    /// The runtime owns the encoder and the file: it renders the full output at
+    /// [`RecordRequest::fps`] while the recording runs. It always reports the
+    /// resolved destination path and the encoder actually in use in the returned
+    /// [`RecordingStatus`], so a request with [`RecordRequest::path`] `None` still
+    /// learns where the file landed.
+    ///
+    /// The default refuses the request with [`ErrorCode::NotSupported`] (reported
+    /// on the wire as a VAP `error`), so a runtime that has not implemented
+    /// recording yet keeps the trait object usable. Starting a recording while one
+    /// is already active is a failure the runtime reports; the protocol maps it to
+    /// [`ErrorCode::InvalidRequest`] (`docs/viewer.md` §5).
+    async fn start_recording(&self, request: RecordRequest) -> Result<RecordingStatus> {
+        let _ = request;
+        Err(ViewerError::backend(
+            ErrorCode::NotSupported,
+            "screen recording is not supported by this backend",
+        ))
+    }
+
+    /// Stops the active screen recording and returns the finished file's status
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// The reported [`RecordingStatus`] describes the finished recording
+    /// (`recording` is `false`, `frames`/`duration_ms` are its totals). The
+    /// default refuses with [`ErrorCode::NotSupported`], mirroring
+    /// [`ViewerBackend::start_recording`].
+    async fn stop_recording(&self) -> Result<RecordingStatus> {
+        Err(ViewerError::backend(
+            ErrorCode::NotSupported,
+            "screen recording is not supported by this backend",
+        ))
+    }
+
+    /// Returns the current recording status without changing it
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// The default reports an idle session
+    /// ([`RecordingStatus::idle`]), which is correct for a runtime that never
+    /// records and never errors on the query.
+    async fn recording_status(&self) -> Result<RecordingStatus> {
+        Ok(RecordingStatus::idle())
+    }
+}
+
+/// A request to start a screen recording, assembled from a `start_recording`
+/// message (`docs/viewer.md` §4).
+///
+/// Coordinates and encoder choice are already resolved by the session: the
+/// backend never sees the wire message, only this typed request. `fps` defaults
+/// to [`DEFAULT_RECORD_FPS`] and `encoder` to [`RecordingEncoder::Auto`], matching
+/// the protocol's decode defaults; `path` is optional because the runtime owns
+/// the file and picks one when it is absent (`docs/viewer.md` §5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordRequest {
+    /// Destination file path; the runtime picks one under its recordings
+    /// directory when `None`.
+    pub path: Option<PathBuf>,
+    /// Frames per second the recording should capture at.
+    pub fps: u32,
+    /// Video-encoder preference.
+    pub encoder: RecordingEncoder,
+}
+
+impl RecordRequest {
+    /// Builds the crate-default request: no path, [`DEFAULT_RECORD_FPS`] and
+    /// [`RecordingEncoder::Auto`].
+    pub fn new() -> RecordRequest {
+        RecordRequest {
+            path: None,
+            fps: DEFAULT_RECORD_FPS,
+            encoder: RecordingEncoder::Auto,
+        }
+    }
+
+    /// Sets the destination path.
+    pub fn with_path(mut self, path: impl Into<PathBuf>) -> RecordRequest {
+        self.path = Some(path.into());
+        self
+    }
+
+    /// Sets the frame rate.
+    pub fn with_fps(mut self, fps: u32) -> RecordRequest {
+        self.fps = fps;
+        self
+    }
+
+    /// Sets the encoder preference.
+    pub fn with_encoder(mut self, encoder: RecordingEncoder) -> RecordRequest {
+        self.encoder = encoder;
+        self
+    }
+}
+
+impl Default for RecordRequest {
+    fn default() -> RecordRequest {
+        RecordRequest::new()
     }
 }
 
@@ -261,6 +365,27 @@ mod tests {
         let signal = ChangeSignal::default();
         assert!(signal.notify.is_some());
         assert!(ChangeSignal::never().notify.is_none());
+    }
+
+    #[test]
+    fn record_request_defaults_to_the_protocol_values() {
+        let request = RecordRequest::new();
+        assert_eq!(request.path, None);
+        assert_eq!(request.fps, DEFAULT_RECORD_FPS);
+        assert_eq!(request.encoder, RecordingEncoder::Auto);
+        assert_eq!(RecordRequest::default(), request);
+    }
+
+    #[test]
+    fn record_request_builders_override_every_field() {
+        let request = RecordRequest::new()
+            .with_path("/tmp/out.mkv")
+            .with_fps(15)
+            .with_encoder(RecordingEncoder::Software);
+        assert_eq!(request.path, Some(PathBuf::from("/tmp/out.mkv")));
+        assert_eq!(request.fps, 15);
+        assert_eq!(request.encoder, RecordingEncoder::Software);
+        assert_ne!(request, RecordRequest::new());
     }
 
     #[test]

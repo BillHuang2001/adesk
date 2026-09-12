@@ -5,10 +5,10 @@ Integration tests for the `adesk-viewer` crate (VAP server session, client SDK, 
 No display, GPU or real network: tests use a fake `ViewerBackend` plus either an in-memory `tokio::io::duplex` stream (`session.rs`) or a real `ViewerServer` bound on a `tokio::net::UnixListener` inside a `tempfile::TempDir` (`client.rs`).
 
 ## Files
-- `common/mod.rs` (152 lines) — the ONE shared, configurable `FakeBackend` (`with_display` / `with_desktop` / `with_action` / `with_ts_ms`, plus `recorded_inputs` / `recorded_controls` and a `pub change: ChangeSignal`), used by both integration targets below.
-- `client.rs` (433 lines) — 10 `#[tokio::test]` tests driving a real `ViewerClient` against a real `ViewerServer` over a real Unix socket in a tempdir.
-- `session.rs` (468 lines) — 12 `#[tokio::test]` tests driving `ViewerServer::serve` over an in-memory duplex stream.
-- `script.rs` (311 lines) — 15 tests for the input-script grammar and error line numbers.
+- `common/mod.rs` (222 lines) — the ONE shared, configurable `FakeBackend` (`with_display` / `with_desktop` / `with_action` / `with_ts_ms` / `with_recording_status` / `set_fail_recording`, plus `recorded_inputs` / `recorded_controls` / `recorded_recording` and a `pub change: ChangeSignal`), used by both integration targets below.
+- `client.rs` (526 lines) — 13 `#[tokio::test]` tests driving a real `ViewerClient` against a real `ViewerServer` over a real Unix socket in a tempdir.
+- `session.rs` (599 lines) — 15 `#[tokio::test]` tests driving `ViewerServer::serve` over an in-memory duplex stream.
+- `script.rs` (333 lines) — 16 tests for the input-script grammar and error line numbers.
 
 ## Constraints
 - NDJSON framing is reused from the crate, not re-implemented: `adesk_viewer::write_line` / `adesk_viewer::read_line` (re-exported `#[doc(hidden)]` from `src/transport.rs`). `session.rs`'s `send`/`send_raw` call `adesk_viewer::write_line`; a local duplicate `write_line` does not exist.

@@ -3,9 +3,9 @@
 ## Intent
 `adesk-viewer` is the ADesk side of the Viewer Attachment Protocol (VAP v1, `docs/viewer.md`) plus the client that consumes it.
 It has three responsibilities and nothing else:
-1. a **server session** (`ViewerServer`) that, over a connected viewer, streams rendered desktop frames + metadata and applies the viewer's input through a device-agnostic `ViewerBackend` trait the runtime implements;
-2. an **async client SDK** (`ViewerClient`) that connects over a Unix or TCP transport, performs the handshake, streams frames and sends human input;
-3. a **headless `adesk-viewer` binary** that connects, captures frames to disk and can drive input from a script.
+1. a **server session** (`ViewerServer`) that, over a connected viewer, streams rendered desktop frames + metadata, applies the viewer's input and starts/stops the runtime's screen recording through a device-agnostic `ViewerBackend` trait the runtime implements;
+2. an **async client SDK** (`ViewerClient`) that connects over a Unix or TCP transport, performs the handshake, streams frames, sends human input and drives recording;
+3. a **headless `adesk-viewer` binary** that connects, captures frames to disk, records the output and can drive input from a script.
 The crate is transport-agnostic (any `AsyncRead + AsyncWrite` stream), never links Smithay and never touches the compositor — `adesk-server` implements `ViewerBackend` and binds the transport.
 
 ## API Surface
@@ -26,16 +26,21 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
   - `async fn apply_input(&self, input: ViewerInput) -> Result<Option<ActionId>>` — apply one viewer action; pointer/key/text input goes through the seat, `ViewerInput::ActivateWindow` changes compositor window state directly. `Some(action_id)` when the runtime recorded an action.
   - `fn change_signal(&self) -> ChangeSignal { ChangeSignal::never() }` — notified when the desktop changes (a commit/damage/window event), so frames are pushed on demand.
   - `async fn set_control(&self, owner: ControlOwner) -> Result<()> { Ok(()) }` — advisory ownership handshake (a no-op by default).
+  - `async fn start_recording(&self, request: RecordRequest) -> Result<RecordingStatus>` — start a recording of the full output at `request.fps`; the runtime owns the encoder and the file and always reports the resolved path/encoder in the returned `RecordingStatus` (so a `path: None` request still learns where the file landed). Default: `Err(ViewerError::backend(ErrorCode::NotSupported, …))` — a runtime that has not implemented recording keeps the trait object usable.
+  - `async fn stop_recording(&self) -> Result<RecordingStatus>` — stop the active recording and return its finished totals (`recording: false`, `frames`/`duration_ms`); default refuses with `NotSupported`, mirroring `start_recording`.
+  - `async fn recording_status(&self) -> Result<RecordingStatus>` — report the current recording without changing it; default returns `Ok(RecordingStatus::idle())` (correct for a runtime that never records).
 - `ViewerInput` — the viewer actions the backend sees (no handshake/protocol traffic): `PointerMove { x, y }`, `PointerButton { button, state, x, y }`, `Scroll { dx, dy, x, y }`, `Key { keys, action }`, `Text { text }`, `ActivateWindow { window_id }`.
   - Positions are **normalized** `0.0..=1.0` output coordinates and optional; the pointer/key/text variants carry no `window_id` — the runtime resolves them to output pixels and targets its active window through its window model.
   - `ActivateWindow` names a window explicitly and is **runtime-native**: the backend changes compositor window state directly (exactly like AGP §5.3 `activate_window`), never synthesized input (`docs/viewer.md` §5).
   - `button` is an `adesk_core::Button`, `keys` an `adesk_proto::KeySpec`, `action` a `KeyAction`, `window_id` an `adesk_core::WindowId`.
+- `RecordRequest` — the recording the viewer asked for: `path: Option<PathBuf>` (the runtime resolves a `None` path and reports it back), `fps: u32`, `encoder: RecordingEncoder`. `new()`/`Default` give `path: None`, `fps: DEFAULT_RECORD_FPS`, `encoder: RecordingEncoder::Auto`; `with_path`/`with_fps`/`with_encoder` builders. Re-exported as `adesk_viewer::RecordRequest`.
 - `ChangeSignal` — cheap-clone "desktop changed" notifier: `new()`, `never()`, `notify()`, `async changed(&self)`.
 
 ### Server session (`src/server.rs`, `src/session.rs`)
 - `ViewerServer<B: ViewerBackend>` — `new(Arc<B>)`, `with_config(ViewerServerConfig)`, `config()`, and `async serve<S: AsyncRead + AsyncWrite + Unpin + Send + 'static>(&self, stream: S, peer: PeerInfo) -> Result<()>` which runs one viewer connection to completion.
 - `ViewerServerConfig` — `handshake_timeout` (default 5 s), `max_frame_len` (default `DEFAULT_MAX_FRAME_LEN`), `default_min_interval_ms` (default `0` = no default pacing), `default_overlays` (default `adesk_viewer_proto::DEFAULT_OVERLAYS`); builders.
 - `PeerInfo` — a display label for logs (`Unix(PathBuf)` / `Tcp(SocketAddr)` / `Other(String)`) + `Display`.
+- The session loop (`src/session.rs`) dispatches every `ClientMessage` in one ordered `select!` loop: `hello` (handshake), `request_frame`, `request_state`, the input variants, `set_control`, `bye`, and the recording controls. Each of `StartRecording { id, path, fps, encoder }` / `StopRecording { id }` / `RequestRecording { id }` builds a `RecordRequest` / calls the corresponding backend method and answers with `ServerMessage::Recording { id, status }`; on a backend failure it answers a VAP `error` that echoes the request `id` and carries the failure's AGP code (so an unavailable encoder arrives as `not_supported`). Recording and input share the one loop, so input ordering is undisturbed.
 
 ### Transport framing (`src/transport.rs`)
 - `DEFAULT_MAX_FRAME_LEN` (32 MiB) — the one shared line cap for server and client.
@@ -47,7 +52,8 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ### Client SDK (`src/client.rs`)
 - `ViewerTarget::{Unix(PathBuf), Tcp(SocketAddr)}` + `Display`.
-- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `target() -> &ViewerTarget`, `socket_path() -> Option<&Path>`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame()`, `request_state()`, `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(KeySpec, KeyAction)`, `text(text)`, `activate_window(WindowId)`, `set_control(owner)`, `input_ack() -> impl Stream<Item = (Option<u64>, ActionId)>`, `async close(self) -> Result<()>`.
+- `ViewerClient` — `connect(ViewerTarget)`, `connect_with(ConnectOptions)`; `hello() -> &ServerHello`, `target() -> &ViewerTarget`, `socket_path() -> Option<&Path>`; `frames() -> impl Stream<Item = Result<ViewerFrame>>`; `request_frame()`, `request_state()`, `pointer_move(x, y)`, `pointer_button(button, state, pos)`, `scroll(dx, dy, pos)`, `key(KeySpec, KeyAction)`, `text(text)`, `activate_window(WindowId)`, `set_control(owner)`, `start_recording(RecordRequest) -> Result<RecordingStatus>`, `stop_recording() -> Result<RecordingStatus>`, `request_recording() -> Result<RecordingStatus>`, `input_ack() -> impl Stream<Item = (Option<u64>, ActionId)>`, `async close(self) -> Result<()>`.
+- Recording is reply-only in v1 (there is no unsolicited `recording` push), so the background dispatcher routes `ServerMessage::Recording { id, status }` into its own `recording_waiters` FIFO — separate from the `state` FIFO — resolving the oldest pending waiter, which means a `recording` message can never be mistaken for a `state` reply. Each `start_recording`/`stop_recording`/`request_recording` stamps a fresh `id` (an `AtomicU64`) and awaits its oneshot or the shared error stream.
 - `ConnectOptions` (`#[non_exhaustive]`): `target`, `max_frame_len`, `connect_timeout`, `handshake_timeout`, `client_name`, `overlays`, `min_interval_ms`, `verify_version` (default `true`); `new` + `with_*` builders.
 - `DEFAULT_CONNECT_TIMEOUT` / `DEFAULT_HANDSHAKE_TIMEOUT` (5 s each), `DEFAULT_MAX_FRAME_LEN` (re-exported from `transport`).
 
@@ -64,12 +70,13 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ### Binary (`src/main.rs`)
 - `adesk-viewer` (clap): transport `--unix <PATH>` (default `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else `<temp_dir>/adesk-viewer.sock`) / `--tcp <HOST:PORT>` (mutually exclusive); `--fps <N>` (→ `min_interval_ms = 1000 / N`, `0` = unpaced); `--overlays <LIST>`; `--log <FILTER>` (env `ADESK_LOG`, default `info`).
-- One mutually exclusive mode ArgGroup: `--capture <FILE>` (one frame then exit) | `--follow --out-dir <DIR> [--max-frames N] [--duration-ms M]` | `--input <FILE>` | `--input-stdin`.
+- One mutually exclusive mode ArgGroup: `--capture <FILE>` (one frame then exit) | `--follow --out-dir <DIR> [--max-frames N] [--duration-ms M]` | `--input <FILE>` | `--input-stdin` | `--record <FILE>`.
+- Recording: `--record <FILE>` starts a runtime recording of the output, then stops it when the shared `--duration-ms <M>` budget elapses or SIGINT (Ctrl-C, via `tokio::signal`) arrives; it logs the returned and final status (frames/duration/path) and exits. `--record-fps <N>` (default `DEFAULT_RECORD_FPS`) and `--record-encoder <auto|software|gpu>` (default `auto`, an unrecognized name is a usage error) are the request parameters.
 - Exit codes: `0` success, `1` runtime/connection failure, `2` usage or configuration error.
 
 ## Constraints
 - `docs/viewer.md` is normative; the crate invents no message or field — it speaks only `adesk-viewer-proto`.
-- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/session.rs` 829, `src/client.rs` 823).
+- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/client.rs` 943, `src/session.rs` 914).
 - Transport-agnostic: the crate never imports a listener (`tokio::net::UnixListener`, `std::os::unix::net::*`) — `adesk-server` owns binding; `ViewerTarget` is the only place socket/TCP addresses appear.
 - No panics on connection/input paths: every failure returns `ViewerError`. Empty `pub mod` stubs are not viable here — `missing_docs` requires at least a `//!` module doc.
 - No pixel payloads in logs; `tracing` at `debug`/`trace` for transport internals only.
@@ -80,14 +87,14 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 | Area | Owner |
 |---|---|
 | Error type + VAP error mapping | `./src/error.rs` |
-| `ViewerBackend`, `ViewerInput`, `ChangeSignal` | `./src/backend.rs` |
+| `ViewerBackend`, `ViewerInput`, `RecordRequest`, `ChangeSignal` | `./src/backend.rs` |
 | NDJSON line framing + `DEFAULT_MAX_FRAME_LEN` | `./src/transport.rs` |
 | Per-connection session state machine (handshake, select loop, pacing, message dispatch) | `./src/session.rs` |
 | `ViewerServer` façade + `ViewerServerConfig`/`PeerInfo` | `./src/server.rs` |
 | `ViewerClient`, `ViewerTarget`, `ConnectOptions` | `./src/client.rs` |
 | Frame → PNG capture helpers | `./src/capture.rs` |
 | Input-script grammar + parser | `./src/script.rs` |
-| CLI wiring, mode ArgGroup, exit codes | `./src/main.rs` |
+| CLI wiring, mode ArgGroup (`--capture`/`--follow`/`--input`/`--record`), exit codes | `./src/main.rs` |
 | `#[cfg(test)]` shared `ViewerBackend` fake for the inline unit tests | `./src/test_support.rs` |
 | Server-session tests over an in-memory duplex stream | `./tests/session.rs` |
 | Client round-trip tests over a real Unix socket | `./tests/client.rs` |
@@ -107,6 +114,8 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 - **Overlays are negotiated, not plumbed into v1 rendering.** `render_frame()` takes no overlay argument, so `overlays` travels through the handshake and is reported, but the backend decides what an overlay set means for a given frame.
 - **Exit-code mapping is fixed** (`0`/`1`/`2`) so the binary is safe to script; unrecognized overlay names and unreadable `--input` files are usage errors, a missing socket is a runtime error.
 - **One shared test fake per layer.** Each layer has a single configurable `FakeBackend` with builder knobs instead of one copy per test module: `src/test_support.rs` (`#[cfg(test)]`) for the inline tests, `tests/common/mod.rs` for the integration tests. A single fake cannot span both layers without exposing a public test-support API, so two is the floor.
+- **Recording is a backend-owned, defaulted seam.** The three recording trait methods all have defaults (`not_supported` for `start`/`stop`, `idle` for `recording_status`), so adding them was non-breaking and `adesk-server`'s `ViewerBackendImpl` keeps compiling until its own recorder step lands. `adesk-viewer` never links `adesk-recorder` or touches an encoder: encoding is the runtime's job and the crate stays transport/session only. Recording replies are reply-only and travel a FIFO separate from `state`, so a `recording` message is never mistaken for a `state` reply.
+- **One backend-error → VAP code mapping.** `ViewerError::backend(code, message)` builds a backend failure and `ViewerError::code_or(fallback)` reads the carried AGP `ErrorCode`; the session uses it for both input and recording failures, so an unknown window stays `unknown_window` and an unavailable encoder arrives as `not_supported`.
 
 ## Performance Notes (frame-streaming hot path)
 Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`), so memcpy/allocation of that string — not CPU — dominates per-frame cost; the sites below are where copies still happen.
@@ -122,12 +131,12 @@ Every streamed frame carries the full base64 pixel payload (`ImagePayload::data`
 
 ## Test Strategy
 No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex stream or a `tempfile` Unix socket.
-- `tests/session.rs` — 12 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant (incl. `activate_window`) forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance.
-- `tests/client.rs` — 11 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream (`frames()` push on a desktop change), every input method incl. `scroll`/`text`/`activate_window`/`set_control`, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
+- `tests/session.rs` — 15 tests on `tokio::io::duplex`: handshake metadata, version mismatch, non-hello/malformed first line, handshake timeout, `request_frame`/`request_state` round trip, change-driven frame push, every input variant (incl. `activate_window`) forwarded in order + `input_ack`, `set_control` echo, `bye` echo, unknown-type tolerance, and `start_recording`/`stop_recording`/`request_recording` round trips (incl. the `not_supported` error path echoing the request `id`).
+- `tests/client.rs` — 13 tests against a real `ViewerServer` on a `tokio::net::UnixListener` inside a `tempfile::TempDir`: connect/handshake, frame stream (`frames()` push on a desktop change), every input method incl. `scroll`/`text`/`activate_window`/`set_control`, the three recording methods, server-initiated `bye`, and `close()` (the clean-close assertions are looped and repeated on a multi-thread runtime so a reintroduced teardown race fails the suite).
 - `tests/script.rs` — 16 tests for the input-script grammar and error line numbers (this suite fully covers the parser; `src/script.rs` has no inline tests).
-- Inline unit tests: 47 in the lib target (backend, transport, capture, session, server, client, error, test_support) and 15 in the bin target (CLI parsing, exit-code mapping, `--fps` mapping, default socket path).
+- Inline unit tests: 51 in the lib target (backend, transport, capture, session, server, client, error, test_support) and 22 in the bin target (CLI parsing incl. `--record`/`--record-fps`/`--record-encoder` and mode exclusivity, exit-code mapping, `--fps` mapping, default socket path).
 - `tests/CONTEXT.md` records the remaining audit notes and coverage gaps in this suite (the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`; no TCP-transport or multi-connection-fan-out test); read it before adding parser/session tests.
-- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **101 passed / 0 failed / 0 ignored** (47 lib + 15 bin + 11 client + 16 script + 12 session; 0 doc-tests).
+- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **117 passed / 0 failed / 0 ignored** (51 lib + 22 bin + 13 client + 16 script + 15 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
 ## Known Issues
@@ -147,3 +156,4 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 ## Status
 Implementation-complete, documented and tested: all modules, the client SDK and the headless binary are landed, and the crate's own test/clippy/fmt/doc gates are green (counts in Test Strategy).
 `adesk-server` consumes the crate end to end: it implements `ViewerBackend`, binds both transports and serves the endpoint by default, and `crates/adesk-server/tests/` drives the typed `ViewerClient`, so the server session, `PeerInfo`, the config builders and the client SDK all have real callers.
+The viewer-side screen-recording surface is landed on top of the `adesk-viewer-proto` recording messages (VAP v1 additive): the `RecordRequest` seam + defaulted `start_recording`/`stop_recording`/`recording_status` trait methods (`src/backend.rs`), the session dispatch of `start_recording`/`stop_recording`/`request_recording` (`src/session.rs`), the `ViewerClient` recording methods with a dedicated reply FIFO (`src/client.rs`), and the headless `--record` mode (`src/main.rs`). The encoder and the file stay the runtime's job — this crate links no recorder and the trait's `not_supported`/`idle` defaults keep `adesk-server`'s `ViewerBackendImpl` compiling until its own recording step lands.

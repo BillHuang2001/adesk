@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
@@ -24,8 +24,8 @@ use adesk_core::{ActionId, Button, ButtonState, ErrorCode, OverlayKind, WindowId
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
     check_version, decode_server, encode_client, ClientMessage, ControlOwner, DesktopState,
-    KeyAction, ServerHello, ServerMessage, ViewerFrame, ViewerHello, DEFAULT_MIN_INTERVAL_MS,
-    DEFAULT_OVERLAYS, PROTOCOL_VERSION,
+    KeyAction, RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello,
+    DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
 };
 use futures::stream::{self, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
@@ -34,6 +34,7 @@ use tokio::sync::{broadcast, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
+use crate::backend::RecordRequest;
 use crate::error::{Result, ViewerError};
 use crate::transport::{read_line, read_line_into, write_line};
 
@@ -289,6 +290,8 @@ impl ViewerClient {
             input_acks: Mutex::new(Some(broadcast::channel(INPUT_ACK_CHANNEL_CAPACITY).0)),
             errors: Mutex::new(Some(broadcast::channel(ERROR_CHANNEL_CAPACITY).0)),
             state_waiters: Mutex::new(VecDeque::new()),
+            recording_waiters: Mutex::new(VecDeque::new()),
+            next_recording_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
         let dispatcher = tokio::spawn(dispatch(Arc::clone(&inner), reader));
@@ -404,6 +407,88 @@ impl ViewerClient {
         }
     }
 
+    /// Starts a screen recording and returns its initial status
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// The runtime owns the encoder and the file: it renders the full output at
+    /// [`RecordRequest::fps`] while the recording runs. The returned status
+    /// reports the resolved path and the encoder actually in use, so a request
+    /// with no path still learns where the recording landed. A waiter is
+    /// registered *before* the request is written, so the reply cannot be missed.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewerError::Closed`] if the connection ends before the status
+    /// arrives, [`ViewerError::Backend`] if the server answers with an `error`
+    /// (`not_supported` for an unavailable encoder, `invalid_request` for a
+    /// conflicting transition), and [`ViewerError::Io`] if the request cannot be
+    /// written.
+    pub async fn start_recording(&self, request: RecordRequest) -> Result<RecordingStatus> {
+        let message = ClientMessage::StartRecording {
+            id: Some(self.inner.next_recording_id()),
+            path: request.path.map(|path| path.to_string_lossy().into_owned()),
+            fps: request.fps,
+            encoder: request.encoder,
+        };
+        self.recording_round_trip(message).await
+    }
+
+    /// Stops the active screen recording and returns the finished file's status
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// The reported status describes the finished recording (`recording` is
+    /// `false`, `frames`/`duration_ms` are its totals).
+    ///
+    /// # Errors
+    ///
+    /// As [`ViewerClient::start_recording`].
+    pub async fn stop_recording(&self) -> Result<RecordingStatus> {
+        let message = ClientMessage::StopRecording {
+            id: Some(self.inner.next_recording_id()),
+        };
+        self.recording_round_trip(message).await
+    }
+
+    /// Requests the current recording status without changing it
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// # Errors
+    ///
+    /// As [`ViewerClient::start_recording`].
+    pub async fn request_recording(&self) -> Result<RecordingStatus> {
+        let message = ClientMessage::RequestRecording {
+            id: Some(self.inner.next_recording_id()),
+        };
+        self.recording_round_trip(message).await
+    }
+
+    /// Sends one recording request and awaits its `recording` reply (or a server
+    /// `error`), resolving the reply through the recording FIFO.
+    ///
+    /// Recording is reply-only, so this mirrors
+    /// [`ViewerClient::request_state`]: a waiter is registered before the request
+    /// is written and the oldest pending waiter is resolved. `recording` and
+    /// `state` replies have their own FIFOs, so one can never resolve the other.
+    async fn recording_round_trip(&self, message: ClientMessage) -> Result<RecordingStatus> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(ViewerError::Closed);
+        }
+        let mut errors = self.subscribe_errors()?;
+        let (sender, mut receiver) = oneshot::channel();
+        lock(&self.inner.recording_waiters).push_back(sender);
+        self.send(message).await?;
+        loop {
+            tokio::select! {
+                status = &mut receiver => return status.map_err(|_| ViewerError::Closed),
+                error = errors.recv() => match error {
+                    Ok((code, message)) => return Err(ViewerError::Backend { code, message }),
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
+                },
+            }
+        }
+    }
+
     /// Moves the pointer to the normalized output position `(x, y)`
     /// (`docs/viewer.md` §4).
     ///
@@ -413,7 +498,6 @@ impl ViewerClient {
     pub async fn pointer_move(&self, x: f64, y: f64) -> Result<()> {
         self.send(ClientMessage::PointerMove { x, y }).await
     }
-
     /// Presses or releases `button`, optionally moving to `pos` first
     /// (`docs/viewer.md` §4).
     ///
@@ -625,6 +709,12 @@ struct Inner {
     errors: Mutex<Option<broadcast::Sender<(ErrorCode, String)>>>,
     /// Pending `request_state` waiters, resolved oldest-first.
     state_waiters: Mutex<VecDeque<oneshot::Sender<DesktopState>>>,
+    /// Pending recording replies, resolved oldest-first. Recording is reply-only
+    /// (there is no unsolicited `recording` push in v1), so it gets its own FIFO
+    /// — a `recording` message can never be mistaken for a `state` reply.
+    recording_waiters: Mutex<VecDeque<oneshot::Sender<RecordingStatus>>>,
+    /// Monotonic client id stamped on each recording request, echoed by the reply.
+    next_recording_id: AtomicU64,
     /// Set once the connection is gone, for a cheap `request_state` early-out.
     closed: AtomicBool,
 }
@@ -638,6 +728,12 @@ impl Inner {
         lock(&self.input_acks).take();
         lock(&self.errors).take();
         lock(&self.state_waiters).clear();
+        lock(&self.recording_waiters).clear();
+    }
+
+    /// The next recording request id (starting at `1`).
+    fn next_recording_id(&self) -> u64 {
+        self.next_recording_id.fetch_add(1, Ordering::SeqCst)
     }
 }
 
@@ -726,6 +822,13 @@ async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Tran
                     let _ = waiter.send(state);
                 } else {
                     tracing::trace!("ignoring an unsolicited desktop state message");
+                }
+            }
+            ServerMessage::Recording { id, status } => {
+                if let Some(waiter) = lock(&inner.recording_waiters).pop_front() {
+                    let _ = waiter.send(status);
+                } else {
+                    tracing::trace!(?id, "ignoring an unsolicited recording status message");
                 }
             }
             ServerMessage::Error { code, message, .. } => {

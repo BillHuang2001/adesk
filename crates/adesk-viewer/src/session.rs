@@ -15,6 +15,7 @@
 //! No pixel payload or message body is ever logged; only message types and
 //! counts at `debug`/`trace`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -25,7 +26,7 @@ use adesk_viewer_proto::{
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 use tokio::time::Instant;
 
-use crate::backend::{ViewerBackend, ViewerInput};
+use crate::backend::{RecordRequest, ViewerBackend, ViewerInput};
 use crate::error::{Result, ViewerError};
 use crate::server::{PeerInfo, ViewerServerConfig};
 use crate::transport::{read_line, read_line_into, write_line};
@@ -331,6 +332,34 @@ where
             }
             Ok(Disposition::Continue)
         }
+        // Recording control (§4, §5). Recording is orthogonal to input: it never
+        // touches the seat and never reorders input messages, and each reply
+        // echoes the request id like `input_ack`/`error`.
+        ClientMessage::StartRecording {
+            id,
+            path,
+            fps,
+            encoder,
+        } => {
+            let request = RecordRequest {
+                path: path.map(PathBuf::from),
+                fps,
+                encoder,
+            };
+            let result = backend.start_recording(request).await;
+            answer_recording(write, id, result).await?;
+            Ok(Disposition::Continue)
+        }
+        ClientMessage::StopRecording { id } => {
+            let result = backend.stop_recording().await;
+            answer_recording(write, id, result).await?;
+            Ok(Disposition::Continue)
+        }
+        ClientMessage::RequestRecording { id } => {
+            let result = backend.recording_status().await;
+            answer_recording(write, id, result).await?;
+            Ok(Disposition::Continue)
+        }
         // The viewer is leaving: acknowledge with `bye` and close (§4).
         ClientMessage::Bye { reason } => {
             let reason = reason.unwrap_or_else(|| "viewer left".to_owned());
@@ -395,14 +424,44 @@ where
         // (§6). The backend classifies the failure, so its AGP code travels to the
         // viewer unchanged.
         Err(error) => {
-            let code = match &error {
-                ViewerError::Backend { code, .. } => *code,
-                _ => ErrorCode::InvalidRequest,
-            };
-            send_error(write, code, error.to_string()).await?;
+            send_error(
+                write,
+                error.code_or(ErrorCode::InvalidRequest),
+                error.to_string(),
+            )
+            .await?;
         }
     }
     Ok(Disposition::Continue)
+}
+
+/// Answers a recording control message with the backend's status, exporting a
+/// backend failure as a VAP `error` that echoes the request id
+/// (`docs/viewer.md` §4, §6).
+///
+/// The status is sent as `recording`; the failure keeps its AGP code
+/// (`not_supported` for an unavailable encoder, `invalid_request` for a
+/// conflicting transition), so the viewer can distinguish them.
+async fn answer_recording<W>(
+    write: &mut W,
+    id: Option<u64>,
+    result: Result<adesk_viewer_proto::RecordingStatus>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match result {
+        Ok(status) => send(write, &ServerMessage::Recording { id, status }).await,
+        Err(error) => {
+            send_error_id(
+                write,
+                error.code_or(ErrorCode::Internal),
+                error.to_string(),
+                id,
+            )
+            .await
+        }
+    }
 }
 
 /// Renders one frame and pushes it, reporting a backend failure as `error`
@@ -430,10 +489,21 @@ async fn send_error<W: AsyncWrite + Unpin>(
     code: ErrorCode,
     message: impl Into<String>,
 ) -> Result<()> {
+    send_error_id(write, code, message, None).await
+}
+
+/// Writes a VAP `error` message echoing the request's client `id`
+/// (`docs/viewer.md` §6).
+async fn send_error_id<W: AsyncWrite + Unpin>(
+    write: &mut W,
+    code: ErrorCode,
+    message: impl Into<String>,
+    id: Option<u64>,
+) -> Result<()> {
     let message = ServerMessage::Error {
         code,
         message: message.into(),
-        id: None,
+        id,
     };
     send(write, &message).await
 }

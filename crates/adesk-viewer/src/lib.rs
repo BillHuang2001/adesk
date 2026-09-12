@@ -27,7 +27,7 @@ mod session;
 mod test_support;
 mod transport;
 
-pub use backend::{ChangeSignal, ViewerBackend, ViewerInput};
+pub use backend::{ChangeSignal, RecordRequest, ViewerBackend, ViewerInput};
 pub use capture::{save_frame_png, write_rgba8, FrameWriter};
 pub use client::{
     ConnectOptions, ViewerClient, ViewerTarget, DEFAULT_CONNECT_TIMEOUT, DEFAULT_HANDSHAKE_TIMEOUT,

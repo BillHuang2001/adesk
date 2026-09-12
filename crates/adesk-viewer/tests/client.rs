@@ -17,16 +17,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adesk_core::{
-    ActionId, AppId, Button, ButtonState, Rect, Size, WindowId, WindowInfo, WindowState,
+    ActionId, AppId, Button, ButtonState, ErrorCode, Rect, Size, WindowId, WindowInfo, WindowState,
 };
 use adesk_proto::{KeySpec, RendererKind};
 use adesk_viewer::Result as ViewerResult;
 use adesk_viewer::{
-    ConnectOptions, PeerInfo, ViewerClient, ViewerError, ViewerInput, ViewerServer, ViewerTarget,
+    ConnectOptions, PeerInfo, RecordRequest, ViewerClient, ViewerError, ViewerInput, ViewerServer,
+    ViewerTarget,
 };
 use adesk_viewer_proto::{
-    encode_server, ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ServerMessage,
-    PROTOCOL_VERSION,
+    encode_server, ControlOwner, CursorState, DesktopState, KeyAction, RecordingEncoder,
+    RecordingStatus, ServerHello, ServerMessage, PROTOCOL_VERSION,
 };
 use futures::pin_mut;
 use futures::StreamExt;
@@ -92,6 +93,15 @@ struct Harness {
     serve: JoinHandle<ViewerResult<()>>,
 }
 
+/// The recording status the client suite's fake reports: a finished 12-frame,
+/// 400 ms recording at a fixed path and encoder.
+fn recording_status() -> RecordingStatus {
+    RecordingStatus::idle()
+        .with_path("/tmp/adesk-rec-7.mkv".to_owned())
+        .with_encoder("software".to_owned())
+        .with_counts(12, 400)
+}
+
 /// Binds a Unix socket in a fresh temp dir and spawns an accept-and-serve task.
 fn start_server() -> Harness {
     let dir = tempfile::tempdir().expect("a temp dir");
@@ -104,7 +114,8 @@ fn start_server() -> Harness {
             .with_display(server_hello())
             .with_desktop(desktop_state())
             .with_action(ACTION)
-            .with_ts_ms(None),
+            .with_ts_ms(None)
+            .with_recording_status(recording_status()),
     );
     let server_backend = Arc::clone(&backend);
     let peer_path = path.clone();
@@ -301,6 +312,60 @@ async fn frames_stream_pushes_a_frame_on_a_desktop_change() {
 
     assert!(frame.seq >= 1, "seq must be plausible, got {}", frame.seq);
     assert_eq!(frame.image.width, 1);
+}
+
+/// §4/§5: the recording SDK round-trips start/request/stop against the runtime,
+/// and the request reaches the backend verbatim.
+#[tokio::test]
+async fn recording_methods_round_trip() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    let request = RecordRequest::new()
+        .with_path("out.mkv")
+        .with_fps(15)
+        .with_encoder(RecordingEncoder::Gpu);
+    let started = tokio::time::timeout(STEP_TIMEOUT, client.start_recording(request.clone()))
+        .await
+        .expect("start_recording must not hang")
+        .expect("start_recording must succeed");
+    assert!(started.recording);
+    assert_eq!(started.path.as_deref(), Some("/tmp/adesk-rec-7.mkv"));
+
+    let current = tokio::time::timeout(STEP_TIMEOUT, client.request_recording())
+        .await
+        .expect("request_recording must not hang")
+        .expect("request_recording must succeed");
+    assert!(!current.recording);
+    assert_eq!(current.encoder.as_deref(), Some("software"));
+
+    let stopped = tokio::time::timeout(STEP_TIMEOUT, client.stop_recording())
+        .await
+        .expect("stop_recording must not hang")
+        .expect("stop_recording must succeed");
+    assert!(!stopped.recording);
+    assert_eq!(stopped.frames, 12);
+    assert_eq!(stopped.duration_ms, 400);
+
+    assert_eq!(harness.backend.recorded_recording(), vec![request]);
+}
+
+/// §5/§6: a recording request the backend refuses surfaces as
+/// [`ViewerError::Backend`] carrying the AGP `not_supported` code.
+#[tokio::test]
+async fn start_recording_error_maps_to_a_backend_error() {
+    let harness = start_server();
+    harness.backend.set_fail_recording(true);
+    let client = connect(&harness).await;
+
+    let error = tokio::time::timeout(STEP_TIMEOUT, client.start_recording(RecordRequest::new()))
+        .await
+        .expect("start_recording must not hang")
+        .expect_err("an unavailable recorder must fail");
+    match error {
+        ViewerError::Backend { code, .. } => assert_eq!(code, ErrorCode::NotSupported),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
 }
 
 /// A clean `ViewerClient::close` must deterministically make `serve()` return
