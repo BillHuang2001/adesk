@@ -12,7 +12,7 @@ No I/O, no async, no Smithay, no tokio; dependencies are `serde` and `thiserror`
 Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the modules are `pub` as well.
 
 ### ids (`src/ids.rs`)
-- `WindowId(pub u64)`, `ActionId(pub u64)`, `LaunchId(pub u64)`: `Copy`, `Display`, `From<u64>`/`Into<u64>`, `#[serde(transparent)]`.
+- `WindowId(pub u64)`, `ActionId(pub u64)`, `LaunchId(pub u64)`, `NotificationId(pub u64)`: `Copy`, `Display`, `From<u64>`/`Into<u64>`, `#[serde(transparent)]`.
 - `AppId(pub String)`: `Clone` (not `Copy` — it owns a string), `Display`, `From<String>`, `From<&str>`, `Into<String>`, `AsRef<str>`, `as_str()`, `#[serde(transparent)]`.
 - All ids: `Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize`.
 
@@ -43,13 +43,20 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `ImageBuffer` is deliberately NOT `Serialize`/`Deserialize` (not wire-facing).
 
 ### event (`src/event.rs`)
-- `EventKind` (9 variants, snake_case serde).
-- `RuntimeEvent` (9 struct variants, every one carrying `seq` + `ts_ms`) + `seq()`, `ts_ms()`, `window_id()`, `kind()`.
+- `EventKind` (12 variants, snake_case serde): the nine window/app kinds plus `Notification`, `NotificationClosed`, `NotificationAction`.
+- `RuntimeEvent` (12 struct variants, every one carrying `seq` + `ts_ms`) + `seq()`, `ts_ms()`, `window_id()`, `kind()`.
 - `Observation` (15 fields per core-api).
 - `RuntimeEvent` serde: internally tagged `{"type":"window_created",...}`; the external AGP event frame is `adesk-proto`'s shape.
 
+### notification (`src/notification.rs`)
+- `NotificationUrgency { Low, Normal, Critical }` — snake_case serde, derived `Default = Normal`, `Copy`.
+- `NotificationAction { key: String, label: String }` — plain serde (field names are the wire names).
+- `NotificationCloseReason { Dismissed, Action, Expired, Closed }` — snake_case serde, derived `Default = Dismissed`, `Copy`.
+- `Notification { id, source, title, body, urgency, category, actions, hints, posted_seq, posted_ts_ms, dismissed, closed_seq, close_reason, timeout_ms }` — `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`; `hints` is a `std::collections::BTreeMap<String, String>`.
+- Matches `docs/protocol.md` §4/§5.9; the store/inbox that owns notification lifecycle lives in `adesk-notify`, not here.
+
 ### error (`src/error.rs`)
-- `ErrorCode` (13 variants) + `as_str() -> &'static str` (AGP wire names) + `Display`; snake_case serde.
+- `ErrorCode` (14 variants) + `as_str() -> &'static str` (AGP wire names) + `Display`; snake_case serde. Includes `UnknownNotification` (`"unknown_notification"`, AGP §6).
 - `Error { code, message }` + `new`, `invalid_request`, `unknown_window`, `unknown_app`, `internal`, `not_supported`, `timeout`; implements `thiserror::Error`, `Display` renders `"<code>: <message>"`.
 - `pub type Result<T> = std::result::Result<T, Error>`.
 
@@ -74,6 +81,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 | `AppInfo` | `./src/app.rs` |
 | `PixelFormat`, `ImageBuffer` | `./src/image.rs` |
 | `EventKind`, `RuntimeEvent`, `Observation` | `./src/event.rs` |
+| `Notification`, `NotificationUrgency`, `NotificationAction`, `NotificationCloseReason` | `./src/notification.rs` |
 | `ErrorCode`, `Error`, `Result` | `./src/error.rs` |
 | Wire-format / serde contract tests | `./tests/serde_wire.rs` |
 
@@ -88,30 +96,35 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `Position::resolve` maps normalized values with `round(n * (dim - 1))` so `0.0`/`1.0` are the first/last pixel, clamps pixels into the window, maps `NaN` to `0.0` (infinities saturate), and resolves empty windows to their origin.
 - `ImageBuffer::new_rgba` is infallible and fills opaque black (alpha 255); `from_rgba` accepts only tightly packed data (`stride == width * 4`) and rejects length mismatch or stride > `u32::MAX` with `InvalidRequest`.
 - `ImageBuffer` data is row-major top-down, RGBA8 with straight (non-premultiplied) alpha; `stride` is a **public field**, not an accessor, and is only guaranteed `>= width * 4` (rows may be padded), so readers must not assume `stride == width * 4`.
-- `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says all four ids are `Copy`, which is impossible for a `String` payload — the three numeric ids are `Copy`.
+- `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says the ids are `Copy`, which is impossible for a `String` payload — the four numeric ids are `Copy`.
 - `Observation` lives in `event.rs` (the task's module layout has no observation module); it is the temporal summary of the event vocabulary.
 - `Observation.quiet` is an evidence flag, not proof the condition was met: it reports whether the wait's scope had been quiet for the applicable threshold at resolution time — the condition's `quiet_ms` for a quiet wait, otherwise `adesk-observer`'s `DEFAULT_QUIET_MS` constant (250 ms) — so a timed-out `change` wait can legitimately carry `quiet: true`.
 - `Observation.timed_out` reports that the wait expired before its condition was met, except `Condition::Timeout`, which reaches its horizon by design and therefore reports `false`; both flags are plain always-serialized `bool`s whose semantics belong to `adesk-observer` (core carries no wait logic).
-- `RuntimeEvent`'s `seq`/`ts_ms`/`kind` accessors are generated by the private `runtime_event_accessors!` macro from a single list of the nine variants (each variant named once, so adding one stays a one-line edit); `window_id` is hand-written because `FocusChanged` yields its `Option<WindowId>` unchanged and `AppLaunched` yields `None`.
+- `RuntimeEvent`'s `seq`/`ts_ms`/`kind` accessors are generated by the private `runtime_event_accessors!` macro from a single list of the twelve variants (each variant named once, so adding one stays a one-line edit); `window_id` is hand-written because `FocusChanged` yields its `Option<WindowId>` unchanged while `AppLaunched` and the three notification variants yield `None`.
 - `Button`/`WindowState` derive `Default` via `#[default]` (`Left`/`Inactive`) so protocol defaults (`button = "left"`) are expressible with `#[serde(default)]` downstream.
 - `Error` uses `thiserror` for `Display`/`std::error::Error` and serde for the AGP error object shape (`{"code","message"}`).
+- `NotificationId` reuses the `numeric_id!` macro, so it is transparent over `u64` like the other numeric ids; notification ids are monotonic and never reused but live in an id domain independent of the event `seq` (`docs/protocol.md` §5.9).
+- `Notification.hints` is an ordered `BTreeMap<String, String>` (an opaque pass-through object on the wire) rather than `serde_json::Value`, so `adesk-core` keeps its `serde`+`thiserror`-only dependency set and its serialization stays deterministic.
+- `Notification`, `NotificationAction`, `NotificationUrgency` and `NotificationCloseReason` carry the §5.9 wire shapes verbatim; `Notification` is a `RuntimeEvent::Notification` payload, so it must stay in core rather than in `adesk-notify`.
+- The three notification `EventKind`s and `RuntimeEvent` variants are window-less: `window_id()` returns `None` for them exactly like `AppLaunched`.
+- `ErrorCode::UnknownNotification` (`"unknown_notification"`) is the AGP §6 code a §5.9 handler returns for an unknown `notification_id`.
 
 ## Test Strategy
 
-- Inline `#[cfg(test)]` unit tests per module (71 tests): rect edge/intersect/union cases, region coalesce/clip/bounds/simplified, `Position::resolve` clamping incl. NaN, infinities, empty and 1x1 windows, `from_rgba` validation and `pixel` bounds, `ErrorCode::as_str`, `RuntimeEvent` accessors for every variant.
-- `./tests/serde_wire.rs` (11 tests) pins exact AGP JSON for `Position`, `Rect`, `Region`, `WindowInfo`, `AppInfo`, `Observation`, `RuntimeEvent` variants, `Error`, ids, and the enum wire names the inline modules do not assert (`Button::Middle`/`Side`, all eight `OverlayKind` names).
+- Inline `#[cfg(test)]` unit tests per module (76 tests): rect edge/intersect/union cases, region coalesce/clip/bounds/simplified, `Position::resolve` clamping incl. NaN, infinities, empty and 1x1 windows, `from_rgba` validation and `pixel` bounds, `ErrorCode::as_str`, `RuntimeEvent` accessors for every variant, and the notification defaults/urgency/close-reason wire names and round-trip.
+- `./tests/serde_wire.rs` (14 tests) pins exact AGP JSON for `Position`, `Rect`, `Region`, `WindowInfo`, `AppInfo`, `Observation`, `Notification`, `RuntimeEvent` variants (incl. the three notification variants), `Error`, ids, and the enum wire names the inline modules do not assert (`Button::Middle`/`Side`, all eight `OverlayKind` names).
 - The inline module tests are the authoritative spec; the integration file keeps only assertions not already covered inline, so the redundant `ErrorCode` / `Error` / `EventKind` / `WindowState` / `ButtonState` / `KeyState` / `PixelFormat` copies are gone.
 - Fixture duplication: `tests/serde_wire.rs::sample_window_info` is field-for-field identical to `src/window.rs::tests::info()`; `sample_app_info` mirrors `src/app.rs::tests::info()` except `categories`/`try_exec`.
 - The `rect(x,y,w,h)` helper in `src/geometry.rs::tests` duplicates the public `Rect::new` const constructor (same signature).
 - One doctest in `lib.rs` documents `Position::resolve`.
-- Total: 83 tests (71 inline + 11 integration + 1 doctest). Run with `bash scripts/dev.sh cargo test -p adesk-core` (the wrapper script is not executable in worktrees — invoke it through `bash`; bare `cargo` cannot link outside the dev shell).
+- Total: 91 tests (76 inline + 14 integration + 1 doctest). Run with `bash scripts/dev.sh cargo test -p adesk-core` (the wrapper script is not executable in worktrees — invoke it through `bash`; bare `cargo` cannot link outside the dev shell).
 - No test needs a display, GPU, network or installed application.
 
 ## Notes for Agents
 
 - The workspace `members = ["crates/*"]` glob fails to load while any `crates/*` directory lacks a `Cargo.toml`; until every sibling crate has a manifest, validate this crate standalone (copy `src/` + `tests/` to a temp dir with inline dependency versions and run `nix develop <repo> -c cargo test --manifest-path <tmp>/Cargo.toml`).
 - `docs/core-api.md` is binding: do not rename fields or variants or change wire names without root coordination.
-- `docs/protocol.md` §5.6 defines an `EventKind` with 11 values (`surface_damage`, `quiet` extra); `adesk_core::EventKind` has the 9 core-api values — `adesk-proto` must define its own subscription-filter enum.
+- `docs/protocol.md` §5.6 defines an `EventKind` filter set with 11 values (`surface_damage`, `quiet` extra) and §5.9 adds the three notification kinds; `adesk_core::EventKind` has the 12 core-api values — `adesk-proto` must define its own subscription-filter enum.
 - `docs/protocol.md` §4 `AppInfo` example omits `no_display`/`try_exec`; `adesk_core::AppInfo` includes and serializes them (additive, allowed by §7).
 - `Observation` carries no `image` field; `adesk-proto` attaches it (`ObserveResult { observation, image }`).
 - `Observation`, `WindowInfo` and `AppInfo` carry no serde container attributes at all (field names are already the wire names); `Option` fields serialize as JSON `null` (no `skip_serializing_if`), so an e2e test must expect explicit nulls for `window_id`, `after_action`, `focus_changed`, `app_id`, `title`, `pid`.
