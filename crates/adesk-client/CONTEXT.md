@@ -33,6 +33,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - §5.5 `pointer_move(WindowId, Position)`; `click(ClickRequest)`; `double_click(PointerButtonRequest)`; `mouse_down`/`mouse_up(PointerButtonRequest)`; `scroll(ScrollRequest)`; `drag(DragRequest)`; `keypress(impl Into<KeyChord>, Option<WindowId>)`; `key_down`/`key_up(&str, Option<WindowId>)`; `type_text(&str, Option<WindowId>) -> TypeTextResult{action_id, skipped}`. All return `ActionId` except `type_text`.
 - §5.6 `subscribe_events(EventFilter) -> EventStream`; `subscribe_frames(EventFilter) -> AgpEventStream` (client extension: all frames, forward-compatible); `unsubscribe_events(u64) -> ()`.
 - §5.7 `inspect_capture(InspectCaptureRequest) -> ImagePayload`; `inspect_subscribe(InspectSubscribeRequest) -> InspectStream`.
+- §5.9 `post_notification(PostNotificationRequest) -> PostNotificationResult{notification_id, seq}`; `list_notifications(include_dismissed: bool) -> Vec<Notification>`; `close_notification(NotificationId, NotificationCloseReason) -> CloseNotificationResult{notification_id, seq}`; `invoke_notification_action(NotificationId, impl Into<String>) -> InvokeNotificationActionResult{notification_id, action_key, seq}`.
+- §5.10 `wait_for_events(WaitForEventsRequest) -> WaitForEventsResult{events: Vec<AgpEvent>, timed_out, elapsed_ms, seq}`.
 
 ### Request types
 - `CaptureRequest::window(id)` + `.region/.max_dimension/.format`; `CaptureRegionRequest::new(id, rect)` (region mandatory).
