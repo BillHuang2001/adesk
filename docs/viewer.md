@@ -62,6 +62,7 @@ The first message from each side of a connection is a `hello`.
 | `state` | `active_window_id`, `windows`, `focus` | Desktop metadata (window list, focus) |
 | `control` | `owner` | Who owns input: `"ai"` or `"human"` |
 | `input_ack` | `id`, `action_id` | The input message with client id `id` was applied (its AGP `action_id`) |
+| `recording` | `id?`, `recording`, `path?`, `encoder?`, `fps`, `frames`, `duration_ms`, `error?` | Recording status / reply to a recording request (active flag, output path, backend label, frame count, elapsed ms) |
 | `error` | `code`, `message`, `id?` | A message could not be applied |
 | `bye` | `reason` | The server is ending the connection |
 
@@ -91,6 +92,9 @@ The first message from each side of a connection is a `hello`.
 | `key` | `keys`, `state` | Press/release/tap a key or chord |
 | `text` | `text` | Type UTF-8 text |
 | `set_control` | `owner` | Announce who owns input (`"human"`/`"ai"`) |
+| `start_recording` | `id?`, `path?`, `fps?`, `encoder?` | Start capturing the output to a file (`encoder` is `"auto"`/`"software"`/`"gpu"`) |
+| `stop_recording` | `id?` | Stop the active recording |
+| `request_recording` | `id?` | Push the current `recording` status |
 | `bye` | `reason?` | Viewer is leaving |
 
 - Coordinates are **normalized** `0.0..=1.0` of the virtual output, not pixels:
@@ -103,6 +107,15 @@ The first message from each side of a connection is a `hello`.
 - `window_id` is an AGP `WindowId` (`docs/protocol.md` §3): the target of
   `activate_window`.
 - `id`, when present, is echoed in the matching `input_ack`/`error`.
+
+```jsonc
+// viewer -> server
+{"type": "start_recording", "id": 7, "fps": 30, "encoder": "auto"}
+
+// server -> viewer
+{"type": "recording", "id": 7, "recording": true, "path": "adesk-rec-7.mkv",
+ "encoder": "software", "fps": 30, "frames": 0, "duration_ms": 0, "error": null}
+```
 
 ## 5. Semantics
 
@@ -134,6 +147,34 @@ The first message from each side of a connection is a `hello`.
   receives.
 - **State is best-effort metadata.** `state` is pushed at handshake and whenever
   the window set or focus changes; it is advisory, mirroring `list_windows`.
+- **Recording captures the output on demand.** While a recording is active the
+  runtime renders the full output at `fps` frames/s and writes it to a file **on
+  the runtime side**; frames are rendered only while recording is active, so the
+  on-demand-rendering invariant above still holds (the same full-output render
+  path the inspector uses). `start_recording` starts one, `stop_recording`
+  finishes it, and `request_recording` asks for the current status without
+  changing it.
+- **`encoder` selects the backend.** `"auto"` (the default) prefers a
+  GPU-accelerated H.264 backend (an external `ffmpeg` using a hardware encoder)
+  and falls back to the built-in software Motion-JPEG/AVI backend when no GPU
+  encoder is available; `"software"` forces the built-in backend; `"gpu"`
+  requires a hardware encoder.
+- **The runtime owns the file.** `path` is optional; when omitted the server
+  generates one under its recordings directory, and the resolved path is always
+  reported back in `recording.path`.
+- **Recording is orthogonal to input and control.** It does not touch the seat
+  and does not change who may drive the desktop (the advisory `control`
+  ownership is unaffected).
+- **Conflicting transitions and unavailable encoders answer `error`.**
+  `start_recording` while a recording is already active, and `stop_recording`
+  with none active, both answer `error` with code `invalid_request`; a requested
+  encoder that is unavailable (e.g. `"gpu"` with no hardware encoder) answers
+  `error` with code `not_supported`. Replies echo the client `id` when present
+  (like `input_ack`/`error`).
+- **`recording` describes the active or last recording.** While
+  `recording.recording` is true, `path`/`encoder`/`fps`/`frames`/`duration_ms`
+  describe the active recording; after `stop_recording` the same fields describe
+  the finished file with `recording` false.
 - **Ordering.** Messages from one viewer are applied in submission order, like a
   single AGP connection's §5.5 input.
 
@@ -152,6 +193,9 @@ connection.
 
 - `protocol_version` is bumped for breaking changes; additive messages and fields
   are not breaking. A viewer MUST ignore unknown message types.
+- The recording messages (`start_recording`, `stop_recording`,
+  `request_recording`, `recording`) are additive and do not change
+  `protocol_version`.
 
 ## 8. Crate / module contract
 

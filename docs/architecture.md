@@ -140,6 +140,9 @@ enum RuntimeCommand {
   back to pixman with a warning. The chosen renderer is reported by `ping`.
 - Rendering is **on demand only**: `RenderWindow`/`RenderOutput` commands. There is no
   frame loop, no continuous composition, no periodic readback.
+- Screen recording reuses that same on-demand full-output render (`RenderOutput`): while
+  a recording is active the runtime composes the output at the requested `fps` and encodes
+  each frame, so an idle runtime renders nothing for it (`docs/viewer.md` §5).
 - `RenderWindow`: renders the window's surface tree (toplevel + subsurfaces + popups
   in z-order) into an offscreen target sized to the window's geometry, then optional
   `region` crop, optional `max_dimension` downscale (box filter), then readback to
