@@ -13,6 +13,8 @@ use adesk_observer::{
     StateSnapshot as ObserverSnapshot, WindowSnapshot,
 };
 use adesk_proto::{Condition as ProtoCondition, ImagePayload, ObserveResult};
+use adesk_recorder::EncoderKind;
+use adesk_viewer_proto::RecordingEncoder;
 
 /// `adesk_compositor::StateSnapshot` → `adesk_observer::StateSnapshot`.
 ///
@@ -97,6 +99,36 @@ pub fn proto_renderer(name: RendererName) -> adesk_proto::RendererKind {
     match name {
         RendererName::Gl => adesk_proto::RendererKind::Gl,
         RendererName::Pixman => adesk_proto::RendererKind::Pixman,
+    }
+}
+
+/// `adesk_viewer_proto::RecordingEncoder` → `adesk_recorder::EncoderKind`.
+///
+/// Both enums name the same three choices (`Auto`/`Software`/`Gpu`); this
+/// mapping exists only because neither crate depends on the other. The recording
+/// backend pairs it with [`adesk_recorder::detect`] so the resolved backend — and
+/// therefore the file extension [`adesk_recorder::suggest_extension`] reports —
+/// matches the encoder actually used.
+pub fn recorder_encoder(encoder: RecordingEncoder) -> EncoderKind {
+    match encoder {
+        RecordingEncoder::Auto => EncoderKind::Auto,
+        RecordingEncoder::Software => EncoderKind::Software,
+        RecordingEncoder::Gpu => EncoderKind::Gpu,
+    }
+}
+
+/// `adesk_recorder::EncoderKind` → `adesk_viewer_proto::RecordingEncoder`.
+///
+/// The exact inverse of [`recorder_encoder`], kept beside it so the pairing is
+/// total in both directions and one round-trip test covers the pair. The
+/// recording status reports the *resolved backend's label* (`Recorder::encoder_name`)
+/// rather than a re-derived enum, so this direction has no production caller
+/// today.
+pub fn proto_encoder(kind: EncoderKind) -> RecordingEncoder {
+    match kind {
+        EncoderKind::Auto => RecordingEncoder::Auto,
+        EncoderKind::Software => RecordingEncoder::Software,
+        EncoderKind::Gpu => RecordingEncoder::Gpu,
     }
 }
 
@@ -409,5 +441,34 @@ mod tests {
             json["observation"]["image"].is_null(),
             "image is present as null when absent: {json}"
         );
+    }
+
+    // ---------------------------------------------------------- recording encoder
+
+    #[test]
+    fn recorder_encoder_maps_every_variant() {
+        assert_eq!(recorder_encoder(RecordingEncoder::Auto), EncoderKind::Auto);
+        assert_eq!(
+            recorder_encoder(RecordingEncoder::Software),
+            EncoderKind::Software
+        );
+        assert_eq!(recorder_encoder(RecordingEncoder::Gpu), EncoderKind::Gpu);
+    }
+
+    #[test]
+    fn proto_encoder_maps_every_variant() {
+        assert_eq!(proto_encoder(EncoderKind::Auto), RecordingEncoder::Auto);
+        assert_eq!(
+            proto_encoder(EncoderKind::Software),
+            RecordingEncoder::Software
+        );
+        assert_eq!(proto_encoder(EncoderKind::Gpu), RecordingEncoder::Gpu);
+    }
+
+    #[test]
+    fn recording_encoder_mapping_round_trips() {
+        for kind in [EncoderKind::Auto, EncoderKind::Software, EncoderKind::Gpu] {
+            assert_eq!(recorder_encoder(proto_encoder(kind)), kind);
+        }
     }
 }

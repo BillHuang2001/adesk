@@ -153,6 +153,7 @@ dependencies = [
  "adesk-inspector",
  "adesk-observer",
  "adesk-proto",
+ "adesk-recorder",
  "adesk-render",
  "adesk-testkit",
  "adesk-viewer",

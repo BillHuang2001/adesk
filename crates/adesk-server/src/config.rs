@@ -39,6 +39,9 @@ pub struct ViewerConfig {
     pub socket_path: Option<PathBuf>,
     /// Optional TCP listener address (`None` = Unix socket only).
     pub tcp: Option<SocketAddr>,
+    /// Directory a recording without an explicit path is written to; `None`
+    /// derives [`ServerConfig::recordings_dir`].
+    pub recordings_dir: Option<PathBuf>,
 }
 
 impl Default for ViewerConfig {
@@ -47,6 +50,7 @@ impl Default for ViewerConfig {
             enabled: true,
             socket_path: None,
             tcp: None,
+            recordings_dir: None,
         }
     }
 }
@@ -125,6 +129,12 @@ impl ServerConfig {
         self
     }
 
+    /// Sets the directory a recording without an explicit path is written to.
+    pub fn with_recordings_dir(mut self, dir: impl Into<PathBuf>) -> ServerConfig {
+        self.viewer.recordings_dir = Some(dir.into());
+        self
+    }
+
     /// Disables the viewer endpoint entirely.
     pub fn without_viewer(mut self) -> ServerConfig {
         self.viewer.enabled = false;
@@ -147,6 +157,22 @@ impl ServerConfig {
             Some(path) => path.clone(),
             None => viewer_socket_sibling(&self.socket_path),
         })
+    }
+
+    /// The directory a recording started without an explicit path is written to:
+    /// the viewer's explicit [`ViewerConfig::recordings_dir`] if set, else
+    /// `adesk-recordings` inside the AGP socket's directory.
+    ///
+    /// The directory is created on demand by the viewer recording backend, not
+    /// here (a plain accessor never has a filesystem side effect).
+    pub fn recordings_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.viewer.recordings_dir {
+            return dir.clone();
+        }
+        match self.socket_path.parent() {
+            Some(parent) if !parent.as_os_str().is_empty() => parent.join("adesk-recordings"),
+            _ => PathBuf::from("adesk-recordings"),
+        }
     }
 }
 
@@ -459,5 +485,35 @@ mod tests {
 
         let disabled = config.without_viewer();
         assert_eq!(disabled.viewer_socket_path(), None);
+    }
+
+    #[test]
+    fn recordings_dir_defaults_beside_the_agp_socket() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default());
+        assert!(
+            config.viewer.recordings_dir.is_none(),
+            "the baseline derives the directory, it does not pin one"
+        );
+        assert_eq!(
+            config.recordings_dir(),
+            PathBuf::from("/tmp/adesk-recordings")
+        );
+    }
+
+    #[test]
+    fn recordings_dir_prefers_an_explicit_override() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_recordings_dir("/var/lib/adesk/rec");
+        assert_eq!(
+            config.viewer.recordings_dir,
+            Some(PathBuf::from("/var/lib/adesk/rec"))
+        );
+        assert_eq!(config.recordings_dir(), PathBuf::from("/var/lib/adesk/rec"));
+    }
+
+    #[test]
+    fn recordings_dir_falls_back_when_the_socket_has_no_directory() {
+        let config = ServerConfig::new("adesk.sock", CompositorConfig::default());
+        assert_eq!(config.recordings_dir(), PathBuf::from("adesk-recordings"));
     }
 }

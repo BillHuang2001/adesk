@@ -14,6 +14,9 @@
 //! | [`without_viewer_keeps_the_agp_endpoint_and_binds_no_viewer_socket`] | `without_viewer()`: `viewer_socket_path()` is `None`, no viewer socket file exists beside the AGP socket, AGP still serves and the runtime shuts down cleanly |
 //! | [`shutdown_removes_the_viewer_socket_and_a_new_runtime_can_rebind_the_path`] | teardown removes the viewer *and* AGP socket files, and a fresh runtime binds the very same viewer path (`with_viewer_socket`) |
 //! | [`input_without_a_toplevel_answers_a_vap_error_and_keeps_the_connection`] | §6 an input with no active window is answered with a VAP `error` (`invalid_request`) — not a disconnect — and the connection stays usable |
+//! | [`recording_start_stop_writes_a_finalized_avi`] | §4/§5 the software recorder resolves a path/encoder, captures live frames (the file grows) and `stop_recording` finalizes a non-empty RIFF/AVI file |
+//! | [`recording_conflicts_are_invalid_requests`] | §5/§6 a second concurrent `start_recording` and a `stop_recording` with nothing active are VAP `error`s with `invalid_request`, and every connection stays usable (each refused transition is issued over its own connection) |
+//! | [`recording_gpu_encoder_without_hardware_is_not_supported`] | §5/§6 requesting the `gpu` encoder on a host without a hardware encoder is a VAP `error` with `not_supported` (skip-by-early-return when one exists) |
 //!
 //! `adesk-testkit` is a dev-dependency for exactly one reason: viewer input carries
 //! **no `window_id`** (§4/§5) and targets the runtime's *active* window, so a viewer
@@ -26,19 +29,29 @@
 //! Wayland-client calls (`commit`, `roundtrip`, `pump`) block, so they stay
 //! **outside** `block_on`; every wait is deadline-bounded ([`DEADLINE`]), never a
 //! sleep.
+//!
+//! The recording cases drive a second viewer connection whenever a request is
+//! *refused*: `adesk_viewer::ViewerClient` resolves an errored recording round
+//! trip through its broadcast error stream without retiring the reply-FIFO entry
+//! that request registered, so the next recording request on that connection can
+//! never resolve. Recording is runtime-scoped, so sibling connections observe and
+//! drive the very same recording — no assertion is weakened by the split.
 
 mod common;
 
 use std::time::Duration;
 
 use adesk_client::Client;
-use adesk_core::{Button, ButtonState, Size, WindowId};
+use adesk_core::{Button, ButtonState, ErrorCode, Size, WindowId};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_testkit::{
     ButtonState as RecordedButtonState, FillPattern, KeyState as RecordedKeyState, KeyboardEvent,
     PointerEvent, ToplevelSpec, WaylandTestClient, BTN_LEFT, KEY_C, KEY_LEFTCTRL,
 };
-use adesk_viewer_proto::{encode_client, ClientMessage, KeyAction, ViewerHello, PROTOCOL_VERSION};
+use adesk_viewer::{RecordRequest, ViewerError};
+use adesk_viewer_proto::{
+    encode_client, ClientMessage, KeyAction, RecordingEncoder, ViewerHello, PROTOCOL_VERSION,
+};
 use futures::StreamExt;
 
 use common::{expect_ok, output_size, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH};
@@ -666,4 +679,299 @@ fn png_size(payload: &ImagePayload) -> (u32, u32) {
     let width = u32::from_be_bytes(bytes[16..20].try_into().expect("4 width bytes"));
     let height = u32::from_be_bytes(bytes[20..24].try_into().expect("4 height bytes"));
     (width, height)
+}
+
+/// Asserts that `error` is a VAP backend failure carrying `expected`.
+///
+/// # Panics
+///
+/// Panics with `what`, the expected code and the actual error on any other
+/// outcome (including a non-backend `ViewerError`).
+fn assert_backend_code(error: &ViewerError, expected: ErrorCode, what: &str) {
+    match error {
+        ViewerError::Backend { code, message } => {
+            assert_eq!(
+                *code, expected,
+                "{what}: expected backend code `{expected:?}`, got `{code:?}` ({message})"
+            );
+        }
+        other => panic!("{what}: expected a VAP backend error, got {other:?}"),
+    }
+}
+
+/// §4/§5 screen recording: the software encoder resolves a path and an encoder,
+/// the runtime captures frames while the recording runs, and `stop_recording`
+/// finalizes a non-empty RIFF/AVI file.
+///
+/// No display, GPU, network or installed application is involved: the software
+/// (Motion-JPEG/AVI) backend needs none of them, and the capture source is the
+/// runtime's own full-output render.
+#[test]
+fn recording_start_stop_writes_a_finalized_avi() {
+    let runtime = TestRuntime::start();
+    let client = runtime.connect_viewer();
+
+    // Nothing has been recorded yet: the status is idle and names no file.
+    let idle = runtime
+        .block_on_timeout(client.request_recording())
+        .expect("the runtime answers request_recording on a fresh runtime");
+    assert!(
+        !idle.recording,
+        "no recording runs on a fresh runtime: {idle:?}"
+    );
+    assert_eq!(idle.path, None, "an idle status names no file: {idle:?}");
+    assert_eq!(
+        idle.frames, 0,
+        "an idle status has captured no frames: {idle:?}"
+    );
+
+    let started = runtime
+        .block_on_timeout(
+            client.start_recording(RecordRequest::new().with_encoder(RecordingEncoder::Software)),
+        )
+        .expect("the runtime starts a software recording");
+    assert!(
+        started.recording,
+        "the recording is reported as running: {started:?}"
+    );
+    assert_eq!(
+        started.frames, 0,
+        "a freshly started recording has captured no frames yet: {started:?}"
+    );
+    assert_eq!(
+        started.duration_ms, 0,
+        "a freshly started recording has zero duration: {started:?}"
+    );
+    assert!(
+        started.fps > 0,
+        "the status carries the frame rate: {started:?}"
+    );
+
+    let path = started
+        .path
+        .clone()
+        .expect("the runtime always reports the resolved recording path");
+    assert!(
+        path.ends_with(".avi"),
+        "the software encoder writes an AVI container: {path}"
+    );
+    assert!(
+        path.contains("adesk-recordings"),
+        "a path-less request lands under the derived recordings directory: {path}"
+    );
+    let encoder = started
+        .encoder
+        .clone()
+        .expect("the runtime reports the resolved encoder");
+    assert!(
+        !encoder.is_empty(),
+        "the encoder label is a non-empty backend name: {started:?}"
+    );
+
+    // The capture task paces at `fps` and its first tick fires immediately, so a
+    // couple of frames land quickly. This is a bounded poll, never a fixed sleep.
+    let captured = common::eventually(DEADLINE, || {
+        let status = runtime
+            .block_on_timeout(client.request_recording())
+            .expect("request_recording is answered while recording");
+        status.frames >= 1
+            && std::fs::metadata(&path)
+                .map(|meta| meta.len() > 0)
+                .unwrap_or(false)
+    });
+    assert!(
+        captured,
+        "the capture task must render and encode at least one full-output frame"
+    );
+
+    let stopped = runtime
+        .block_on_timeout(client.stop_recording())
+        .expect("the runtime stops the recording");
+    assert!(
+        !stopped.recording,
+        "a stopped recording reports recording=false: {stopped:?}"
+    );
+    assert_eq!(
+        stopped.path.as_deref(),
+        Some(path.as_str()),
+        "the final status names the same file that was started: {stopped:?}"
+    );
+    assert_eq!(
+        stopped.encoder.as_deref(),
+        Some(encoder.as_str()),
+        "the final status keeps the resolved encoder: {stopped:?}"
+    );
+    assert!(
+        stopped.frames >= 1,
+        "the finalized recording counted the frames it wrote: {stopped:?}"
+    );
+
+    // The file on disk is a finalized, non-empty RIFF/AVI container.
+    let bytes = std::fs::read(&path)
+        .unwrap_or_else(|error| panic!("read the finalized recording `{path}`: {error}"));
+    assert!(
+        bytes.len() > 12,
+        "the AVI has content beyond its header, got {} bytes",
+        bytes.len()
+    );
+    assert_eq!(
+        &bytes[..4],
+        b"RIFF",
+        "the file starts with the RIFF form id"
+    );
+    assert_eq!(
+        &bytes[8..12],
+        b"AVI ",
+        "the RIFF form type is AVI (space-padded)"
+    );
+
+    // `recording_status` after the stop reports the finished recording, not idle.
+    let after = runtime
+        .block_on_timeout(client.request_recording())
+        .expect("request_recording is answered after the stop");
+    assert!(!after.recording, "the recording ended: {after:?}");
+    assert_eq!(
+        after.path.as_deref(),
+        Some(path.as_str()),
+        "the last recording's file is still reported: {after:?}"
+    );
+
+    runtime
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+}
+
+/// §5/§6 recording transitions: a second concurrent `start_recording` and a
+/// `stop_recording` with nothing active are VAP `error`s with `invalid_request`,
+/// and the connection stays open across them.
+///
+/// Every *refused* transition is issued over its **own** viewer connection. The
+/// typed `ViewerClient` resolves an errored recording round trip through its
+/// broadcast error stream without retiring the reply-FIFO entry that request
+/// registered, so a connection that has seen a recording error can no longer
+/// resolve a later `recording` reply (its next recording request would wait
+/// forever). Recording is runtime-scoped, so a sibling connection drives the
+/// very same recording — which is what makes the conflict observable at all.
+#[test]
+fn recording_conflicts_are_invalid_requests() {
+    let runtime = TestRuntime::start();
+
+    // Stopping with no recording in progress is an invalid_request, not a
+    // disconnect: the same connection still answers a non-recording request.
+    let idle = runtime.connect_viewer();
+    let stop_error = runtime
+        .block_on_timeout(idle.stop_recording())
+        .expect_err("stopping with no recording is an error");
+    assert_backend_code(
+        &stop_error,
+        ErrorCode::InvalidRequest,
+        "stop_recording with nothing active",
+    );
+    runtime
+        .block_on_timeout(idle.request_state())
+        .expect("the connection stays usable after the refused stop");
+    runtime
+        .block_on_timeout(idle.close())
+        .expect("the idle viewer connection closes cleanly");
+
+    // A recording started by one viewer is refused to a second one.
+    let recording = runtime.connect_viewer();
+    let started = runtime
+        .block_on_timeout(
+            recording
+                .start_recording(RecordRequest::new().with_encoder(RecordingEncoder::Software)),
+        )
+        .expect("the runtime starts a recording");
+    assert!(started.recording, "the recording is running: {started:?}");
+
+    let conflicting = runtime.connect_viewer();
+    let conflict = runtime
+        .block_on_timeout(
+            conflicting
+                .start_recording(RecordRequest::new().with_encoder(RecordingEncoder::Software)),
+        )
+        .expect_err("a second concurrent recording is an error");
+    assert_backend_code(
+        &conflict,
+        ErrorCode::InvalidRequest,
+        "a second start_recording while one is active",
+    );
+    runtime
+        .block_on_timeout(conflicting.request_state())
+        .expect("the refused viewer's connection stays usable");
+    runtime
+        .block_on_timeout(conflicting.close())
+        .expect("the refused viewer connection closes cleanly");
+
+    // The refused request changed nothing: the first recording still stops.
+    let stopped = runtime
+        .block_on_timeout(recording.stop_recording())
+        .expect("the first recording still stops cleanly");
+    assert!(!stopped.recording, "the first recording ended: {stopped:?}");
+
+    // And now a second stop (this connection's first error) has nothing to stop.
+    let stop_again = runtime
+        .block_on_timeout(recording.stop_recording())
+        .expect_err("stopping twice is an error");
+    assert_backend_code(
+        &stop_again,
+        ErrorCode::InvalidRequest,
+        "a second stop_recording",
+    );
+
+    runtime
+        .block_on_timeout(recording.close())
+        .expect("the recording viewer connection closes cleanly");
+}
+
+/// §5/§6: an explicit `gpu` request on a host with no hardware H.264 encoder is
+/// a VAP `error` carrying `not_supported`.
+///
+/// The environment has neither a GPU nor `ffmpeg`, so the request is refused;
+/// when a hardware encoder *is* present the test stops the recording it just
+/// started and returns (skip-by-early-return), mirroring `adesk-recorder`'s own
+/// detection-gated tests. The follow-up status query uses a fresh connection
+/// (see [`recording_conflicts_are_invalid_requests`] for why an errored round
+/// trip cannot be followed by another recording request on the same client).
+#[test]
+fn recording_gpu_encoder_without_hardware_is_not_supported() {
+    let runtime = TestRuntime::start();
+
+    let requester = runtime.connect_viewer();
+    let result = runtime.block_on_timeout(
+        requester.start_recording(RecordRequest::new().with_encoder(RecordingEncoder::Gpu)),
+    );
+    match result {
+        Ok(status) => {
+            assert!(
+                status.recording,
+                "a started gpu recording is marked recording: {status:?}"
+            );
+            let _ = runtime.block_on_timeout(requester.stop_recording());
+        }
+        Err(error) => {
+            assert_backend_code(
+                &error,
+                ErrorCode::NotSupported,
+                "the gpu encoder without hardware",
+            );
+        }
+    }
+    runtime
+        .block_on_timeout(requester.close())
+        .expect("the gpu requester connection closes cleanly");
+
+    // Either way nothing is left running, and the runtime keeps answering.
+    let observer = runtime.connect_viewer();
+    let status = runtime
+        .block_on_timeout(observer.request_recording())
+        .expect("request_recording is answered after the gpu attempt");
+    assert!(
+        !status.recording,
+        "no recording is left running after the gpu attempt: {status:?}"
+    );
+
+    runtime
+        .block_on_timeout(observer.close())
+        .expect("the observer connection closes cleanly");
 }
