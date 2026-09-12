@@ -178,7 +178,7 @@ Cost centers on the per-request and per-event paths (identified by inspection; t
 ## Status
 
 Implementation-complete: zero `todo!()`, no crate-level `allow` attributes (the only one anywhere is the test harness's `#![allow(dead_code)]` in `tests/common/mod.rs`, explained above).
-`bash scripts/dev.sh cargo test -p adesk-client` is green: 67 tests — 66 integration tests (api 30, events 12, images 10, errors 3, framing 3, socket_path 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
+`bash scripts/dev.sh cargo test -p adesk-client` is green: 78 tests — 77 integration tests (api 38, events 15, images 10, errors 3, framing 3, socket_path 3, version 3, concurrency 2) + the `lib.rs` doctest; `cargo check`/`clippy -p adesk-client --all-targets` are warning-free and the crate is rustfmt-clean.
 `adesk-agent` and `adesk-testkit` may build on this surface.
 
 ## See Also
