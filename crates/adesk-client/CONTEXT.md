@@ -3,7 +3,7 @@
 ## Intent
 
 `adesk-client` is the only supported way for Rust programs to drive a running ADesk runtime over its Unix socket.
-It implements the **client side of `docs/protocol.md` (AGP v1)** and nothing else: typed async methods for every §5.1–§5.7 method, plus `futures::Stream` views over the event channel.
+It implements the **client side of `docs/protocol.md` (AGP v1)** and nothing else: typed async methods for every §5.1–§5.7 and §5.9–§5.10 method, plus `futures::Stream` views over the event channel.
 Primary consumers: `adesk-agent` (the multimodal agent prototype) and integration tests (`adesk-server/tests/`, `adesk-compositor/tests/` via `adesk-testkit`).
 The crate is a pure client: it never links Smithay, never touches the compositor thread, and contains no server-side logic.
 Its design follows the runtime's invariants — observations are causal (action ids, never sleeps), coordinates stay window-relative, and quietness is evidence rather than a promise.
