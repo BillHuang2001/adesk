@@ -32,6 +32,10 @@ pub(crate) const fn count() -> u32 {
     1
 }
 
+/// Default `max_events` for `wait_for_events` (§5.10).
+pub(crate) const fn max_events() -> u32 {
+    32
+}
 /// Default `include_image` for `observe` (§5.4, `true`).
 pub(crate) const fn include_image() -> bool {
     true
@@ -42,7 +46,8 @@ pub(crate) const fn scale() -> f64 {
     1.0
 }
 
-/// Default `kinds` of `subscribe_events`: all eleven filterable kinds (§5.6).
+/// Default `kinds` of `subscribe_events` (§5.6) and `wait_for_events` (§5.10):
+/// all fourteen filterable kinds (§5.6/§5.9).
 pub(crate) fn event_kinds() -> Vec<EventKind> {
     EventKind::SUBSCRIBABLE.to_vec()
 }

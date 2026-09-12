@@ -6,7 +6,9 @@
 
 mod common;
 
-use adesk_core::{ActionId, AppId, Button, ErrorCode, OverlayKind, Position, Rect, Size, WindowId};
+use adesk_core::{
+    ActionId, AppId, Button, ErrorCode, NotificationId, OverlayKind, Position, Rect, Size, WindowId,
+};
 use adesk_proto::*;
 use common::*;
 use serde_json::json;
@@ -42,6 +44,9 @@ fn event_kind_wire_names() {
         (EventKind::PopupDisappeared, "popup_disappeared"),
         (EventKind::Quiet, "quiet"),
         (EventKind::AppLaunched, "app_launched"),
+        (EventKind::Notification, "notification"),
+        (EventKind::NotificationClosed, "notification_closed"),
+        (EventKind::NotificationAction, "notification_action"),
         (EventKind::InspectFrame, "inspect_frame"),
     ];
     assert_eq!(expected.len(), EventKind::SUBSCRIBABLE.len() + 1);
@@ -52,7 +57,7 @@ fn event_kind_wire_names() {
             kind
         );
     }
-    assert_eq!(EventKind::SUBSCRIBABLE.len(), 11);
+    assert_eq!(EventKind::SUBSCRIBABLE.len(), 14);
     assert!(EventKind::SUBSCRIBABLE
         .iter()
         .all(EventKind::is_subscribable));
@@ -125,6 +130,26 @@ fn event_payload_kind_matches_variant() {
                 pid: None,
             }),
             EventKind::AppLaunched,
+        ),
+        (
+            EventPayload::Notification(NotificationEvent {
+                notification: notification(),
+            }),
+            EventKind::Notification,
+        ),
+        (
+            EventPayload::NotificationClosed(NotificationClosedEvent {
+                notification_id: NotificationId(5),
+                reason: NotificationCloseReason::Expired,
+            }),
+            EventKind::NotificationClosed,
+        ),
+        (
+            EventPayload::NotificationAction(NotificationActionEvent {
+                notification_id: NotificationId(5),
+                action_key: "open".to_owned(),
+            }),
+            EventKind::NotificationAction,
         ),
         (
             EventPayload::Quiet(QuietEvent {
@@ -339,8 +364,43 @@ fn method_name_table() {
             }),
             "inspect_subscribe",
         ),
+        (
+            Method::PostNotification(PostNotificationParams {
+                source: None,
+                title: "x".to_owned(),
+                body: String::new(),
+                urgency: NotificationUrgency::Normal,
+                category: None,
+                actions: vec![],
+                hints: Default::default(),
+                timeout_ms: None,
+            }),
+            "post_notification",
+        ),
+        (
+            Method::ListNotifications(ListNotificationsParams::default()),
+            "list_notifications",
+        ),
+        (
+            Method::CloseNotification(CloseNotificationParams {
+                notification_id: NotificationId(5),
+                reason: NotificationCloseReason::Dismissed,
+            }),
+            "close_notification",
+        ),
+        (
+            Method::InvokeNotificationAction(InvokeNotificationActionParams {
+                notification_id: NotificationId(5),
+                action_key: "open".to_owned(),
+            }),
+            "invoke_notification_action",
+        ),
+        (
+            Method::WaitForEvents(WaitForEventsParams::default()),
+            "wait_for_events",
+        ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 34);
     let mut names: Vec<&str> = Vec::new();
     for (method, expected) in &cases {
         assert_eq!(method.method_name(), *expected);
@@ -348,7 +408,7 @@ fn method_name_table() {
     }
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 29, "method names must be unique");
+    assert_eq!(names.len(), 34, "method names must be unique");
 }
 
 #[test]

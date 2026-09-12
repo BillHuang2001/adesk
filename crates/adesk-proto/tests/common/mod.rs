@@ -6,10 +6,16 @@
 
 #![allow(dead_code)]
 
+use std::collections::BTreeMap;
+
 use adesk_core::{
-    ActionId, AppId, AppInfo, Observation, Rect, Region, Size, WindowId, WindowInfo, WindowState,
+    ActionId, AppId, AppInfo, NotificationId, Observation, Rect, Region, Size, WindowId,
+    WindowInfo, WindowState,
 };
-use adesk_proto::{ImageFormat, ImagePayload, PingResult, RendererKind};
+use adesk_proto::{
+    ImageFormat, ImagePayload, Notification, NotificationAction, NotificationUrgency, PingResult,
+    RendererKind,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
@@ -99,6 +105,29 @@ pub fn damage() -> Region {
     let mut region = Region::empty();
     region.push(Rect::new(630, 220, 410, 180));
     region
+}
+
+/// A `Notification` fixture (§4/§5.9).
+pub fn notification() -> Notification {
+    Notification {
+        id: NotificationId(5),
+        source: Some("adesk-agent".to_owned()),
+        title: "Build finished".to_owned(),
+        body: "workspace compiled".to_owned(),
+        urgency: NotificationUrgency::Critical,
+        category: Some("progress".to_owned()),
+        actions: vec![NotificationAction {
+            key: "open".to_owned(),
+            label: "Open".to_owned(),
+        }],
+        hints: BTreeMap::from([("sender-pid".to_owned(), "4242".to_owned())]),
+        posted_seq: 900,
+        posted_ts_ms: 1234,
+        dismissed: false,
+        closed_seq: None,
+        close_reason: None,
+        timeout_ms: Some(5000),
+    }
 }
 
 /// A `PingResult` fixture (§5.1).

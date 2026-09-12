@@ -6,7 +6,7 @@
 //! It is pure serialization — no I/O, no async, no runtime, no Smithay.
 //!
 //! - [`Frame`] is the top-level NDJSON frame: request, response or event (§1).
-//! - [`Method`] is the typed method vocabulary (§5.1–§5.7) with typed params;
+//! - [`Method`] is the typed method vocabulary (§5.1–§5.10) with typed params;
 //!   typed results live next to their params in [`methods`] and are decoded from
 //!   a response with [`ResultPayload::decode`].
 //! - [`EventKind`] / [`EventPayload`] are the subscription filter and the typed
@@ -37,8 +37,9 @@ pub use codec::{Codec, NdjsonCodec};
 pub use error::{ProtoError, Result};
 pub use event::{
     AppLaunchedEvent, EventKind, EventPayload, FocusChangedEvent, InspectFrameEvent,
-    PopupAppearedEvent, PopupDisappearedEvent, QuietEvent, SurfaceCommitEvent, TitleChangedEvent,
-    WindowActivatedEvent, WindowCreatedEvent, WindowDestroyedEvent,
+    NotificationActionEvent, NotificationClosedEvent, NotificationEvent, PopupAppearedEvent,
+    PopupDisappearedEvent, QuietEvent, SurfaceCommitEvent, TitleChangedEvent, WindowActivatedEvent,
+    WindowCreatedEvent, WindowDestroyedEvent,
 };
 pub use frame::{
     ErrorPayload, EventFrame, Frame, RequestFrame, ResponseFrame, ResponseOutcome, ResultPayload,
@@ -46,6 +47,10 @@ pub use frame::{
 pub use image::ImagePayload;
 pub use methods::*;
 pub use types::{Condition, ImageFormat, KeySpec, RendererKind};
+
+pub use adesk_core::{
+    Notification, NotificationAction, NotificationCloseReason, NotificationUrgency,
+};
 
 /// AGP protocol version implemented by this crate (`docs/protocol.md` §5.1).
 ///
