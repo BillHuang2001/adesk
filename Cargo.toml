@@ -33,6 +33,7 @@ adesk-viewer-proto = { path = "crates/adesk-viewer-proto" }
 adesk-viewer = { path = "crates/adesk-viewer" }
 adesk-viewer-gui = { path = "crates/adesk-viewer-gui" }
 adesk-machine = { path = "crates/adesk-machine" }
+adesk-recorder = { path = "crates/adesk-recorder" }
 
 # --- wayland / smithay stack ---
 smithay = { version = "0.7.0", default-features = false }
