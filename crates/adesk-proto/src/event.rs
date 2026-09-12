@@ -6,7 +6,10 @@
 //! exactly the variant fields of the corresponding [`RuntimeEvent`] minus
 //! `seq`/`ts_ms` — plus the two protocol-only kinds (`quiet`, `inspect_frame`).
 
-use adesk_core::{AppId, LaunchId, Region, RuntimeEvent, WindowId};
+use adesk_core::{
+    AppId, LaunchId, Notification, NotificationCloseReason, NotificationId, Region, RuntimeEvent,
+    WindowId,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::image::ImagePayload;
@@ -15,7 +18,7 @@ use crate::{ProtoError, Result};
 /// Event kind: the `event` field of an event frame and the `kinds` filter of
 /// `subscribe_events` (§5.6).
 ///
-/// The eleven variants of §5.6 are filterable ([`EventKind::SUBSCRIBABLE`]);
+/// The fourteen filterable variants are [`EventKind::SUBSCRIBABLE`];
 /// [`EventKind::InspectFrame`] is pushed only to `inspect_subscribe` subscribers
 /// (§5.7) and must not appear in a subscription filter.
 ///
@@ -48,13 +51,19 @@ pub enum EventKind {
     Quiet,
     /// The registry spawned a process.
     AppLaunched,
+    /// A notification was posted to the runtime inbox (§5.9).
+    Notification,
+    /// A notification was closed (§5.9).
+    NotificationClosed,
+    /// A notification action was invoked (§5.9).
+    NotificationAction,
     /// Protocol-only: an inspector frame pushed by `inspect_subscribe` (§5.7).
     InspectFrame,
 }
 
 impl EventKind {
-    /// The eleven filterable kinds of §5.6, in spec order.
-    pub const SUBSCRIBABLE: [EventKind; 11] = [
+    /// The fourteen filterable kinds of §5.6 plus the §5.9 notification kinds, in spec order.
+    pub const SUBSCRIBABLE: [EventKind; 14] = [
         EventKind::WindowCreated,
         EventKind::WindowDestroyed,
         EventKind::WindowActivated,
@@ -66,6 +75,9 @@ impl EventKind {
         EventKind::PopupDisappeared,
         EventKind::Quiet,
         EventKind::AppLaunched,
+        EventKind::Notification,
+        EventKind::NotificationClosed,
+        EventKind::NotificationAction,
     ];
 
     /// Whether this kind is accepted in a `subscribe_events` filter (§5.6).
@@ -93,6 +105,9 @@ impl EventKind {
             RuntimeEvent::PopupAppeared { .. } => *self == EventKind::PopupAppeared,
             RuntimeEvent::PopupDisappeared { .. } => *self == EventKind::PopupDisappeared,
             RuntimeEvent::AppLaunched { .. } => *self == EventKind::AppLaunched,
+            RuntimeEvent::Notification { .. } => *self == EventKind::Notification,
+            RuntimeEvent::NotificationClosed { .. } => *self == EventKind::NotificationClosed,
+            RuntimeEvent::NotificationAction { .. } => *self == EventKind::NotificationAction,
         }
     }
 }
@@ -111,6 +126,9 @@ fn kind_name(kind: EventKind) -> &'static str {
         EventKind::PopupDisappeared => "popup_disappeared",
         EventKind::Quiet => "quiet",
         EventKind::AppLaunched => "app_launched",
+        EventKind::Notification => "notification",
+        EventKind::NotificationClosed => "notification_closed",
+        EventKind::NotificationAction => "notification_action",
         EventKind::InspectFrame => "inspect_frame",
     }
 }
@@ -204,6 +222,31 @@ pub struct AppLaunchedEvent {
     pub pid: Option<i32>,
 }
 
+/// `data` of a `notification` event (§5.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationEvent {
+    /// The posted notification.
+    pub notification: Notification,
+}
+
+/// `data` of a `notification_closed` event (§5.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationClosedEvent {
+    /// The closed notification.
+    pub notification_id: NotificationId,
+    /// Why the notification was closed.
+    pub reason: NotificationCloseReason,
+}
+
+/// `data` of a `notification_action` event (§5.9).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotificationActionEvent {
+    /// The notification whose action was invoked.
+    pub notification_id: NotificationId,
+    /// The invoked action's key.
+    pub action_key: String,
+}
+
 /// `data` of a `quiet` event (protocol-only kind, §5.6).
 ///
 /// The spec names the kind without fixing its fields; this is the resolved shape
@@ -254,6 +297,12 @@ pub enum EventPayload {
     PopupDisappeared(PopupDisappearedEvent),
     /// See [`AppLaunchedEvent`].
     AppLaunched(AppLaunchedEvent),
+    /// See [`NotificationEvent`].
+    Notification(NotificationEvent),
+    /// See [`NotificationClosedEvent`].
+    NotificationClosed(NotificationClosedEvent),
+    /// See [`NotificationActionEvent`].
+    NotificationAction(NotificationActionEvent),
     /// See [`QuietEvent`].
     Quiet(QuietEvent),
     /// See [`InspectFrameEvent`].
@@ -273,6 +322,9 @@ impl EventPayload {
             EventPayload::PopupAppeared(_) => EventKind::PopupAppeared,
             EventPayload::PopupDisappeared(_) => EventKind::PopupDisappeared,
             EventPayload::AppLaunched(_) => EventKind::AppLaunched,
+            EventPayload::Notification(_) => EventKind::Notification,
+            EventPayload::NotificationClosed(_) => EventKind::NotificationClosed,
+            EventPayload::NotificationAction(_) => EventKind::NotificationAction,
             EventPayload::Quiet(_) => EventKind::Quiet,
             EventPayload::InspectFrame(_) => EventKind::InspectFrame,
         }
@@ -357,6 +409,27 @@ impl EventPayload {
                 app_id: app_id.clone(),
                 pid: *pid,
             }),
+            RuntimeEvent::Notification { notification, .. } => {
+                EventPayload::Notification(NotificationEvent {
+                    notification: notification.clone(),
+                })
+            }
+            RuntimeEvent::NotificationClosed {
+                notification_id,
+                reason,
+                ..
+            } => EventPayload::NotificationClosed(NotificationClosedEvent {
+                notification_id: *notification_id,
+                reason: *reason,
+            }),
+            RuntimeEvent::NotificationAction {
+                notification_id,
+                action_key,
+                ..
+            } => EventPayload::NotificationAction(NotificationActionEvent {
+                notification_id: *notification_id,
+                action_key: action_key.clone(),
+            }),
         }
     }
 
@@ -423,6 +496,23 @@ impl EventPayload {
                 app_id: event.app_id.clone(),
                 pid: event.pid,
             },
+            EventPayload::Notification(event) => RuntimeEvent::Notification {
+                seq,
+                ts_ms,
+                notification: event.notification.clone(),
+            },
+            EventPayload::NotificationClosed(event) => RuntimeEvent::NotificationClosed {
+                seq,
+                ts_ms,
+                notification_id: event.notification_id,
+                reason: event.reason,
+            },
+            EventPayload::NotificationAction(event) => RuntimeEvent::NotificationAction {
+                seq,
+                ts_ms,
+                notification_id: event.notification_id,
+                action_key: event.action_key.clone(),
+            },
             EventPayload::Quiet(_) | EventPayload::InspectFrame(_) => return None,
         })
     }
@@ -455,6 +545,9 @@ impl EventPayload {
             EventKind::PopupAppeared => EventPayload::PopupAppeared(parse(kind, data)?),
             EventKind::PopupDisappeared => EventPayload::PopupDisappeared(parse(kind, data)?),
             EventKind::AppLaunched => EventPayload::AppLaunched(parse(kind, data)?),
+            EventKind::Notification => EventPayload::Notification(parse(kind, data)?),
+            EventKind::NotificationClosed => EventPayload::NotificationClosed(parse(kind, data)?),
+            EventKind::NotificationAction => EventPayload::NotificationAction(parse(kind, data)?),
             EventKind::Quiet => EventPayload::Quiet(parse(kind, data)?),
             EventKind::InspectFrame => EventPayload::InspectFrame(parse(kind, data)?),
             EventKind::SurfaceDamage => {
@@ -482,6 +575,9 @@ impl EventPayload {
             EventPayload::PopupAppeared(event) => serde_json::to_value(event)?,
             EventPayload::PopupDisappeared(event) => serde_json::to_value(event)?,
             EventPayload::AppLaunched(event) => serde_json::to_value(event)?,
+            EventPayload::Notification(event) => serde_json::to_value(event)?,
+            EventPayload::NotificationClosed(event) => serde_json::to_value(event)?,
+            EventPayload::NotificationAction(event) => serde_json::to_value(event)?,
             EventPayload::Quiet(event) => serde_json::to_value(event)?,
             EventPayload::InspectFrame(event) => serde_json::to_value(event)?,
         })

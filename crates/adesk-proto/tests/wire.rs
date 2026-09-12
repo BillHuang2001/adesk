@@ -6,7 +6,9 @@
 
 mod common;
 
-use adesk_core::{ActionId, AppId, Button, ErrorCode, OverlayKind, Position, Rect, Size, WindowId};
+use adesk_core::{
+    ActionId, AppId, Button, ErrorCode, NotificationId, OverlayKind, Position, Rect, Size, WindowId,
+};
 use adesk_proto::*;
 use common::*;
 use serde_json::json;
@@ -42,6 +44,9 @@ fn event_kind_wire_names() {
         (EventKind::PopupDisappeared, "popup_disappeared"),
         (EventKind::Quiet, "quiet"),
         (EventKind::AppLaunched, "app_launched"),
+        (EventKind::Notification, "notification"),
+        (EventKind::NotificationClosed, "notification_closed"),
+        (EventKind::NotificationAction, "notification_action"),
         (EventKind::InspectFrame, "inspect_frame"),
     ];
     assert_eq!(expected.len(), EventKind::SUBSCRIBABLE.len() + 1);
@@ -52,7 +57,7 @@ fn event_kind_wire_names() {
             kind
         );
     }
-    assert_eq!(EventKind::SUBSCRIBABLE.len(), 11);
+    assert_eq!(EventKind::SUBSCRIBABLE.len(), 14);
     assert!(EventKind::SUBSCRIBABLE
         .iter()
         .all(EventKind::is_subscribable));
@@ -125,6 +130,26 @@ fn event_payload_kind_matches_variant() {
                 pid: None,
             }),
             EventKind::AppLaunched,
+        ),
+        (
+            EventPayload::Notification(NotificationEvent {
+                notification: notification(),
+            }),
+            EventKind::Notification,
+        ),
+        (
+            EventPayload::NotificationClosed(NotificationClosedEvent {
+                notification_id: NotificationId(5),
+                reason: NotificationCloseReason::Expired,
+            }),
+            EventKind::NotificationClosed,
+        ),
+        (
+            EventPayload::NotificationAction(NotificationActionEvent {
+                notification_id: NotificationId(5),
+                action_key: "open".to_owned(),
+            }),
+            EventKind::NotificationAction,
         ),
         (
             EventPayload::Quiet(QuietEvent {

@@ -9,7 +9,7 @@ use crate::event::EventKind;
 /// Params of `subscribe_events` (§5.6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SubscribeEventsParams {
-    /// Kinds to receive; defaults to all eleven filterable kinds (§5.6).
+    /// Kinds to receive; defaults to all fourteen filterable kinds (§5.6/§5.9).
     #[serde(default = "defaults::event_kinds")]
     pub kinds: Vec<EventKind>,
     /// Restrict the subscription to one window, when given.

@@ -384,7 +384,7 @@ fn wait_method_defaults() {
 }
 
 #[test]
-fn subscribe_events_defaults_to_all_eleven_filterable_kinds() {
+fn subscribe_events_defaults_to_all_fourteen_filterable_kinds() {
     let method = Method::from_parts("subscribe_events", json!({})).unwrap();
     assert_eq!(
         wire(&method)["params"],
@@ -400,7 +400,10 @@ fn subscribe_events_defaults_to_all_eleven_filterable_kinds() {
                 "popup_appeared",
                 "popup_disappeared",
                 "quiet",
-                "app_launched"
+                "app_launched",
+                "notification",
+                "notification_closed",
+                "notification_action"
             ]
         })
     );

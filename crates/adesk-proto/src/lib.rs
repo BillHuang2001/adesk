@@ -37,8 +37,9 @@ pub use codec::{Codec, NdjsonCodec};
 pub use error::{ProtoError, Result};
 pub use event::{
     AppLaunchedEvent, EventKind, EventPayload, FocusChangedEvent, InspectFrameEvent,
-    PopupAppearedEvent, PopupDisappearedEvent, QuietEvent, SurfaceCommitEvent, TitleChangedEvent,
-    WindowActivatedEvent, WindowCreatedEvent, WindowDestroyedEvent,
+    NotificationActionEvent, NotificationClosedEvent, NotificationEvent, PopupAppearedEvent,
+    PopupDisappearedEvent, QuietEvent, SurfaceCommitEvent, TitleChangedEvent, WindowActivatedEvent,
+    WindowCreatedEvent, WindowDestroyedEvent,
 };
 pub use frame::{
     ErrorPayload, EventFrame, Frame, RequestFrame, ResponseFrame, ResponseOutcome, ResultPayload,
@@ -46,6 +47,10 @@ pub use frame::{
 pub use image::ImagePayload;
 pub use methods::*;
 pub use types::{Condition, ImageFormat, KeySpec, RendererKind};
+
+pub use adesk_core::{
+    Notification, NotificationAction, NotificationCloseReason, NotificationUrgency,
+};
 
 /// AGP protocol version implemented by this crate (`docs/protocol.md` §5.1).
 ///

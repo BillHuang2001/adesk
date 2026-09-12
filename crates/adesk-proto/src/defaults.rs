@@ -42,7 +42,7 @@ pub(crate) const fn scale() -> f64 {
     1.0
 }
 
-/// Default `kinds` of `subscribe_events`: all eleven filterable kinds (§5.6).
+/// Default `kinds` of `subscribe_events`: all fourteen filterable kinds (§5.6/§5.9).
 pub(crate) fn event_kinds() -> Vec<EventKind> {
     EventKind::SUBSCRIBABLE.to_vec()
 }

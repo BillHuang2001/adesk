@@ -7,10 +7,13 @@
 
 mod common;
 
-use adesk_core::{ActionId, AppId, ErrorCode, LaunchId, Region, RuntimeEvent, WindowId};
+use adesk_core::{
+    ActionId, AppId, ErrorCode, LaunchId, NotificationId, Region, RuntimeEvent, WindowId,
+};
 use adesk_proto::*;
 use common::*;
 use serde_json::json;
+
 fn surface_commit_payload() -> EventPayload {
     EventPayload::SurfaceCommit(SurfaceCommitEvent {
         window_id: WindowId(17),
@@ -19,7 +22,7 @@ fn surface_commit_payload() -> EventPayload {
     })
 }
 
-/// One representative payload per emitted event kind (§5.6 + §5.7 push).
+/// One representative payload per emitted event kind (§5.6 + §5.7 push + §5.9).
 fn all_payloads() -> Vec<EventPayload> {
     vec![
         EventPayload::WindowCreated(WindowCreatedEvent {
@@ -55,6 +58,17 @@ fn all_payloads() -> Vec<EventPayload> {
             app_id: AppId::from("org.mozilla.firefox"),
             pid: Some(4242),
         }),
+        EventPayload::Notification(NotificationEvent {
+            notification: notification(),
+        }),
+        EventPayload::NotificationClosed(NotificationClosedEvent {
+            notification_id: NotificationId(5),
+            reason: NotificationCloseReason::Expired,
+        }),
+        EventPayload::NotificationAction(NotificationActionEvent {
+            notification_id: NotificationId(5),
+            action_key: "open".to_owned(),
+        }),
         EventPayload::Quiet(QuietEvent {
             window_id: Some(WindowId(17)),
             quiet_ms: 250,
@@ -66,7 +80,7 @@ fn all_payloads() -> Vec<EventPayload> {
     ]
 }
 
-/// The nine core runtime events, one per `RuntimeEvent` variant.
+/// Every core runtime event, one per `RuntimeEvent` variant.
 fn all_runtime_events() -> Vec<RuntimeEvent> {
     vec![
         RuntimeEvent::WindowCreated {
@@ -125,6 +139,23 @@ fn all_runtime_events() -> Vec<RuntimeEvent> {
             launch_id: LaunchId(7),
             app_id: AppId::from("org.mozilla.firefox"),
             pid: None,
+        },
+        RuntimeEvent::Notification {
+            seq: 809,
+            ts_ms: 10,
+            notification: notification(),
+        },
+        RuntimeEvent::NotificationClosed {
+            seq: 810,
+            ts_ms: 11,
+            notification_id: NotificationId(5),
+            reason: NotificationCloseReason::Dismissed,
+        },
+        RuntimeEvent::NotificationAction {
+            seq: 811,
+            ts_ms: 12,
+            notification_id: NotificationId(5),
+            action_key: "open".to_owned(),
         },
     ]
 }
@@ -297,6 +328,66 @@ fn every_payload_kind_round_trips_through_the_wire() {
         assert_eq!(EventPayload::from_data(kind, data).unwrap(), payload);
         assert_eq!(frame.to_runtime(), payload.to_runtime(seq, ts_ms));
     }
+}
+
+#[test]
+fn notification_event_data_matches_spec() {
+    let notif = notification();
+
+    // `notification` (§5.9): data = {"notification": Notification}.
+    let payload = EventPayload::Notification(NotificationEvent {
+        notification: notif.clone(),
+    });
+    assert_eq!(payload.kind(), EventKind::Notification);
+    let data = payload.to_data().unwrap();
+    assert_eq!(data, json!({"notification": notif}));
+    assert_eq!(
+        EventPayload::from_data(EventKind::Notification, data).unwrap(),
+        payload
+    );
+
+    // `notification_closed` (§5.9): data = {"notification_id": u64, "reason": string}.
+    let closed = EventPayload::NotificationClosed(NotificationClosedEvent {
+        notification_id: NotificationId(5),
+        reason: NotificationCloseReason::Expired,
+    });
+    assert_eq!(closed.kind(), EventKind::NotificationClosed);
+    assert_eq!(
+        closed.to_data().unwrap(),
+        json!({"notification_id": 5, "reason": "expired"})
+    );
+    assert_eq!(
+        EventPayload::from_data(EventKind::NotificationClosed, closed.to_data().unwrap()).unwrap(),
+        closed
+    );
+
+    // `notification_action` (§5.9): data = {"notification_id": u64, "action_key": string}.
+    let action = EventPayload::NotificationAction(NotificationActionEvent {
+        notification_id: NotificationId(5),
+        action_key: "open".to_owned(),
+    });
+    assert_eq!(action.kind(), EventKind::NotificationAction);
+    assert_eq!(
+        action.to_data().unwrap(),
+        json!({"notification_id": 5, "action_key": "open"})
+    );
+    assert_eq!(
+        EventPayload::from_data(EventKind::NotificationAction, action.to_data().unwrap()).unwrap(),
+        action
+    );
+
+    // The three kinds are subscribable (§5.9) and match only their own event.
+    let runtime_notification = RuntimeEvent::Notification {
+        seq: 1,
+        ts_ms: 1,
+        notification: notif,
+    };
+    assert!(EventKind::Notification.is_subscribable());
+    assert!(EventKind::NotificationClosed.is_subscribable());
+    assert!(EventKind::NotificationAction.is_subscribable());
+    assert!(EventKind::Notification.matches(&runtime_notification));
+    assert!(!EventKind::NotificationClosed.matches(&runtime_notification));
+    assert!(!EventKind::NotificationAction.matches(&runtime_notification));
 }
 
 #[test]
