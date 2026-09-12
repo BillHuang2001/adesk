@@ -37,10 +37,8 @@ adesk-render.workspace = true
 adesk-viewer-proto.workspace = true
 adesk-viewer.workspace = true
 # Screen recording (encoder + muxer), driven by the viewer endpoint's recording
-# backend (`src/viewer/backend.rs`). Referenced by path because the crate is a
-# workspace member (`crates/*`); it carries no version, so the "versions live in
-# the root [workspace.dependencies]" rule is untouched.
-adesk-recorder = { path = "../adesk-recorder" }
+# backend (`src/viewer/backend.rs`).
+adesk-recorder.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true
 clap.workspace = true
