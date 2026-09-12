@@ -90,6 +90,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 | §5.5 input methods, pointer/key request types, `KeyChord` | `./src/api/input.rs` |
 | §5.6 subscribe/unsubscribe methods | `./src/api/subscribe.rs` |
 | §5.7 inspector methods, inspect request types | `./src/api/inspect.rs` |
+| §5.9 notification methods, `PostNotificationRequest`, result types | `./src/api/notification.rs` |
+| §5.10 `wait_for_events`, `WaitForEventsRequest`, `WaitForEventsResult`, `DEFAULT_MAX_EVENTS` | `./src/api/waits.rs` |
 | Mock AGP server harness (tests only) | `./tests/common/mod.rs` |
 | Integration tests (api, concurrency, errors, events, framing, socket_path, version, images) | `./tests/` |
 
