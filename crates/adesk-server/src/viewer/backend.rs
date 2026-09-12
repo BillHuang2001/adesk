@@ -4,22 +4,39 @@
 //! `Send + Sync` and the session only needs shared access. The backend owns the
 //! single [`ChangeSignal`] (fed by one background pump reading the compositor's
 //! event broadcast) it hands to every session, the advisory input-control owner,
-//! and the [`InputQueue`] that keeps viewer input in submission order.
+//! the [`InputQueue`] that keeps viewer input in submission order, and the
+//! runtime-scoped screen recording.
 //!
 //! Viewer input is never a special path: every mutation records an `ActionId` on
 //! the observer **before** the compositor command (exactly like AGP §5.5) and
 //! reuses the same `pub(crate)` seat helpers `crate::dispatch::input` exposes.
+//!
+//! Screen recording (`docs/viewer.md` §4, §5) is **runtime-scoped, not
+//! connection-scoped**: one recording is active per runtime at a time, it
+//! survives the viewer that started it disconnecting, and any viewer may query or
+//! stop it. Capture is **on demand** — a background task renders the full output
+//! only while the recording runs, pushing frames into an
+//! [`adesk_recorder::RecordingSession`] that owns its own OS thread, so the
+//! encoder never blocks the compositor.
 
-use std::sync::Mutex;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use adesk_compositor::{CompositorError, KeyCode, RendererName, RuntimeCommand};
-use adesk_core::{ActionId, ButtonState, KeyState, Position, Rect, RuntimeEvent, Size, WindowId};
-use adesk_observer::ActionKind;
-use adesk_viewer::{ChangeSignal, Result as ViewerResult, ViewerBackend, ViewerError, ViewerInput};
-use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, KeyAction, ServerHello, ViewerFrame,
+use adesk_core::{
+    ActionId, ButtonState, ErrorCode, KeyState, Position, Rect, RuntimeEvent, Size, WindowId,
 };
-use tokio::sync::broadcast;
+use adesk_observer::ActionKind;
+use adesk_recorder::{RecorderConfig, RecordingSession};
+use adesk_viewer::{
+    ChangeSignal, RecordRequest, Result as ViewerResult, ViewerBackend, ViewerError, ViewerInput,
+};
+use adesk_viewer_proto::{
+    ControlOwner, CursorState, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
+};
+use tokio::sync::{broadcast, watch};
 
 use crate::context::ServerContext;
 use crate::dispatch::RequestContext;
@@ -37,6 +54,41 @@ pub(crate) struct ViewerBackendImpl {
     change: ChangeSignal,
     /// Orders viewer input like `crate::session::InputQueue` orders §5.5.
     input: InputQueue,
+    /// The runtime-scoped recording state (one active recording at most).
+    recording: Mutex<RecordingState>,
+}
+
+/// Runtime-scoped screen-recording state.
+///
+/// `active` is the recording in progress (at most one, whatever viewer started
+/// it); `last` is the most recently *finished* recording's status, so
+/// `recording_status` reports where the last file landed instead of reverting to
+/// idle the moment a recording stops. Both are empty until a recording runs.
+#[derive(Default)]
+struct RecordingState {
+    /// The recording in progress, if any.
+    active: Option<ActiveRecording>,
+    /// The status of the most recently finished recording, if any.
+    last: Option<RecordingStatus>,
+}
+
+/// A recording in progress: its session is owned by the capture task, so this
+/// handle only carries what the status query and the stop path need.
+struct ActiveRecording {
+    /// Destination the recorder writes to.
+    path: PathBuf,
+    /// Resolved encoder backend name (`Recorder::encoder_name`).
+    encoder: String,
+    /// Requested frame rate (metadata; pacing is real).
+    fps: u32,
+    /// Monotonic ms the recording started (`ServerContext::now_ms`).
+    started_ms: u64,
+    /// Frames the capture task has queued so far, updated by the task.
+    frames: Arc<AtomicU64>,
+    /// Set to `true` to make the capture task finalize and return.
+    stop: watch::Sender<bool>,
+    /// Resolves with the finalized status once the task has stopped the session.
+    task: tokio::task::JoinHandle<RecordingStatus>,
 }
 
 impl ViewerBackendImpl {
@@ -54,6 +106,7 @@ impl ViewerBackendImpl {
             control: Mutex::new(ControlOwner::Ai),
             change,
             input: InputQueue::new(),
+            recording: Mutex::new(RecordingState::default()),
         }
     }
 
@@ -94,6 +147,23 @@ impl ViewerBackendImpl {
             .await
             .map_err(backend_error)?;
         Ok(Some(action.action_id))
+    }
+
+    /// The live status of a recording in progress (`docs/viewer.md` §4).
+    ///
+    /// `frames` is read from the shared counter the capture task updates and
+    /// `duration_ms` is measured from the runtime's monotonic clock, so the
+    /// status reports progress rather than a frozen initial snapshot.
+    fn active_status(&self, active: &ActiveRecording) -> RecordingStatus {
+        RecordingStatus {
+            recording: true,
+            path: Some(active.path.display().to_string()),
+            encoder: Some(active.encoder.clone()),
+            fps: active.fps,
+            frames: active.frames.load(Ordering::SeqCst),
+            duration_ms: self.context.now_ms().saturating_sub(active.started_ms),
+            error: None,
+        }
     }
 }
 
@@ -171,6 +241,129 @@ fn backend_error(error: ServerError) -> ViewerError {
     ViewerError::Backend {
         code: error.code(),
         message: error.to_string(),
+    }
+}
+
+/// Maps a recorder failure to a VAP backend failure, preserving its AGP code.
+///
+/// [`adesk_recorder::RecorderError::code`] owns the classification, so an
+/// unavailable `gpu` encoder arrives as `not_supported` and an unwritable path
+/// as `internal`.
+fn recorder_error(error: adesk_recorder::RecorderError) -> ViewerError {
+    ViewerError::backend(error.code(), error.to_string())
+}
+
+/// The frame-capture half of a recording: renders the full output on a paced
+/// interval and pushes each frame into the recorder session.
+///
+/// Built by `start_recording` and driven by the tokio task it spawns; the task
+/// ends on an explicit stop or the runtime's shutdown token, then finalizes the
+/// session and resolves with the recording's final status.
+struct CaptureTask {
+    /// Runtime state (for rendering and the shutdown token).
+    context: ServerContext,
+    /// The recorder session; owned here so the encode never touches the backend.
+    session: RecordingSession,
+    /// `true` once the recording has been stopped from the backend.
+    stop: watch::Receiver<bool>,
+    /// Frames queued so far, shared with the backend's status query.
+    frames: Arc<AtomicU64>,
+    /// Destination the recorder writes to.
+    path: PathBuf,
+    /// Resolved encoder backend name.
+    encoder: String,
+    /// Requested frame rate.
+    fps: u32,
+    /// Monotonic ms the recording started.
+    started_ms: u64,
+}
+
+impl CaptureTask {
+    /// Captures frames until stopped, then finalizes and returns the status.
+    ///
+    /// Every captured frame is a plain full-output render (no overlays) via
+    /// [`crate::inspection::refresh`], the runtime's existing on-demand render
+    /// seam; nothing renders while no recording runs.
+    async fn run(mut self) -> RecordingStatus {
+        let period = Duration::from_millis(u64::from(1000u32 / self.fps.max(1)));
+        let mut ticker = tokio::time::interval(period);
+        // A slow encode must not queue a burst of catch-up frames.
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut failure: Option<String> = None;
+
+        loop {
+            tokio::select! {
+                biased;
+                // Shutdown wins over a pending stop so teardown stays ordered.
+                () = self.context.shutdown.cancelled() => break,
+                changed = self.stop.changed() => {
+                    // A closed sender means the backend dropped the handle; either
+                    // way this task is done.
+                    if changed.is_err() || *self.stop.borrow() {
+                        break;
+                    }
+                }
+                _ = ticker.tick() => {
+                    match crate::inspection::refresh(&self.context).await {
+                        Ok(snapshot) => {
+                            let ts_ms = self.context.now_ms();
+                            if let Err(error) = self.session.push(snapshot.frame, ts_ms) {
+                                failure = Some(error.to_string());
+                                break;
+                            }
+                            self.frames.fetch_add(1, Ordering::SeqCst);
+                        }
+                        Err(error) => {
+                            failure = Some(error.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(reason) = &failure {
+            // Never log pixel payloads; the reason is a render/encoder message.
+            tracing::debug!(reason, "viewer recording capture stopped early");
+        }
+
+        let path = self.path.clone();
+        let encoder = self.encoder.clone();
+        let fps = self.fps;
+        let frames = self.frames.load(Ordering::SeqCst);
+        let duration_ms = self.context.now_ms().saturating_sub(self.started_ms);
+        let mut session = self.session;
+        // `stop` joins the recorder's own OS thread, so it runs on a blocking
+        // thread and never occupies a tokio worker.
+        match tokio::task::spawn_blocking(move || session.stop()).await {
+            Ok(Ok(summary)) => RecordingStatus {
+                recording: false,
+                path: Some(summary.path.display().to_string()),
+                encoder: Some(summary.encoder),
+                fps,
+                frames: summary.frames,
+                duration_ms: summary.duration_ms,
+                error: None,
+            },
+            Ok(Err(error)) => RecordingStatus {
+                recording: false,
+                path: Some(path.display().to_string()),
+                encoder: Some(encoder),
+                fps,
+                frames,
+                duration_ms,
+                error: Some(error.to_string()),
+            },
+            Err(join_error) => RecordingStatus {
+                recording: false,
+                path: Some(path.display().to_string()),
+                encoder: Some(encoder),
+                fps,
+                frames,
+                duration_ms,
+                error: Some(format!("recording task failed: {join_error}")),
+            },
+        }
     }
 }
 
@@ -422,6 +615,136 @@ impl ViewerBackend for ViewerBackendImpl {
             .lock()
             .unwrap_or_else(|error| error.into_inner()) = owner;
         Ok(())
+    }
+
+    async fn start_recording(&self, request: RecordRequest) -> ViewerResult<RecordingStatus> {
+        // The whole start path is synchronous (create dir, open the file, spawn
+        // the recorder thread and the capture task), so the check-and-set is
+        // atomic under the lock and no guard is held across an await.
+        let mut state = self
+            .recording
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.active.is_some() {
+            return Err(ViewerError::backend(
+                ErrorCode::InvalidRequest,
+                "a recording is already in progress",
+            ));
+        }
+
+        // Resolve the encoder first so the extension matches the backend the
+        // recorder will really use (`detect` folds `Auto` onto the platform).
+        let requested = crate::translate::recorder_encoder(request.encoder);
+        let kind = adesk_recorder::detect(requested);
+        let path = match &request.path {
+            Some(path) => path.clone(),
+            None => {
+                let dir = self.context.config.recordings_dir();
+                std::fs::create_dir_all(&dir).map_err(|error| {
+                    ViewerError::backend(
+                        ErrorCode::Internal,
+                        format!("cannot create recordings dir `{}`: {error}", dir.display()),
+                    )
+                })?;
+                dir.join(format!(
+                    "recording-{}{}",
+                    self.context.now_ms(),
+                    adesk_recorder::suggest_extension(kind)
+                ))
+            }
+        };
+
+        let config = RecorderConfig::new(&path)
+            .with_fps(request.fps)
+            .with_encoder(kind);
+        // `RecordingSession::start` opens the file (so an unwritable path fails
+        // here) and owns the encode on its own OS thread.
+        let session = RecordingSession::start(config).map_err(recorder_error)?;
+        let encoder = session.encoder_name().to_owned();
+
+        let started_ms = self.context.now_ms();
+        let frames = Arc::new(AtomicU64::new(0));
+        let (stop, stop_rx) = watch::channel(false);
+        let task = tokio::spawn(
+            CaptureTask {
+                context: self.context.clone(),
+                session,
+                stop: stop_rx,
+                frames: Arc::clone(&frames),
+                path: path.clone(),
+                encoder: encoder.clone(),
+                fps: request.fps,
+                started_ms,
+            }
+            .run(),
+        );
+
+        state.active = Some(ActiveRecording {
+            path: path.clone(),
+            encoder: encoder.clone(),
+            fps: request.fps,
+            started_ms,
+            frames,
+            stop,
+            task,
+        });
+
+        Ok(RecordingStatus {
+            recording: true,
+            path: Some(path.display().to_string()),
+            encoder: Some(encoder),
+            fps: request.fps,
+            frames: 0,
+            duration_ms: 0,
+            error: None,
+        })
+    }
+
+    async fn stop_recording(&self) -> ViewerResult<RecordingStatus> {
+        let active = {
+            let mut state = self
+                .recording
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            match state.active.take() {
+                Some(active) => active,
+                None => {
+                    return Err(ViewerError::backend(
+                        ErrorCode::InvalidRequest,
+                        "no recording is in progress",
+                    ))
+                }
+            }
+        };
+
+        // Ask the capture task to finalize; it owns the session. A closed signal
+        // means the task already ended (e.g. shutdown) — its join handle still
+        // carries the final status.
+        let _ = active.stop.send(true);
+        let status = active.task.await.map_err(|error| {
+            ViewerError::backend(
+                ErrorCode::Internal,
+                format!("recording task failed: {error}"),
+            )
+        })?;
+
+        let mut state = self
+            .recording
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.last = Some(status.clone());
+        Ok(status)
+    }
+
+    async fn recording_status(&self) -> ViewerResult<RecordingStatus> {
+        let state = self
+            .recording
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        match &state.active {
+            Some(active) => Ok(self.active_status(active)),
+            None => Ok(state.last.clone().unwrap_or_else(RecordingStatus::idle)),
+        }
     }
 }
 

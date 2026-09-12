@@ -60,6 +60,13 @@ struct Cli {
         value_parser = parse_socket_addr
     )]
     viewer_tcp: Option<SocketAddr>,
+    /// Directory recordings started without an explicit path are written to.
+    #[arg(
+        long = "recordings-dir",
+        env = "ADESK_RECORDINGS_DIR",
+        value_name = "DIR"
+    )]
+    recordings_dir: Option<PathBuf>,
     /// Disable the viewer (VAP v1) endpoint entirely.
     #[arg(long = "no-viewer")]
     no_viewer: bool,
@@ -128,6 +135,9 @@ fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
     if let Some(addr) = cli.viewer_tcp {
         config = config.with_viewer_tcp(addr);
     }
+    if let Some(dir) = &cli.recordings_dir {
+        config = config.with_recordings_dir(dir);
+    }
     if cli.no_viewer {
         config = config.without_viewer();
     }
@@ -169,6 +179,7 @@ mod tests {
             apps_dir: Vec::new(),
             viewer_socket: None,
             viewer_tcp: None,
+            recordings_dir: None,
             no_viewer: false,
             log: "info".to_owned(),
         }
@@ -269,6 +280,24 @@ mod tests {
         cli.viewer_tcp = Some("127.0.0.1:7100".parse().unwrap());
         let config = build_config(&cli).unwrap();
         assert_eq!(config.viewer.tcp, Some("127.0.0.1:7100".parse().unwrap()));
+    }
+
+    #[test]
+    fn recordings_dir_flag_overrides_the_derived_directory() {
+        let baseline = build_config(&cli()).unwrap();
+        assert_eq!(
+            baseline.viewer.recordings_dir, None,
+            "an unset flag keeps the derived recordings directory"
+        );
+
+        let mut cli = cli();
+        cli.recordings_dir = Some(PathBuf::from("/var/lib/adesk/rec"));
+        let config = build_config(&cli).unwrap();
+        assert_eq!(
+            config.viewer.recordings_dir,
+            Some(PathBuf::from("/var/lib/adesk/rec"))
+        );
+        assert_eq!(config.recordings_dir(), PathBuf::from("/var/lib/adesk/rec"));
     }
 
     #[test]
