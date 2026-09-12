@@ -60,6 +60,7 @@ Design invariants:
 | `crates/adesk-app-registry/` | XDG `.desktop` discovery, parsing, `Exec` field-code expansion, process launch, app↔window correlation. |
 | `crates/adesk-wm/` | Window model + single-visible-toplevel tiling policy + focus state machine. Pure logic, no Smithay. |
 | `crates/adesk-observer/` | Temporal observation engine: per-window commit/damage history, quiet detection, action correlation, waiters. |
+| `crates/adesk-notify/` | Notification store (post/close/invoke lifecycle) + reactive event inbox: bounded journal, `wait_for_events` waiters, the idle agent's wake source. No Smithay/IO. |
 | `crates/adesk-render/` | Offscreen render pipeline: render target, damage regions, crop/downsample, readback, image encoding, software path. |
 | `crates/adesk-compositor/` | Smithay integration: protocol handlers, event loop, virtual output, seat/input injection, event emission. |
 | `crates/adesk-inspector/` | Human inspection: full-output composition, debug overlays, inspection frames. |
@@ -97,6 +98,30 @@ GPU-accelerated H.264 backend that shells out to `ffmpeg` with a hardware encode
 message; the headless `adesk-viewer` binary has a `--record <FILE>` mode and
 `adesk-viewer-gui` a record toggle. Recording is runtime-scoped (not connection-scoped)
 and captures on demand, so the on-demand-rendering invariant holds.
+
+## Notifications & reactive events (idle-agent wakeups)
+
+The runtime is also a **programmable event source** for the agent: an agent can stay
+idle by default and be awakened when an application notification or a runtime event
+(a user message, a task handoff) arrives. `docs/notifications.md` is the design record
+and `docs/architecture.md` §11 the subsystem contract.
+
+- **One store, one stream.** `adesk-notify` owns a synchronous notification store
+  (mutated only by the §5.9 handlers) and an event inbox (fed by the one event pump).
+  A §5.9 mutation reserves a `seq` (`RuntimeCommand::ReserveSeq`) and publishes a
+  `notification` / `notification_closed` / `notification_action` `RuntimeEvent` on the
+  compositor's broadcast, so the single global `seq` domain and the existing
+  `subscribe_events` fan-out cover it with no special-casing; the observer counts none
+  of them (they advance its watermark only).
+- **AGP §5.9/§5.10.** Four methods (`post_notification`, `list_notifications`,
+  `close_notification`, `invoke_notification_action`) expose the store;
+  `wait_for_events` is the pull counterpart of a push subscription — one request that
+  answers once, so an idle agent parks on the inbox generation counter instead of
+  polling or sleeping. The dispatcher is total over 34 `docs/protocol.md` methods.
+- **`adesk-agent` watch mode.** `AgentLoop::run_watch` (CLI `--watch`) validates the
+  runtime once, then loops `wait_for_events` → feed wake events into the LLM context →
+  run the one-shot body → back to idle, bounded by explicit wakeup/idle budgets (no
+  busy-polling, no wall-clock sleeps).
 
 ## Cross-crate contracts
 
@@ -185,13 +210,13 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   `--record-encoder auto` selects GPU only when it is actually available.
 
 ## Status
-The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
+The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 34 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
 Four new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec, incl. the recording messages; 43 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary, incl. `--record`; 120 tests), `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 84 tests) and `adesk-recorder` (software MJPEG/AVI encoder + muxer, optional `ffmpeg` hardware-H.264 backend, `Recorder`/`RecordingSession`; 33 tests).
 `adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; it also backs the recording messages with an fps-paced capture loop (`--recordings-dir` / `ADESK_RECORDINGS_DIR` default). Its suite is 231 passed / 0 failed.
 `cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
-`cargo test --workspace --no-fail-fast` = 1480 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
+`cargo test --workspace --no-fail-fast` = 1557 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
 The on-demand capture path reuses a size-keyed pool of offscreen render targets (`adesk_render::TargetPool`, owned per backend by the compositor's `HeadlessRenderer`), so repeated captures of a given size no longer re-allocate a fresh ~4 MiB target each time.
-Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 122 passed.
+Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 133 passed.
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 77 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
