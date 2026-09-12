@@ -35,6 +35,9 @@
 //! - `capture_window` requires a wire `format`; the agent always gets the
 //!   protocol default (PNG).
 //! - [`ObserveCondition`] is mapped onto the SDK's `Condition` builders.
+//! - `wait_for_events` answers with every AGP event frame; only the typed
+//!   [`adesk_core::RuntimeEvent`] frames survive, so `quiet`, `inspect_frame`
+//!   and unknown kinds are dropped (`runtime_event`).
 //!
 //! Connect is transport-only ([`adesk_client::ConnectOptions::verify_version`] is
 //! disabled): version policy belongs to the loop, which gates on
@@ -45,12 +48,15 @@
 use std::path::Path;
 
 use adesk_client::{ClientError, KeyChord, Renderer};
-use adesk_core::{ActionId, AppId, AppInfo, Error as CoreError, ErrorCode, WindowId, WindowInfo};
+use adesk_core::{
+    ActionId, AppId, AppInfo, Error as CoreError, ErrorCode, RuntimeEvent, WindowId, WindowInfo,
+};
 use async_trait::async_trait;
 
 use crate::client::{
     AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
-    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WindowList,
+    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WaitForEventsRequest, WaitOutcome,
+    WindowList,
 };
 use crate::decision::ObserveCondition;
 use crate::Result;
@@ -235,6 +241,44 @@ impl AgentClient for AgpClient {
             skipped: result.skipped,
         })
     }
+
+    /// `wait_for_events` — idle until a matching event arrives or the timeout
+    /// elapses.
+    ///
+    /// The SDK answers with every AGP event frame; only
+    /// [`adesk_client::AgpEvent::Runtime`] frames have an
+    /// [`adesk_core::RuntimeEvent`] counterpart, so `quiet`, `inspect_frame` and
+    /// forward-compatible unknown frames are skipped (the wake filter never
+    /// selects them). A timed-out wait comes back as a result, not an error.
+    async fn wait_for_events(&self, request: &WaitForEventsRequest) -> Result<WaitOutcome> {
+        let mut sdk = adesk_client::WaitForEventsRequest::new()
+            .timeout_ms(request.timeout_ms)
+            .max_events(request.max_events);
+        if let Some(kinds) = &request.kinds {
+            sdk = sdk.kinds(kinds.iter().copied().map(adesk_client::EventKind::from));
+        }
+        if let Some(window_id) = request.window_id {
+            sdk = sdk.window(window_id);
+        }
+        if let Some(since_seq) = request.since_seq {
+            sdk = sdk.since_seq(since_seq);
+        }
+        let result = self
+            .client
+            .wait_for_events(sdk)
+            .await
+            .map_err(map_client_error)?;
+        Ok(WaitOutcome {
+            events: result
+                .events
+                .into_iter()
+                .filter_map(runtime_event)
+                .collect(),
+            timed_out: result.timed_out,
+            elapsed_ms: result.elapsed_ms,
+            seq: result.seq,
+        })
+    }
 }
 
 /// Translates an SDK error into the agent's error vocabulary.
@@ -282,6 +326,15 @@ fn renderer_name(renderer: Renderer) -> &'static str {
         Renderer::Gl => "gl",
         Renderer::Pixman => "pixman",
         _ => "unknown",
+    }
+}
+
+/// Keep the typed core event of an AGP frame, dropping frames with no
+/// [`RuntimeEvent`] counterpart (`quiet`, `inspect_frame`, unknown kinds).
+fn runtime_event(event: adesk_client::AgpEvent) -> Option<RuntimeEvent> {
+    match event {
+        adesk_client::AgpEvent::Runtime(event) => Some(event),
+        _ => None,
     }
 }
 
@@ -346,5 +399,28 @@ mod tests {
         assert_eq!(renderer_name(Renderer::Gl), "gl");
         assert_eq!(renderer_name(Renderer::Pixman), "pixman");
         assert_eq!(renderer_name(Renderer::Unknown), "unknown");
+    }
+
+    #[test]
+    fn wait_events_keeps_only_typed_runtime_frames() {
+        let event = RuntimeEvent::WindowDestroyed {
+            seq: 5,
+            ts_ms: 6,
+            window_id: WindowId(2),
+        };
+        assert_eq!(
+            runtime_event(adesk_client::AgpEvent::Runtime(event.clone())),
+            Some(event)
+        );
+
+        // Frames with no core counterpart — here a forward-compatible unknown
+        // kind — are dropped rather than failing the whole wait.
+        let other = adesk_client::AgpEvent::Other {
+            name: "surface_damage".to_owned(),
+            seq: 7,
+            ts_ms: 8,
+            data: serde_json::Value::Null,
+        };
+        assert!(runtime_event(other).is_none());
     }
 }

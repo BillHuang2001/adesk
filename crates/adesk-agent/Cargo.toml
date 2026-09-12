@@ -42,6 +42,10 @@ path = "tests/dummy_provider.rs"
 required-features = ["test-support"]
 
 [[test]]
+name = "watch"
+path = "tests/watch.rs"
+required-features = ["test-support"]
+[[test]]
 name = "e2e_runtime"
 path = "tests/e2e_runtime.rs"
 required-features = ["e2e"]

@@ -7,12 +7,17 @@
 //! adesk-agent --provider dummy --dummy-mode random --dummy-seed 42 --task "Explore the desktop"
 //! adesk-agent --provider openai --task "Open the settings dialog and enable dark mode" \
 //!             --max-steps 30 --report runs/dark-mode.json
+//! adesk-agent --watch --task "Handle the notification" --watch-max-wakeups 5
 //! ```
+//!
+//! `--watch` selects idle/watch mode: the agent stays idle until a notification
+//! wakes it, runs the standing `--task` job, then returns to idle (see the
+//! `adesk_agent::watch` module).
 //!
 //! Exit codes: `0` task succeeded and all expectations passed, `1` the task or a
 //! scenario expectation failed, `2` configuration/startup error.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{bail, Context as _, Result as AnyResult};
@@ -21,7 +26,7 @@ use tracing::{error, info, warn};
 
 use adesk_agent::{
     AgentLoop, AgpClient, ContextBudget, DummyMode, LlmProvider, LoopConfig, ProviderConfig,
-    ProviderKind, RunReport, Scenario, ScenarioId, ScenarioRunner, TaskDescription,
+    ProviderKind, RunReport, Scenario, ScenarioId, ScenarioRunner, TaskDescription, WatchConfig,
 };
 
 /// Multimodal GUI agent prototype for the ADesk runtime.
@@ -44,6 +49,22 @@ struct Cli {
     #[arg(long, value_enum)]
     scenario: Option<ScenarioId>,
 
+    /// Idle/watch mode: stay idle and handle the standing `--task` job each time
+    /// a notification wakes the agent (mutually exclusive with `--scenario`).
+    #[arg(long, env = "ADESK_AGENT_WATCH", conflicts_with = "scenario")]
+    watch: bool,
+
+    /// Bound on a single idle wait in watch mode (ms).
+    #[arg(long, env = "ADESK_AGENT_WATCH_TIMEOUT_MS", default_value_t = 30_000)]
+    watch_timeout_ms: u64,
+
+    /// Stop watch mode after this many handled wakeups (`0` = unbounded).
+    #[arg(long, env = "ADESK_AGENT_WATCH_MAX_WAKEUPS", default_value_t = 0)]
+    watch_max_wakeups: u32,
+
+    /// Stop watch mode after this many consecutive idle waits (`0` = unbounded).
+    #[arg(long, env = "ADESK_AGENT_WATCH_MAX_IDLE_WAITS", default_value_t = 0)]
+    watch_max_idle_waits: u32,
     /// Maximum number of loop steps.
     #[arg(long, default_value_t = 20)]
     max_steps: u32,
@@ -145,6 +166,18 @@ async fn run(cli: Cli) -> AnyResult<bool> {
 
     match target {
         RunTarget::Task(task) => {
+            if cli.watch {
+                return run_watch_mode(
+                    &cli,
+                    client,
+                    provider,
+                    &provider_name,
+                    &socket,
+                    config,
+                    task,
+                )
+                .await;
+            }
             info!(
                 provider = %provider_name,
                 socket = %socket.display(),
@@ -266,8 +299,15 @@ fn resolve_socket(cli: &Cli) -> PathBuf {
         .unwrap_or_else(adesk_client::default_socket_path)
 }
 
-/// Resolve `--task` / `--scenario` into the run target; exactly one is required.
+/// Resolve `--task` / `--scenario` into the run target; exactly one is required
+/// (and watch mode requires `--task`).
 fn resolve_target(cli: &Cli) -> AnyResult<RunTarget> {
+    if cli.watch {
+        return match &cli.task {
+            Some(goal) => Ok(RunTarget::Task(TaskDescription::new(goal.clone()))),
+            None => bail!("--watch requires --task \"<goal>\""),
+        };
+    }
     match (&cli.task, cli.scenario) {
         (Some(goal), None) => Ok(RunTarget::Task(TaskDescription::new(goal.clone()))),
         (None, Some(id)) => Ok(RunTarget::Scenario(Box::new(Scenario::builtin(id)))),
@@ -276,6 +316,92 @@ fn resolve_target(cli: &Cli) -> AnyResult<RunTarget> {
     }
 }
 
+/// Watch configuration derived from the CLI flags; the wake filter and
+/// `max_events` keep their [`WatchConfig::default`] values, and a zero budget
+/// flag means unbounded (`None`).
+fn watch_config(cli: &Cli) -> WatchConfig {
+    WatchConfig {
+        wait_timeout_ms: cli.watch_timeout_ms,
+        max_wakeups: budget(cli.watch_max_wakeups),
+        max_idle_waits: budget(cli.watch_max_idle_waits),
+        ..WatchConfig::default()
+    }
+}
+
+/// `0` means unbounded; any other value is a finite budget.
+fn budget(value: u32) -> Option<u32> {
+    (value != 0).then_some(value)
+}
+
+/// Idle/watch mode: drive [`AgentLoop::run_watch`], log every wakeup and idle
+/// wait, and write the last handled wakeup's report when `--report` was given.
+///
+/// Returns whether every handled wakeup's job succeeded (vacuously true when no
+/// wakeup was handled).
+async fn run_watch_mode(
+    cli: &Cli,
+    client: AgpClient,
+    provider: Box<dyn LlmProvider>,
+    provider_name: &str,
+    socket: &Path,
+    config: LoopConfig,
+    task: TaskDescription,
+) -> AnyResult<bool> {
+    let watch = watch_config(cli);
+    info!(
+        provider = %provider_name,
+        socket = %socket.display(),
+        goal = %task.goal,
+        timeout_ms = watch.wait_timeout_ms,
+        "watching for wake events"
+    );
+
+    let mut agent = AgentLoop::new(client, provider, config);
+    let outcome = agent.run_watch(&task, &watch).await?;
+
+    for (index, wakeup) in outcome.wakeups.iter().enumerate() {
+        if wakeup.outcome.success {
+            info!(
+                wakeup = index,
+                events = wakeup.events.len(),
+                steps = wakeup.outcome.steps,
+                "handled wakeup"
+            );
+        } else {
+            warn!(
+                wakeup = index,
+                events = wakeup.events.len(),
+                steps = wakeup.outcome.steps,
+                stop_reason = ?wakeup.outcome.stop_reason,
+                "wakeup job did not succeed: {}",
+                wakeup.outcome.summary
+            );
+        }
+    }
+    info!(
+        idle_waits = outcome.idle_waits,
+        stop_reason = ?outcome.stop_reason,
+        "watch stopped"
+    );
+
+    match outcome.wakeups.last() {
+        Some(last) => {
+            let report = RunReport {
+                task: task.goal.clone(),
+                provider: provider_name.to_owned(),
+                socket: Some(socket.display().to_string()),
+                metrics: last.outcome.metrics.clone(),
+                history: last.outcome.history.clone(),
+                scenario: None,
+            };
+            write_report(&cli.report, &report)?;
+        }
+        None if cli.report.is_some() => info!("no wakeup was handled; no report written"),
+        None => {}
+    }
+
+    Ok(outcome.wakeups.iter().all(|wakeup| wakeup.outcome.success))
+}
 /// Write the report when `--report` was given; the library never touches the
 /// filesystem itself.
 fn write_report(path: &Option<PathBuf>, report: &RunReport) -> AnyResult<()> {
@@ -390,5 +516,77 @@ mod tests {
         assert_eq!(from_env.dummy_seed, 7);
         assert_eq!(from_env.dummy_finish_probability, 0.5);
         assert_eq!(from_env.dummy_step_budget, 9);
+    }
+
+    /// `--watch` and its bounded flags parse; a bare `--task` run is not in watch
+    /// mode; `0` maps to an unbounded budget; watch mode requires `--task` and
+    /// conflicts with `--scenario`; and the `ADESK_AGENT_WATCH*` env vars are the
+    /// fallback. Env mutation lives in this single test so no two tests race over
+    /// the same process-wide variables.
+    #[test]
+    fn cli_watch_flags_parse_and_env_fallbacks_apply() {
+        // Hermetic: any ambient watch env vars must not leak into the assertions.
+        for var in [
+            "ADESK_AGENT_WATCH",
+            "ADESK_AGENT_WATCH_TIMEOUT_MS",
+            "ADESK_AGENT_WATCH_MAX_WAKEUPS",
+            "ADESK_AGENT_WATCH_MAX_IDLE_WAITS",
+        ] {
+            std::env::remove_var(var);
+        }
+
+        let cli = Cli::try_parse_from([
+            "adesk-agent",
+            "--watch",
+            "--task",
+            "handle the notification",
+            "--watch-timeout-ms",
+            "5000",
+            "--watch-max-wakeups",
+            "3",
+        ])
+        .expect("the watch invocation parses");
+        assert!(cli.watch);
+        assert_eq!(cli.watch_timeout_ms, 5000);
+        assert_eq!(cli.watch_max_wakeups, 3);
+        assert_eq!(cli.watch_max_idle_waits, 0, "unbounded by default");
+
+        let watch = watch_config(&cli);
+        assert_eq!(watch.wait_timeout_ms, 5000);
+        assert_eq!(watch.max_wakeups, Some(3));
+        assert_eq!(watch.max_idle_waits, None);
+        assert_eq!(watch.wake_kinds, WatchConfig::default().wake_kinds);
+        assert_eq!(watch.max_events, WatchConfig::default().max_events);
+
+        // A bare `--task` run is not in watch mode and keeps the unbounded budget.
+        let cli = Cli::try_parse_from(["adesk-agent", "--task", "explore"]).expect("parses");
+        assert!(!cli.watch);
+        assert_eq!(watch_config(&cli).max_wakeups, None);
+
+        // Watch mode requires `--task`.
+        let cli = Cli::try_parse_from(["adesk-agent", "--watch"]).expect("the flag parses");
+        assert!(resolve_target(&cli).is_err());
+
+        // `--watch` conflicts with `--scenario`.
+        assert!(Cli::try_parse_from([
+            "adesk-agent",
+            "--watch",
+            "--task",
+            "x",
+            "--scenario",
+            "click",
+        ])
+        .is_err());
+
+        // The env fallback selects watch mode and the idle budget.
+        std::env::set_var("ADESK_AGENT_WATCH", "true");
+        std::env::set_var("ADESK_AGENT_WATCH_MAX_IDLE_WAITS", "4");
+        let cli = Cli::try_parse_from(["adesk-agent", "--task", "explore"])
+            .expect("the env-only invocation parses");
+        for var in ["ADESK_AGENT_WATCH", "ADESK_AGENT_WATCH_MAX_IDLE_WAITS"] {
+            std::env::remove_var(var);
+        }
+        assert!(cli.watch, "ADESK_AGENT_WATCH selects watch mode");
+        assert_eq!(watch_config(&cli).max_idle_waits, Some(4));
     }
 }

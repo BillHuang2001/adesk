@@ -10,8 +10,8 @@
 //! adapter converts.
 
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, LaunchId, Observation, Position, Rect, Size, WindowId,
-    WindowInfo,
+    ActionId, AppId, AppInfo, Button, EventKind, LaunchId, Observation, Position, Rect,
+    RuntimeEvent, Size, WindowId, WindowInfo,
 };
 use adesk_proto::ImagePayload;
 use async_trait::async_trait;
@@ -24,6 +24,10 @@ use crate::Result;
 ///
 /// The loop refuses to run against a runtime that reports a different version.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Protocol default for [`WaitForEventsRequest::max_events`] (`docs/protocol.md`
+/// §5.10): the most events a single wait answers with.
+const DEFAULT_WAIT_MAX_EVENTS: u32 = 32;
 
 /// Runtime identity and capabilities, from `ping`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -158,6 +162,86 @@ pub struct TypeOutcome {
     pub skipped: Vec<String>,
 }
 
+/// Parameters of a `wait_for_events` request (`docs/protocol.md` §5.10).
+///
+/// The agent's idle primitive: block until at least one event matching `kinds`
+/// (restricted to `window_id` when given) is published after the filter point,
+/// or until `timeout_ms` elapses. A timed-out wait is a semantic outcome
+/// ([`WaitOutcome::timed_out`]), never an error.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitForEventsRequest {
+    /// Event kinds to collect; `None` means every emitted kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kinds: Option<Vec<EventKind>>,
+    /// Restrict to events carrying this window, when given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<WindowId>,
+    /// Upper bound on the wait in milliseconds.
+    pub timeout_ms: u64,
+    /// Maximum number of events to answer with.
+    pub max_events: u32,
+    /// Filter point: only events with `seq` greater than this count, when given.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_seq: Option<u64>,
+}
+
+impl WaitForEventsRequest {
+    /// A wait over `timeout_ms` for every kind and every window, capped at the
+    /// protocol default of 32 events.
+    pub fn new(timeout_ms: u64) -> Self {
+        Self {
+            kinds: None,
+            window_id: None,
+            timeout_ms,
+            max_events: DEFAULT_WAIT_MAX_EVENTS,
+            since_seq: None,
+        }
+    }
+
+    /// The idle wake filter: only `notification` and `notification_action`
+    /// events count as a wakeup ([`crate::watch`]'s default).
+    pub fn wake(timeout_ms: u64) -> Self {
+        Self::new(timeout_ms).kinds([EventKind::Notification, EventKind::NotificationAction])
+    }
+
+    /// Collect only `kinds`.
+    pub fn kinds(mut self, kinds: impl IntoIterator<Item = EventKind>) -> Self {
+        self.kinds = Some(kinds.into_iter().collect());
+        self
+    }
+
+    /// Restrict to events carrying `window_id`.
+    pub fn window(mut self, window_id: WindowId) -> Self {
+        self.window_id = Some(window_id);
+        self
+    }
+
+    /// Cap the number of collected events.
+    pub fn max_events(mut self, max_events: u32) -> Self {
+        self.max_events = max_events;
+        self
+    }
+
+    /// Count only events with `seq` greater than `since_seq`.
+    pub fn since_seq(mut self, since_seq: u64) -> Self {
+        self.since_seq = Some(since_seq);
+        self
+    }
+}
+
+/// Result of `wait_for_events` (`docs/protocol.md` §5.10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WaitOutcome {
+    /// Collected runtime events, oldest first, at most the requested `max_events`.
+    pub events: Vec<RuntimeEvent>,
+    /// Whether the timeout elapsed before any matching event arrived.
+    pub timed_out: bool,
+    /// Milliseconds from wait creation to resolution.
+    pub elapsed_ms: u64,
+    /// The runtime's current event watermark.
+    pub seq: u64,
+}
+
 /// The AGP operations the agent needs, expressed in domain types.
 ///
 /// Implementations: [`crate::agp::AgpClient`] (real socket) and the
@@ -205,4 +289,13 @@ pub trait AgentClient: Send + Sync {
 
     /// `type_text` — UTF-8 text through the seat's keymap.
     async fn type_text(&self, text: &str, window_id: Option<WindowId>) -> Result<TypeOutcome>;
+
+    /// `wait_for_events` — block until a matching event is published or the
+    /// timeout elapses (`docs/protocol.md` §5.10).
+    ///
+    /// The runtime performs the wait; a timed-out result is reported through
+    /// [`WaitOutcome::timed_out`], never as an error. This is the agent's idle
+    /// primitive: [`crate::AgentLoop::run_watch`] uses it to sleep until a
+    /// notification wakes it.
+    async fn wait_for_events(&self, request: &WaitForEventsRequest) -> Result<WaitOutcome>;
 }

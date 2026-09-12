@@ -7,8 +7,9 @@ use adesk_agent::{
     EventSummary, RuntimeInfo, TaskDescription,
 };
 use adesk_core::{
-    ActionId, AppId, AppInfo, EventKind, Observation, Rect, Region, RuntimeEvent, Size, WindowId,
-    WindowInfo, WindowState,
+    ActionId, AppId, AppInfo, EventKind, Notification, NotificationCloseReason, NotificationId,
+    NotificationUrgency, Observation, Rect, Region, RuntimeEvent, Size, WindowId, WindowInfo,
+    WindowState,
 };
 use adesk_proto::ImagePayload;
 
@@ -611,4 +612,91 @@ fn default_budget_matches_documentation() {
     let task = TaskDescription::new("open settings");
     assert_eq!(task.goal, "open settings");
     let _ = ContextBuilder::new(budget);
+}
+
+/// A notification as carried by the `notification` event.
+fn notification() -> Notification {
+    Notification {
+        id: NotificationId(5),
+        source: Some("user".into()),
+        title: "Build finished".into(),
+        body: "The workspace compiled".into(),
+        urgency: NotificationUrgency::Critical,
+        category: Some("message".into()),
+        actions: Vec::new(),
+        hints: Default::default(),
+        posted_seq: 20,
+        posted_ts_ms: 200,
+        dismissed: false,
+        closed_seq: None,
+        close_reason: None,
+        timeout_ms: None,
+    }
+}
+
+/// The three notification event kinds keep their source/title, close reason and
+/// action key in the summary detail.
+#[test]
+fn notification_events_are_summarized_with_source_reason_and_action() {
+    let budget = ContextBudget::default();
+    let mut builder = ContextBuilder::new(budget);
+    builder.record_events(&[
+        RuntimeEvent::Notification {
+            seq: 20,
+            ts_ms: 200,
+            notification: notification(),
+        },
+        RuntimeEvent::NotificationClosed {
+            seq: 21,
+            ts_ms: 210,
+            notification_id: NotificationId(5),
+            reason: NotificationCloseReason::Expired,
+        },
+        RuntimeEvent::NotificationAction {
+            seq: 22,
+            ts_ms: 220,
+            notification_id: NotificationId(5),
+            action_key: "view".into(),
+        },
+    ]);
+
+    let task = task();
+    let context = builder.build(input(&task, &[], &[], None));
+    let details: Vec<(EventKind, &str)> = context
+        .recent_events
+        .iter()
+        .map(|summary| (summary.kind, summary.detail.as_str()))
+        .collect();
+    assert_eq!(
+        details,
+        vec![
+            (
+                EventKind::NotificationAction,
+                "notification 5 action view invoked"
+            ),
+            (
+                EventKind::NotificationClosed,
+                "notification 5 closed (Expired)"
+            ),
+            (
+                EventKind::Notification,
+                "notification 5 posted source=user title=Build finished"
+            ),
+        ],
+        "most recent first"
+    );
+
+    // The same detail string is what `EventSummary::from_event` produces.
+    let summary = EventSummary::from_event(
+        &RuntimeEvent::Notification {
+            seq: 20,
+            ts_ms: 200,
+            notification: notification(),
+        },
+        budget.max_detail_chars,
+    );
+    assert_eq!(
+        summary.detail,
+        "notification 5 posted source=user title=Build finished"
+    );
 }

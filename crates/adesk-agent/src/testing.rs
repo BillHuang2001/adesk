@@ -31,7 +31,8 @@ use async_trait::async_trait;
 
 use crate::client::{
     AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
-    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WindowList,
+    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WaitForEventsRequest, WaitOutcome,
+    WindowList,
 };
 use crate::decision::ObserveCondition;
 use crate::Result;
@@ -65,6 +66,8 @@ pub enum ClientMethod {
     Keypress,
     /// `type_text`.
     TypeText,
+    /// `wait_for_events`.
+    WaitForEvents,
 }
 
 /// One recorded call.
@@ -102,6 +105,8 @@ pub enum ScriptedResponse {
     Observe(ObserveOutcome),
     /// Result of `type_text`.
     Type(TypeOutcome),
+    /// Result of `wait_for_events`.
+    WaitEvents(WaitOutcome),
     /// A runtime error, returned by whatever method is called next.
     Error(adesk_core::Error),
 }
@@ -217,6 +222,7 @@ fn response_name(response: &ScriptedResponse) -> &'static str {
         ScriptedResponse::Capture(_) => "Capture",
         ScriptedResponse::Observe(_) => "Observe",
         ScriptedResponse::Type(_) => "Type",
+        ScriptedResponse::WaitEvents(_) => "WaitEvents",
         ScriptedResponse::Error(_) => "Error",
     }
 }
@@ -292,6 +298,18 @@ fn scroll_summary(request: &ScrollRequest) -> String {
 /// Summary of a call whose only argument is an optional target window.
 fn window_summary(window_id: Option<WindowId>) -> String {
     format!("window_id={:?}", window_id.map(|id| id.0))
+}
+
+/// Summary of a `wait_for_events` call; `kinds` is the wake filter.
+fn wait_summary(request: &WaitForEventsRequest) -> String {
+    format!(
+        "kinds={:?} window_id={:?} timeout_ms={} max_events={} since_seq={:?}",
+        request.kinds,
+        request.window_id.map(|id| id.0),
+        request.timeout_ms,
+        request.max_events,
+        request.since_seq,
+    )
 }
 
 #[async_trait]
@@ -380,6 +398,15 @@ impl AgentClient for ScriptedClient {
             TypeText,
             format!("text={text:?} {}", window_summary(window_id)),
             Type
+        ))
+    }
+
+    async fn wait_for_events(&self, request: &WaitForEventsRequest) -> Result<WaitOutcome> {
+        Ok(scripted!(
+            self,
+            WaitForEvents,
+            wait_summary(request),
+            WaitEvents
         ))
     }
 }
@@ -490,6 +517,29 @@ mod tests {
             client.calls()[0].summary,
             "window_id=Some(2) after_action=Some(7) until=quiet(250) timeout_ms=5000 \
              include_image=true max_dimension=Some(1024) region=none"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_events_summary_carries_the_filter() {
+        let mut client = ScriptedClient::new();
+        client.push(ScriptedResponse::WaitEvents(WaitOutcome {
+            events: Vec::new(),
+            timed_out: true,
+            elapsed_ms: 30_000,
+            seq: 12,
+        }));
+
+        let outcome = client
+            .wait_for_events(&WaitForEventsRequest::wake(30_000))
+            .await
+            .unwrap();
+        assert!(outcome.timed_out);
+        assert_eq!(outcome.seq, 12);
+        assert_eq!(
+            client.calls()[0].summary,
+            "kinds=Some([Notification, NotificationAction]) window_id=None \
+             timeout_ms=30000 max_events=32 since_seq=None"
         );
     }
 

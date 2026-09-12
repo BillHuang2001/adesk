@@ -49,11 +49,19 @@
 //!
 //! | File | Responsibility |
 //! |---|---|
-//! | `mod.rs` (this file) | the loop itself: lifecycle, `run`, context assembly, outcome |
+//! | `mod.rs` (this file) | the loop itself: lifecycle, `run`, `run_watch`, context assembly, outcome |
 //! | `config.rs` | [`LoopConfig`] and its defaults |
 //! | `step.rs` | per-step records, the run outcome, and the loop's bookkeeping structs |
 //! | `execute.rs` | decision execution: AGP calls, retries, observation, step recording |
 //! | `tests.rs` | inline unit tests |
+//!
+//! ## Idle/watch mode
+//!
+//! [`run`](AgentLoop::run) is the one-shot driver; [`run_watch`](AgentLoop::run_watch)
+//! keeps the same `run_body` but re-enters it each time
+//! [`AgentClient::wait_for_events`] reports an event, recording the wake events
+//! into the provider's context first. Its configuration and outcome types live in
+//! [`crate::watch`].
 
 mod config;
 mod execute;
@@ -70,12 +78,13 @@ use std::time::Instant;
 use adesk_core::ActionId;
 use tracing::{debug, warn};
 
-use crate::client::{AgentClient, RuntimeInfo, PROTOCOL_VERSION};
+use crate::client::{AgentClient, RuntimeInfo, WaitForEventsRequest, PROTOCOL_VERSION};
 use crate::context::{AgentContext, ContextBuilder, ContextInput, TaskDescription};
 use crate::decision::AgentDecision;
 use crate::error::{Error, ErrorClass};
 use crate::metrics::{Metrics, StopReason};
 use crate::provider::LlmProvider;
+use crate::watch::{Wakeup, WatchConfig, WatchOutcome, WatchStopReason};
 use crate::Result;
 
 use self::execute::{bounded_call, elapsed_ms, retry_backoff};
@@ -158,7 +167,15 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
     /// [`LoopOutcome`] for budget stops; only fatal errors return `Err`.
     pub async fn run(&mut self, task: &TaskDescription) -> Result<LoopOutcome> {
         self.validate_runtime().await?;
+        self.run_body(task).await
+    }
 
+    /// Run `task` to completion, assuming the runtime was already validated.
+    ///
+    /// This is the shared body of [`run`](Self::run) and
+    /// [`run_watch`](Self::run_watch): the caller decides when to issue the
+    /// one-time `ping` (once per process run, not once per wakeup).
+    async fn run_body(&mut self, task: &TaskDescription) -> Result<LoopOutcome> {
         let mut facts = RuntimeFacts::default();
         let mut steps: u32 = 0;
         let mut consecutive_failures: u32 = 0;
@@ -250,6 +267,95 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
 
         let summary = Error::StepBudgetExhausted(steps).to_string();
         Ok(self.outcome(task, false, summary, steps, StopReason::StepBudgetExhausted))
+    }
+
+    /// Stand by, wake on an event, run `task`, and return to idle.
+    ///
+    /// This is the idle/watch mode ([`crate::watch`]): the agent issues
+    /// [`AgentClient::wait_for_events`] — bounded by
+    /// [`LoopConfig::step_timeout_ms`] and by the request's own
+    /// [`WatchConfig::wait_timeout_ms`] — and either stays idle (a timed-out
+    /// wait) or wakes:
+    ///
+    /// 1. the wake events are recorded into the provider's context
+    ///    ([`ContextBuilder::record_events`]), so the model sees what woke it;
+    /// 2. one standing job runs (the shared `run_body`);
+    /// 3. the [`Wakeup`] is collected and the loop returns to idle.
+    ///
+    /// The runtime is validated with `ping` **once** up front (honouring
+    /// [`LoopConfig::validate_protocol_version`]). A fatal error from a job
+    /// propagates as `Err`, exactly like [`run`](Self::run); a budget/failure
+    /// stop *inside* a job is an `Ok(LoopOutcome)` and is recorded as that
+    /// wakeup's outcome, after which the loop returns to idle.
+    ///
+    /// Stops with [`WatchStopReason::IdleBudget`] after
+    /// [`WatchConfig::max_idle_waits`] consecutive idle waits and with
+    /// [`WatchStopReason::WakeupBudget`] after [`WatchConfig::max_wakeups`]
+    /// handled wakeups; `None` on either budget means unbounded. Metrics and
+    /// step history are cumulative across the whole watch run.
+    pub async fn run_watch(
+        &mut self,
+        task: &TaskDescription,
+        watch: &WatchConfig,
+    ) -> Result<WatchOutcome> {
+        self.validate_runtime().await?;
+
+        let mut wakeups: Vec<Wakeup> = Vec::new();
+        let mut idle_waits: u32 = 0;
+
+        let stop_reason = loop {
+            let request = WaitForEventsRequest {
+                kinds: watch.wake_kinds.clone(),
+                window_id: None,
+                timeout_ms: watch.wait_timeout_ms,
+                max_events: watch.max_events,
+                since_seq: None,
+            };
+            let wait = bounded_call(self.config.step_timeout_ms, 0, async {
+                self.client.wait_for_events(&request).await
+            })
+            .await?;
+
+            if wait.timed_out {
+                // Idle: nothing arrived within the horizon. Stay idle unless the
+                // idle budget is spent.
+                idle_waits += 1;
+                debug!(
+                    idle_waits,
+                    timeout_ms = watch.wait_timeout_ms,
+                    "idle wait elapsed with no events"
+                );
+                if let Some(max) = watch.max_idle_waits {
+                    if idle_waits >= max {
+                        break WatchStopReason::IdleBudget;
+                    }
+                }
+                continue;
+            }
+
+            // Awake: hand the wake events to the provider, then run the job.
+            idle_waits = 0;
+            self.context.record_events(&wait.events);
+            debug!(events = wait.events.len(), seq = wait.seq, "woke on events");
+            let outcome = self.run_body(task).await?;
+            wakeups.push(Wakeup {
+                events: wait.events,
+                seq: wait.seq,
+                outcome,
+            });
+
+            if let Some(max) = watch.max_wakeups {
+                if wakeups.len() as u32 >= max {
+                    break WatchStopReason::WakeupBudget;
+                }
+            }
+        };
+
+        Ok(WatchOutcome {
+            wakeups,
+            idle_waits,
+            stop_reason,
+        })
     }
 
     /// `ping` the runtime once, before the first decision, and validate the AGP

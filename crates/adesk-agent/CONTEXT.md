@@ -5,8 +5,8 @@
 It is a prototype: its purpose is to demonstrate and *measure* the agent loop (actions per task, GPU readbacks, visual tokens, decision latency, failure/recovery rates), not to be a general agent framework.
 Invariants it upholds: runtime-native operations are never synthesized input; observations carry causal history via `after_action`; pixels are fetched only on demand; the LLM never receives a frame history.
 Status: implementation complete and green — no `todo!()`/`unimplemented!()`, no `#[ignore]`, no crate-level `allow` (`#![forbid(unsafe_code)]` + `#![deny(missing_docs)]` only); the workspace is `cargo fmt --all --check` clean under rustfmt 1.9.0 defaults, and `cargo clippy -p adesk-agent --all-targets --no-deps -- -D warnings` is clean (with and without `--features test-support,e2e`).
-Tests: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` = 108 passed / 0 failed / 0 ignored; `--features test-support,e2e` = 122, which adds the 14 real-runtime end-to-end tests in `tests/e2e_runtime.rs`. Default features run 86.
-The loop, dummy-provider, scenario and e2e test targets declare `[[test]] required-features` in this package's manifest, so a default run neither compiles nor links a 0-test binary.
+Tests: `./scripts/dev.sh cargo test -p adesk-agent --features test-support` = 116 passed / 0 failed / 0 ignored; `--features test-support,e2e` = 130, which adds the 14 real-runtime end-to-end tests in `tests/e2e_runtime.rs`. Default features run 90.
+The loop, watch, dummy-provider, scenario and e2e test targets declare `[[test]] required-features` in this package's manifest, so a default run neither compiles nor links a 0-test binary.
 The capstone e2e suite drives `AgpClient` and `AgentLoop` against a live in-process runtime (pixman, no display/GPU/network) through `adesk-testkit`; `adesk-testkit` and `image` are workspace dev-dependencies. The suite is self-contained on a fresh checkout: its fixture application ships as this package's own `examples/adesk-e2e-app.rs`, which `cargo test --features e2e` builds, so no pre-built testkit helper is required.
 
 ## API Surface
@@ -15,6 +15,11 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `AgentLoop<C: AgentClient, P: LlmProvider>` — `new(client, provider, config)`, `run(&TaskDescription) -> Result<LoopOutcome>`, plus `config()`, `metrics()`, `history()`, `context()`, `last_action_id()`.
 - `LoopConfig` — `max_steps` (20), `step_timeout_ms` (30s), `observe_after_input` (true), `quiet_ms` (250), `observe_timeout_ms` (5s), `include_image` (true), `capture_max_dimension` (`Some(1024)`), `max_consecutive_failures` (3), `retries_per_step` (2), `retry_backoff_ms` (200), `validate_protocol_version` (true), `context_budget`.
 - `LoopOutcome { success, summary, steps, stop_reason, metrics, history }`, `StepRecord`, `StepStatus { Ok, Recovered, Failed, Finished }`, `StopReason { Finished, StepBudgetExhausted, FailureBudgetExhausted, FatalError }`.
+- `AgentLoop::run_watch(&mut self, task, watch: &WatchConfig) -> Result<WatchOutcome>` — idle/watch mode (see `./src/watch.rs`). `run` is `validate_runtime()` + a private `run_body`; `run_watch` validates once then loops `wait_for_events` → `run_body`.
+### Watch (`src/watch.rs`)
+- `WatchConfig { wake_kinds (default `[Notification, NotificationAction]`), wait_timeout_ms (30 000), max_events (32), max_wakeups, max_idle_waits }` — `None` budget = unbounded (the default).
+- `WatchStopReason { WakeupBudget, IdleBudget, Fatal }`, `Wakeup { events, seq, outcome }`, `WatchOutcome { wakeups, idle_waits, stop_reason }`.
+- `AgentLoop::run_watch(&mut self, task: &TaskDescription, watch: &WatchConfig) -> Result<WatchOutcome>` — idle until `wait_for_events` reports events, `record_events` them into the provider context, run one job (`run_body`), collect a `Wakeup`, return to idle. Metrics/history are cumulative across the watch run; a fatal job error propagates as `Err`.
 ### Context (`src/context.rs`)
 - `AgentContext` — the only thing a provider sees: task, step/max_steps, runtime summary, bounded windows/apps, `recent_actions`, `recent_events`, latest `observation`, `last_error`, one `image` + one `keyframe`; `image_count()`/`image_bytes()`.
 - `ContextBuilder` — `new(budget)`, `record_action`, `record_events`, `set_image` (rotates current→keyframe), `clear_image`, `reset`, `build(ContextInput)`.
@@ -23,9 +28,10 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `AgentDecision` — one internally-tagged enum (`{"op": ...}`): runtime-native `list_apps|list_windows|get_window|launch_app|activate_window|close_window|capture|observe|wait`, seat input `click|type|keypress|scroll`, plus `finish`; `kind()`, `is_input()`, `is_runtime()`.
 - `ActionKind` (14 variants incl. `Finish`), `ObserveCondition { Quiet{quiet_ms}, Change, Timeout }`.
 ### Client seam (`src/client.rs`, `src/agp.rs`)
-- `AgentClient` (`#[async_trait]`): `ping`, `list_apps`, `launch_app`, `list_windows`, `get_window`, `activate_window`, `close_window`, `capture_window`, `observe`, `click`, `scroll`, `keypress`, `type_text`.
-- Types: `RuntimeInfo`, `LaunchOutcome`, `WindowList`, `CaptureRequest/CaptureOutcome`, `ObserveRequest/ObserveOutcome`, `ClickRequest`, `ScrollRequest`, `TypeOutcome`, `PROTOCOL_VERSION = 1`.
-- `AgpClient` — `connect(&Path)`, `sdk()`; the sole adapter to `adesk-client`/`adesk-proto`.
+- `AgentClient` (`#[async_trait]`): `ping`, `list_apps`, `launch_app`, `list_windows`, `get_window`, `activate_window`, `close_window`, `capture_window`, `observe`, `click`, `scroll`, `keypress`, `type_text`, `wait_for_events`.
+- Types: `RuntimeInfo`, `LaunchOutcome`, `WindowList`, `CaptureRequest/CaptureOutcome`, `ObserveRequest/ObserveOutcome`, `ClickRequest`, `ScrollRequest`, `TypeOutcome`, `WaitForEventsRequest/WaitOutcome` (AGP §5.10), `PROTOCOL_VERSION = 1`.
+- `WaitForEventsRequest` — `new(timeout_ms)` (all kinds, 32 events), `wake(timeout_ms)` (the notification wake filter: `[Notification, NotificationAction]`), builders `kinds`, `window`, `max_events`, `since_seq`; fields `kinds`, `window_id`, `timeout_ms`, `max_events`, `since_seq`. `WaitOutcome { events: Vec<RuntimeEvent>, timed_out, elapsed_ms, seq }` — a timed-out wait is a result, never an error.
+- `AgpClient` — `connect(&Path)`, `sdk()`; the sole adapter to `adesk-client`/`adesk-proto`. `wait_for_events` keeps only `AgpEvent::Runtime` frames (dropping `quiet`/`inspect_frame`/unknown).
 ### Providers (`src/provider/`)
 - `LlmProvider` (`#[async_trait]`): `complete(&AgentContext) -> Result<AgentDecision, ProviderError>`, `name()`, `supports_images()` (the loop consults it before requesting *or* attaching pixels); the trait is also implemented by `Box<dyn LlmProvider>` and `Arc<T: LlmProvider + ?Sized>`, so neither the binary nor the tests need a wrapper newtype.
 - `MockProvider` + `ScriptEntry` — scripted/replayable (`scripted`, `new`, `from_json`, `with_name`, `contexts()`, `remaining()`, `reset()`); default provider.
@@ -39,7 +45,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 ### Artifact & scaffolding
 - `RunReport` (`src/report.rs`) — `to_json_pretty()`, `write(path)` for `--report`.
 - `testing::ScriptedClient` + `ScriptedResponse` + `ClientCall`/`ClientMethod` (`src/testing.rs`, `feature = "test-support"` or `cfg(test)`).
-- `adesk-agent` binary (`src/main.rs`) — clap CLI: `--socket`, `--provider mock|dummy|openai`, `--task`, `--scenario`, `--max-steps`, `--report`, `--model`, `--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`, plus the dummy-provider knobs `--dummy-mode fixed|random` (`ADESK_AGENT_DUMMY_MODE`), `--dummy-seed <N>` (`ADESK_AGENT_DUMMY_SEED`), `--dummy-finish-probability <F>` (`ADESK_AGENT_DUMMY_FINISH_PROBABILITY`), `--dummy-step-budget <N>` (`ADESK_AGENT_DUMMY_STEP_BUDGET`); env `ADESK_SOCKET`, `ADESK_AGENT_*`; exit 0 success / 1 task or expectation failure / 2 config error.
+- `adesk-agent` binary (`src/main.rs`) — clap CLI: `--socket`, `--provider mock|dummy|openai`, `--task`, `--scenario`, `--max-steps`, `--report`, `--model`, `--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`, plus the dummy-provider knobs `--dummy-mode fixed|random` (`ADESK_AGENT_DUMMY_MODE`), `--dummy-seed <N>` (`ADESK_AGENT_DUMMY_SEED`), `--dummy-finish-probability <F>` (`ADESK_AGENT_DUMMY_FINISH_PROBABILITY`), `--dummy-step-budget <N>` (`ADESK_AGENT_DUMMY_STEP_BUDGET`); watch-mode flags `--watch` (`ADESK_AGENT_WATCH`; conflicts with `--scenario`, requires `--task`), `--watch-timeout-ms <N>` (`ADESK_AGENT_WATCH_TIMEOUT_MS`, default 30000), `--watch-max-wakeups <N>` (`ADESK_AGENT_WATCH_MAX_WAKEUPS`, 0 = unbounded), `--watch-max-idle-waits <N>` (`ADESK_AGENT_WATCH_MAX_IDLE_WAITS`, 0 = unbounded); env `ADESK_SOCKET`, `ADESK_AGENT_*`; exit 0 success / 1 task or expectation failure / 2 config error.
 
 ## Constraints
 - Dependencies come only from root `[workspace.dependencies]`; never add inline versions.
@@ -60,6 +66,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | Area | Owner |
 |---|---|
 | Loop control flow, budgets, recovery | `./src/agent_loop/` |
+| Idle/watch mode config + outcome types | `./src/watch.rs` |
 | Bounded context assembly + budgeting rules | `./src/context.rs` |
 | Decision vocabulary + serde schema | `./src/decision.rs` |
 | `AgentClient` trait + AGP request/result types | `./src/client.rs` |
@@ -77,6 +84,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 | CLI wiring | `./src/main.rs` |
 | Fixture application the launch tests start (example, gated on `e2e`) | `./examples/adesk-e2e-app.rs` |
 | Loop/budget/recovery tests | `./tests/agent_loop.rs` |
+| Idle/watch-mode tests | `./tests/watch.rs` |
 | Context cap tests | `./tests/context_budget.rs` |
 | Metrics semantics tests | `./tests/metrics.rs` |
 | Scenario tests | `./tests/scenarios.rs` |
@@ -108,11 +116,13 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - `AgpClient::connect` disables the SDK's post-connect version ping so `LoopConfig::validate_protocol_version` stays authoritative.
 - Pixels only ever reach a provider that can consume them: `LlmProvider::supports_images()` is consulted both when an observation request is built (`AgentLoop::image_policy`, which folds the capability into `LoopConfig::include_image`) and when a readback is attached to the context (`record_step` — the only place that covers an explicit `capture`, which carries no `include_image` flag for `image_policy` to fold into). The readback itself still happens and is counted in `metrics.gpu_readbacks`.
 - Character truncation has exactly one implementation (`crate::text::truncate`); call sites differ only in the elision marker and the limit, not in the counting rule.
+- Idle/watch mode is a thin driver over the one-shot loop: `run` = `validate_runtime()` + a private `run_body`, and `run_watch` validates once then loops `wait_for_events` → `record_events` → `run_body`, so the ping-then-loop observable behaviour of `run` is unchanged. The wake source is AGP §5.10 `wait_for_events` (no busy-polling, no wall-clock sleep); each wait is bounded by `LoopConfig::step_timeout_ms` and by `WatchConfig::wait_timeout_ms`, `None` budgets are unbounded, and `WatchStopReason::Fatal` is reserved (a fatal job error propagates as `Err`).
 
 ## Test Strategy
-- Canonical commands: `./scripts/dev.sh cargo test -p adesk-agent` (86), `... --features test-support` (108), `... --features test-support,e2e` (122 = 108 + 14), `... --features e2e` (100 = 86 + 14 e2e).
-- `--features test-support` = 108 tests: 68 lib unit, 2 `src/main.rs` binary, 10 `tests/agent_loop.rs`, 7 `tests/context_budget.rs`, 2 `tests/dummy_provider.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`.
-  Gating is declared once in the manifest (`[[test]] required-features = ["test-support"]` for `agent_loop`/`scenarios`/`dummy_provider`, `["e2e"]` for `e2e_runtime`); no test file carries a `#![cfg(feature = ...)]` of its own.
+- Canonical commands: `./scripts/dev.sh cargo test -p adesk-agent` (90), `... --features test-support` (116), `... --features test-support,e2e` (130 = 116 + 14), `... --features e2e` (104 = 90 + 14 e2e).
+- `--features test-support` = 116 tests: 70 lib unit, 3 `src/main.rs` binary, 10 `tests/agent_loop.rs`, 8 `tests/context_budget.rs`, 2 `tests/dummy_provider.rs`, 9 `tests/metrics.rs`, 10 `tests/scenarios.rs`, 4 `tests/watch.rs`.
+  Gating is declared once in the manifest (`[[test]] required-features = ["test-support"]` for `agent_loop`/`scenarios`/`dummy_provider`/`watch`, `["e2e"]` for `e2e_runtime`); no test file carries a `#![cfg(feature = ...)]` of its own.
+- Watch-mode coverage (`tests/watch.rs`, 4 tests): wake→handle→idle (one `Wakeup` carrying the notification, `idle_waits == 1`, `IdleBudget`, and the notification asserted to reach the provider context), the wakeup budget, the idle budget with no events, and the `wait_for_events` request summary/filter.
 - Shared integration-test fixtures (`runtime_info`, `empty_windows`, `observation`, `image`) live in `tests/common/mod.rs`, a module included by each target that uses them.
   It carries a module-level `#![allow(dead_code)]` because it is compiled into several targets and no single target uses every helper.
 - Dummy-provider coverage: 16 unit tests in `provider/dummy.rs` (fixed replay order, finish-on-exhaustion without panicking, seeded determinism, default-pool serde validity, probability/budget termination, `name`/`supports_images`) plus 3 factory tests in `provider/mod.rs` (kind-name mapping, documented defaults, fixed + reproducible-random build); `tests/dummy_provider.rs` (2) proves loop termination through `AgentLoop` + `ScriptedClient` in both `DummyMode::Fixed` and a forced-budget `DummyMode::Random` run.
@@ -123,6 +133,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 
 ## Notes for Agents
 - Always run tests with `--features test-support`.
+- Watch mode is default-feature surface: `AgentLoop::run_watch`, `WatchConfig`/`WatchOutcome`/`Wakeup`/`WatchStopReason`, `WaitForEventsRequest`/`WaitOutcome` and the `AgentClient::wait_for_events` method need no feature gate. `ScriptedClient`'s `WaitEvents` response and `ClientMethod::WaitForEvents` do (they live in `testing.rs`).
 - `AgpClient` is neither `Clone` nor `Debug`, and `ScenarioRunner::run` takes the client by value: connect one `AgpClient` per scenario. `StepRecord` retains the step's `Observation` but not its image; image bytes are reachable only via a shared `MockProvider`'s recorded contexts (`Arc<MockProvider>`, since the crate implements `LlmProvider` for `Arc<T>`; pattern in `tests/agent_loop.rs`) or `ContextBuilder::build(..).image`. The `e2e` feature does not enable `test-support`; `Scenario`/`ScenarioRunner`/`MockProvider` are available with default features.
 - `ScriptedClient` is `Clone` (shared script + call log, because the loop takes the client by value) and panics BY DESIGN on exhausted or mismatched scripts; script one `ScriptedResponse` per client call in the loop's exact order (see Design Decisions).
 - `MockProvider` records a context on every `complete` call (including failed ones); an empty script substitutes the built-in dry run, so `remaining()` == 2 for "no script".

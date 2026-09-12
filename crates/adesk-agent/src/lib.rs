@@ -38,6 +38,7 @@
 //! | [`agp`] | Concrete `adesk-client` adapter (the only wire-coupled module) |
 //! | [`provider`] | `LlmProvider` plus mock, dummy and OpenAI-compatible implementations |
 //! | [`agent_loop`] | plan → act → observe → decide control flow, budgets, recovery |
+//! | [`watch`] | idle/watch mode: stay idle, wake on events, handle, return to idle |
 //! | [`metrics`] | Counters, latency statistics, `MetricsReport` |
 //! | [`scenario`] | Built-in scenarios, expectations, runner |
 //! | [`report`] | `RunReport` artifact written by `--report` |
@@ -63,12 +64,14 @@ pub mod testing;
 /// Character-counted truncation shared by the eliding call sites (crate-internal,
 /// never part of the public API).
 mod text;
+pub mod watch;
 
 pub use agent_loop::{AgentLoop, LoopConfig, LoopOutcome, StepRecord, StepStatus};
 pub use agp::AgpClient;
 pub use client::{
     AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
-    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WindowList, PROTOCOL_VERSION,
+    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WaitForEventsRequest, WaitOutcome,
+    WindowList, PROTOCOL_VERSION,
 };
 pub use context::{
     ActionRecord, AgentContext, AppSummary, ContextBudget, ContextBuilder, ContextInput,
@@ -87,3 +90,4 @@ pub use report::RunReport;
 pub use scenario::{
     Expectation, ExpectationResult, Scenario, ScenarioId, ScenarioReport, ScenarioRunner,
 };
+pub use watch::{Wakeup, WatchConfig, WatchOutcome, WatchStopReason};
