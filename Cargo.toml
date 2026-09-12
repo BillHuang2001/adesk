@@ -22,6 +22,7 @@ adesk-proto = { path = "crates/adesk-proto" }
 adesk-app-registry = { path = "crates/adesk-app-registry" }
 adesk-wm = { path = "crates/adesk-wm" }
 adesk-observer = { path = "crates/adesk-observer" }
+adesk-notify = { path = "crates/adesk-notify" }
 adesk-render = { path = "crates/adesk-render" }
 adesk-compositor = { path = "crates/adesk-compositor" }
 adesk-inspector = { path = "crates/adesk-inspector" }

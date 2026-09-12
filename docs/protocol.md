@@ -96,6 +96,14 @@ Observation = {"window_id": 17 | null, "after_action": 582 | null,
                "popups_appeared": [u64], "popups_disappeared": [u64],
                "elapsed_ms": 417, "quiet": true, "timed_out": false,
                "last_commit_seq": 8291, "seq": 8300, "image": ImagePayload | null}
+NotificationUrgency = "low" | "normal" | "critical"
+NotificationAction  = {"key": string, "label": string}
+Notification = {"id": u64, "source": string | null, "title": string, "body": string,
+                "urgency": NotificationUrgency, "category": string | null,
+                "actions": [NotificationAction], "hints": object,
+                "posted_seq": u64, "posted_ts_ms": u64,
+                "dismissed": bool, "closed_seq": u64 | null,
+                "close_reason": string | null, "timeout_ms": u64 | null}
 ```
 
 `changed_regions` is the union of surface damage observed in the window since the
@@ -335,6 +343,80 @@ Consequences:
   observed the focus change (its own `wl_keyboard.enter`) publishes against the new
   focus.
 
+### 5.9 Notifications (programmable event source)
+
+| Method | Params | Result |
+|---|---|---|
+| `post_notification` | `{"source": string?, "title": string, "body": string = "", "urgency": "low"\|"normal"\|"critical" = "normal", "category": string?, "actions": [NotificationAction] = [], "hints": {string: string} = {}, "timeout_ms": u64?}` | `{"notification_id": u64, "seq": u64}` |
+| `list_notifications` | `{"include_dismissed": bool = false}` | `{"notifications": [Notification]}` |
+| `close_notification` | `{"notification_id": u64, "reason": "dismissed"\|"action"\|"expired"\|"closed" = "dismissed"}` | `{"notification_id": u64, "seq": u64}` |
+| `invoke_notification_action` | `{"notification_id": u64, "action_key": string}` | `{"notification_id": u64, "action_key": string, "seq": u64}` |
+
+`post_notification` is the runtime's programmable notification source. It injects a
+notification into the runtime inbox, assigns it a `notification_id` (monotonic,
+never reused, independent of the event `seq` domain), and publishes a `notification`
+event (§5.6) carrying the resulting `Notification`. `source` names the originator
+(`null`/omitted means an unnamed runtime source); `category` is a free-form class
+(e.g. `"message"`, `"email"`, `"progress"`); `actions` are the selectable buttons a
+consumer can invoke; `hints` is an opaque map of string key→value pairs passed
+through verbatim (freedesktop-style hint passthrough); `timeout_ms`, when set, is an
+advisory hint that the notification is expected to be acted on within that many
+milliseconds (the runtime does not itself auto-dismiss in v1).
+
+Notifications are **runtime-scoped**, not connection-scoped: every connection sees
+every notification and may close or invoke actions on any of them.
+
+- `list_notifications` returns the non-dismissed notifications, newest first
+  (`posted_seq` descending); `include_dismissed` includes closed ones.
+- `close_notification` marks the notification dismissed and publishes a
+  `notification_closed` event carrying the same `reason`. Closing an
+  already-dismissed notification is a successful no-op that publishes nothing.
+- `invoke_notification_action` publishes a `notification_action` event for the given
+  `action_key`; the runtime performs no action of its own — it reports the
+  invocation so an agent or viewer can react. It does not dismiss the notification.
+  An `action_key` not present in the notification's `actions` fails with
+  `invalid_request`.
+- `post_notification` with an empty `title` fails with `invalid_request`.
+- An unknown `notification_id` fails with `unknown_notification` (§6).
+
+The three notification event kinds are `notification` (`data` =
+`{"notification": Notification}`), `notification_closed` (`data` =
+`{"notification_id": u64, "reason": string}`) and `notification_action` (`data` =
+`{"notification_id": u64, "action_key": string}`).
+
+### 5.10 Event waits (reactive wakeups)
+
+| Method | Params | Result |
+|---|---|---|
+| `wait_for_events` | `{"kinds": [EventKind] = all, "window_id": u64?, "timeout_ms": u64 = 5000, "max_events": u32 = 32, "since_seq": u64?}` | `{"events": [EventRecord], "timed_out": bool, "elapsed_ms": u64, "seq": u64}` |
+
+`EventRecord` = `{"event": EventKind, "seq": u64, "ts_ms": u64, "data": object}` —
+the same envelope as an event frame (§1), so a waiter and a `subscribe_events`
+subscription describe an event identically.
+
+`wait_for_events` is the agent's idle primitive: it blocks until at least one event
+matching `kinds` (and `window_id`, when given) has been published after the filter
+point, or until `timeout_ms` elapses. It then answers with the collected events
+(oldest first, at most `max_events`) and the runtime's current event watermark
+`seq`. An empty `kinds` filter means "every emitted kind" (the §5.6 default) and
+`window_id` restricts to events carrying that window (window-less events such as
+`app_launched` and notifications are then not delivered). `inspect_frame` is never
+delivered, mirroring §5.6.
+
+The filter point is `since_seq` when given (only events with `seq > since_seq`
+count), else the runtime watermark captured when the wait began — so an idling
+agent that passes the previous result's `seq` never misses an event, and one that
+omits it starts fresh (only events after the wait began count). `timed_out` reports
+that the horizon was reached before any matching event arrived, in which case
+`events` is empty and `seq` is the current watermark. `elapsed_ms` counts from the
+moment the wait was created to the moment it resolved, in the same monotonic domain
+as `ts_ms` (§4).
+
+`wait_for_events` is the pull counterpart of the §5.6 push subscription: the
+subscription streams every matching event as it happens, while `wait_for_events` is
+one request that answers once — which is what lets an agent stay entirely idle
+between wakeups.
+
 ## 6. Errors
 
 ```jsonc
@@ -342,8 +424,9 @@ Consequences:
 ```
 
 Codes: `invalid_request`, `unknown_method`, `unknown_window`, `unknown_app`,
-`launch_failed`, `capture_failed`, `render_failed`, `timeout`, `not_supported`,
-`busy`, `internal`, `shutting_down`, `protocol_version_mismatch`.
+`unknown_notification`, `launch_failed`, `capture_failed`, `render_failed`,
+`timeout`, `not_supported`, `busy`, `internal`, `shutting_down`,
+`protocol_version_mismatch`.
 
 The server MUST answer every request with exactly one response frame and MUST NOT
 close the connection because of a client error (only on framing corruption).

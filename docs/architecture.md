@@ -287,3 +287,27 @@ Seat and input:
 - Determinism: no sleeps longer than needed, deadlines explicit, no network, no GPU.
   The GL renderer is exercised only when `ADESK_TEST_GL=1` and must skip cleanly
   otherwise.
+
+## 11. Notifications and the event inbox (`adesk-notify`)
+
+- `adesk-notify` owns the runtime's notification store and its event inbox.
+  The store is mutated **synchronously** by the §5.9 request handlers
+  (`post`/`close`/`invoke`) and never by the pump; the inbox is fed by the event pump
+  (`handle_event`, one event per call in `seq` order) exactly like the observer, and
+  answers `wait_for_events` (§5.10). Splitting the two keeps a store mutation and the
+  event it publishes from ever disagreeing.
+- Notifications enter the single event stream: a §5.9 handler reserves a `seq`
+  (`RuntimeCommand::ReserveSeq`, §9), builds `RuntimeEvent::Notification{..}` and
+  sends it on the compositor's broadcast, so the pump fans it out like any other
+  event (`docs/notifications.md`).
+- The observer ignores notification events — they are not counted and only advance
+  its watermark — while the server's fan-out delivers them to `notification`
+  subscribers and the inbox records them for `wait_for_events`.
+- `wait_for_events` is the pull counterpart of a push subscription: it captures a
+  filter point (an explicit `since_seq`, else the current watermark) and resolves
+  with the events published after it, or a timeout. Like the observer's waits it
+  uses a generation-counter wakeup so no matching event can be missed; unlike the
+  observer it keeps no per-window state.
+- `NotificationService` is runtime-scoped and cheap-clone (one `Arc<Inner>` per
+  runtime, owned by `ServerContext`), mirroring `ObserverService`. Both are fed by
+  the one pump task; neither spawns background tasks of its own.
