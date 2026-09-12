@@ -88,6 +88,16 @@ observes the desktop and provides limited human input over a purpose-built proto
 `adesk-viewer-gui` is the interactive GTK4/libadwaita front-end (a desktop window, a
 window task bar, and human pointer/key/text routed through the same VAP seat path).
 
+Screen recording rides the same VAP connection: the runtime can start/stop a recording
+of the desktop and write it to a video file, driven by `adesk-recorder` — a pure-Rust
+Motion-JPEG/AVI software backend that always works headless, plus an optional
+GPU-accelerated H.264 backend that shells out to `ffmpeg` with a hardware encoder
+(VA-API → NVENC → V4L2, `libx264` fallback). VAP gains the `start_recording` /
+`stop_recording` / `request_recording` client messages and the `recording` server
+message; the headless `adesk-viewer` binary has a `--record <FILE>` mode and
+`adesk-viewer-gui` a record toggle. Recording is runtime-scoped (not connection-scoped)
+and captures on demand, so the on-demand-rendering invariant holds.
+
 ## Cross-crate contracts
 
 - **Protocol:** `docs/protocol.md` is normative. `adesk-proto` implements it exactly;
