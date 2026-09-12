@@ -61,8 +61,9 @@ pub(crate) enum CountedKind {
 
 /// A [`RuntimeEvent`] reduced to what waiters count.
 ///
-/// `AppLaunched` is deliberately not counted: it is a process launch, not a GUI
-/// state change, and it has no window. It only advances the watermark.
+/// `AppLaunched` and the notification events (`Notification`,
+/// `NotificationClosed`, `NotificationAction`) are deliberately not counted: they
+/// are not GUI state changes and have no window. They only advance the watermark.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CountedEvent {
     /// Global event sequence.
@@ -171,9 +172,13 @@ impl CountedEvent {
                     popup_id: *popup_id,
                 },
             ),
-            // Process launch: no window, no GUI state change. It only advances
-            // the watermark (`ObserverService::handle_event`).
-            RuntimeEvent::AppLaunched { .. } => return None,
+            // Process launch and notification events carry no window and no GUI
+            // state change: they only advance the watermark
+            // (`ObserverService::handle_event`), like `AppLaunched`.
+            RuntimeEvent::AppLaunched { .. }
+            | RuntimeEvent::Notification { .. }
+            | RuntimeEvent::NotificationClosed { .. }
+            | RuntimeEvent::NotificationAction { .. } => return None,
         };
 
         Some(CountedEvent {

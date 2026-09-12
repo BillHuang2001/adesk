@@ -234,7 +234,9 @@ impl ObserverService {
     ///   them (they count as changes);
     /// - window-scoped events for unknown windows create state on demand
     ///   (lagged streams are self-healing) — a later `resync` corrects it;
-    /// - `AppLaunched`: watermark only, never counted;
+    /// - `AppLaunched` and the notification events
+    ///   (`Notification`/`NotificationClosed`/`NotificationAction`): watermark
+    ///   only, never counted;
     /// - push a `CountedEvent` for counted kinds and bump the generation;
     /// - never log above `trace`.
     pub fn handle_event(&self, event: &RuntimeEvent) {
@@ -293,9 +295,13 @@ impl ObserverService {
                         window.state_uncertain = false;
                     }
                 }
-                // Process launch: no window, no GUI state change. Watermark + clock
-                // only, and `from_runtime_event` already returns `None` for it.
-                RuntimeEvent::AppLaunched { .. } => {}
+                // Process launch and notification events: no window, no GUI state
+                // change. Watermark + clock only, and `from_runtime_event` already
+                // returns `None` for them.
+                RuntimeEvent::AppLaunched { .. }
+                | RuntimeEvent::Notification { .. }
+                | RuntimeEvent::NotificationClosed { .. }
+                | RuntimeEvent::NotificationAction { .. } => {}
             }
             // A window whose state was dropped and re-created (or created on demand
             // while a waiter is already registered) must keep its active waiters
