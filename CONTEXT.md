@@ -221,6 +221,7 @@ downstream crates still ship their own fixture binary because testkit's `adesk-t
 | Test harness, Wayland test client, fixtures | `crates/adesk-testkit/` |
 | Viewer wire protocol (VAP) messages + codec | `crates/adesk-viewer-proto/` |
 | Viewer server session, client SDK, headless viewer binary | `crates/adesk-viewer/` |
+| Screen recording (frame encoding, AVI/MP4 muxing, GPU ffmpeg backend) | `crates/adesk-recorder/` |
 | AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
 | Protocol/viewer/machine specs, architecture decisions | `docs/` |
 | Flake packages + NixOS module, dev shell, build wrapper | `flake.nix`, `nix/`, `scripts/` |
