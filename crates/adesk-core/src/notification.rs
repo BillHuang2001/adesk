@@ -145,7 +145,10 @@ mod tests {
             (NotificationUrgency::Critical, "critical"),
         ];
         for (value, name) in expected {
-            assert_eq!(serde_json::to_value(value).unwrap(), serde_json::json!(name));
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::json!(name)
+            );
             assert_eq!(
                 value,
                 serde_json::from_value(serde_json::json!(name)).unwrap()
@@ -162,7 +165,10 @@ mod tests {
             (NotificationCloseReason::Closed, "closed"),
         ];
         for (value, name) in expected {
-            assert_eq!(serde_json::to_value(value).unwrap(), serde_json::json!(name));
+            assert_eq!(
+                serde_json::to_value(value).unwrap(),
+                serde_json::json!(name)
+            );
             assert_eq!(
                 value,
                 serde_json::from_value(serde_json::json!(name)).unwrap()
