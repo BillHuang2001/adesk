@@ -104,6 +104,9 @@ fn event_name(kind: EventKind) -> &'static str {
         EventKind::PopupDisappeared => "popup_disappeared",
         EventKind::Quiet => "quiet",
         EventKind::AppLaunched => "app_launched",
+        EventKind::Notification => "notification",
+        EventKind::NotificationClosed => "notification_closed",
+        EventKind::NotificationAction => "notification_action",
         EventKind::InspectFrame => "inspect_frame",
     }
 }

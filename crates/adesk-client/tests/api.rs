@@ -12,13 +12,14 @@ mod common;
 use std::future::Future;
 
 use adesk_client::{
-    CaptureRegionRequest, CaptureRequest, ClickRequest, ClientError, DragRequest, EventFilter,
-    EventKind, ImagePayload, InspectCaptureRequest, InspectSubscribeRequest, KeyChord,
-    ObserveRequest, PointerButtonRequest, Renderer, ScrollRequest, WaitForChangeRequest,
-    WaitForQuietRequest,
+    AgpEvent, CaptureRegionRequest, CaptureRequest, ClickRequest, ClientError, DragRequest,
+    EventFilter, EventKind, ImagePayload, InspectCaptureRequest, InspectSubscribeRequest, KeyChord,
+    ObserveRequest, PointerButtonRequest, PostNotificationRequest, Renderer, ScrollRequest,
+    WaitForChangeRequest, WaitForEventsRequest, WaitForQuietRequest,
 };
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, LaunchId, OverlayKind, Position, Rect, Size, WindowId,
+    ActionId, AppId, AppInfo, Button, LaunchId, NotificationAction, NotificationCloseReason,
+    NotificationId, NotificationUrgency, OverlayKind, Position, Rect, RuntimeEvent, Size, WindowId,
     WindowState,
 };
 use common::{connect, window_info, MockServer, TIMEOUT};
@@ -1190,4 +1191,386 @@ async fn inspect_subscribe_roundtrip() {
     .expect("inspect_subscribe succeeds");
 
     assert_eq!(stream.subscription_id(), 4);
+}
+
+/// A §4 `Notification` fixture with actions and hints.
+fn notification() -> Value {
+    json!({
+        "id": 5,
+        "source": "user",
+        "title": "Build finished",
+        "body": "The workspace compiled",
+        "urgency": "critical",
+        "category": "message",
+        "actions": [
+            {"key": "view", "label": "View"},
+            {"key": "dismiss", "label": "Dismiss"},
+        ],
+        "hints": {"sound-name": "message-new-instant"},
+        "posted_seq": 8300,
+        "posted_ts_ms": 64000,
+        "dismissed": false,
+        "closed_seq": null,
+        "close_reason": null,
+        "timeout_ms": 5000,
+    })
+}
+
+/// `post_notification` (§5.9) round-trip.
+///
+/// Wire: method 'post_notification', params the notification fields. The
+/// optional keys 'source'/'category'/'timeout_ms' are omitted when unset;
+/// 'body'/'urgency'/'actions'/'hints' always carry a value. Result:
+/// 'notification_id' + 'seq'. Expect a `PostNotificationResult`.
+#[tokio::test]
+async fn post_notification_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let request = PostNotificationRequest::new("Build finished")
+        .source("user")
+        .body("The workspace compiled")
+        .urgency(NotificationUrgency::Critical)
+        .category("message")
+        .action("view", "View")
+        .hint("sound-name", "message-new-instant")
+        .timeout_ms(5000);
+
+    // Client-level serialisation: every field the protocol defines is present
+    // here because the builder set them all.
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({
+            "source": "user",
+            "title": "Build finished",
+            "body": "The workspace compiled",
+            "urgency": "critical",
+            "category": "message",
+            "actions": [{"key": "view", "label": "View"}],
+            "hints": {"sound-name": "message-new-instant"},
+            "timeout_ms": 5000,
+        })
+    );
+
+    let result = round_trip(client.post_notification(request), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "post_notification");
+        assert_eq!(params["title"], json!("Build finished"));
+        assert_eq!(params["body"], json!("The workspace compiled"));
+        assert_eq!(params["urgency"], json!("critical"));
+        assert_eq!(params["source"], json!("user"));
+        assert_eq!(params["category"], json!("message"));
+        assert_eq!(params["actions"], json!([{"key": "view", "label": "View"}]));
+        assert_eq!(
+            params["hints"],
+            json!({"sound-name": "message-new-instant"})
+        );
+        assert_eq!(params["timeout_ms"], json!(5000));
+        server
+            .respond(id, json!({"notification_id": 5, "seq": 8300}))
+            .await;
+    })
+    .await
+    .expect("post_notification succeeds");
+
+    assert_eq!(result.notification_id, NotificationId(5));
+    assert_eq!(result.seq, 8300);
+}
+
+/// `post_notification` omits unset optional fields on the wire.
+///
+/// A bare `PostNotificationRequest::new` serialises only the fields with a
+/// value (`title`/`body`/`urgency`/`actions`/`hints`), so 'source'/'category'/
+/// 'timeout_ms' do not appear in the client-level params object.
+#[test]
+fn post_notification_omits_unset_optionals() {
+    let value =
+        serde_json::to_value(PostNotificationRequest::new("Hi")).expect("serialise the request");
+    assert_eq!(
+        value,
+        json!({
+            "title": "Hi",
+            "body": "",
+            "urgency": "normal",
+            "actions": [],
+            "hints": {},
+        })
+    );
+    assert!(value.get("source").is_none());
+    assert!(value.get("category").is_none());
+    assert!(value.get("timeout_ms").is_none());
+}
+
+/// `list_notifications` (§5.9) round-trip.
+///
+/// Wire: method 'list_notifications', params 'include_dismissed'. Result:
+/// 'notifications' (a list of §4 `Notification`s). Expect the decoded vector.
+#[tokio::test]
+async fn list_notifications_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let notifications = round_trip(client.list_notifications(false), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "list_notifications");
+        assert_eq!(params["include_dismissed"], json!(false));
+        server
+            .respond(id, json!({"notifications": [notification()]}))
+            .await;
+    })
+    .await
+    .expect("list_notifications succeeds");
+
+    assert_eq!(notifications.len(), 1);
+    let stored = &notifications[0];
+    assert_eq!(stored.id, NotificationId(5));
+    assert_eq!(stored.source.as_deref(), Some("user"));
+    assert_eq!(stored.urgency, NotificationUrgency::Critical);
+    assert_eq!(stored.category.as_deref(), Some("message"));
+    assert_eq!(
+        stored.actions,
+        vec![
+            NotificationAction {
+                key: "view".into(),
+                label: "View".into(),
+            },
+            NotificationAction {
+                key: "dismiss".into(),
+                label: "Dismiss".into(),
+            },
+        ]
+    );
+    assert_eq!(
+        stored.hints.get("sound-name").map(String::as_str),
+        Some("message-new-instant")
+    );
+    assert!(!stored.dismissed);
+    assert_eq!(stored.timeout_ms, Some(5000));
+}
+
+/// `close_notification` (§5.9) round-trip.
+///
+/// Wire: method 'close_notification', params 'notification_id' + 'reason'.
+/// Result: 'notification_id' + 'seq'. Expect a `CloseNotificationResult`.
+#[tokio::test]
+async fn close_notification_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let result = round_trip(
+        client.close_notification(NotificationId(5), NotificationCloseReason::Expired),
+        async {
+            let (id, method, params) = server.next_request().await;
+            assert_eq!(method, "close_notification");
+            assert_eq!(params["notification_id"], json!(5));
+            assert_eq!(params["reason"], json!("expired"));
+            server
+                .respond(id, json!({"notification_id": 5, "seq": 8301}))
+                .await;
+        },
+    )
+    .await
+    .expect("close_notification succeeds");
+
+    assert_eq!(result.notification_id, NotificationId(5));
+    assert_eq!(result.seq, 8301);
+}
+
+/// `invoke_notification_action` (§5.9) round-trip.
+///
+/// Wire: method 'invoke_notification_action', params 'notification_id' +
+/// 'action_key'. Result: 'notification_id' + 'action_key' + 'seq'. Expect an
+/// `InvokeNotificationActionResult`.
+#[tokio::test]
+async fn invoke_notification_action_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let result = round_trip(
+        client.invoke_notification_action(NotificationId(5), "view"),
+        async {
+            let (id, method, params) = server.next_request().await;
+            assert_eq!(method, "invoke_notification_action");
+            assert_eq!(params["notification_id"], json!(5));
+            assert_eq!(params["action_key"], json!("view"));
+            server
+                .respond(
+                    id,
+                    json!({"notification_id": 5, "action_key": "view", "seq": 8302}),
+                )
+                .await;
+        },
+    )
+    .await
+    .expect("invoke_notification_action succeeds");
+
+    assert_eq!(result.notification_id, NotificationId(5));
+    assert_eq!(result.action_key, "view");
+    assert_eq!(result.seq, 8302);
+}
+
+/// `wait_for_events` (§5.10) round-trip and typed mapping.
+///
+/// Wire: method 'wait_for_events'. The client omits 'kinds'/'window_id'/
+/// 'since_seq' when unset (proto fills 'kinds' with all fourteen filterable
+/// kinds). Result: 'events' (each an `EventRecord`), 'timed_out', 'elapsed_ms',
+/// 'seq'. Expect each record typed as an `AgpEvent`: a notification record
+/// becomes `AgpEvent::Runtime(RuntimeEvent::Notification)`, an unknown kind
+/// degrades to `AgpEvent::Other`, and the envelope fields are preserved.
+#[tokio::test]
+async fn wait_for_events_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    // Client-level serialisation: unset optionals are omitted.
+    assert_eq!(
+        serde_json::to_value(WaitForEventsRequest::new()).expect("serialise the request"),
+        json!({"timeout_ms": 5000, "max_events": 32})
+    );
+
+    let result = round_trip(client.wait_for_events(WaitForEventsRequest::new()), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "wait_for_events");
+        assert_eq!(params["timeout_ms"], json!(5000));
+        assert_eq!(params["max_events"], json!(32));
+        assert!(
+            params.get("window_id").is_none(),
+            "no window_id key when None: {params}"
+        );
+        assert!(
+            params.get("since_seq").is_none(),
+            "no since_seq key when None: {params}"
+        );
+        // Proto canonicalises the omitted `kinds` to all fourteen filterable
+        // kinds (§5.6/§5.9 order).
+        assert_eq!(
+            params["kinds"],
+            json!([
+                "window_created",
+                "window_destroyed",
+                "window_activated",
+                "title_changed",
+                "surface_commit",
+                "surface_damage",
+                "focus_changed",
+                "popup_appeared",
+                "popup_disappeared",
+                "quiet",
+                "app_launched",
+                "notification",
+                "notification_closed",
+                "notification_action",
+            ])
+        );
+        server
+            .respond(
+                id,
+                json!({
+                    "events": [
+                        {"event": "notification", "seq": 8300, "ts_ms": 64000,
+                         "data": {"notification": notification()}},
+                        {"event": "future_kind", "seq": 8301, "ts_ms": 64010,
+                         "data": {"whatever": true}},
+                    ],
+                    "timed_out": false,
+                    "elapsed_ms": 12,
+                    "seq": 8301,
+                }),
+            )
+            .await;
+    })
+    .await
+    .expect("wait_for_events succeeds");
+
+    assert!(!result.timed_out);
+    assert_eq!(result.elapsed_ms, 12);
+    assert_eq!(result.seq, 8301);
+    assert_eq!(result.events.len(), 2);
+
+    match &result.events[0] {
+        AgpEvent::Runtime(RuntimeEvent::Notification {
+            seq,
+            ts_ms,
+            notification: got,
+        }) => {
+            assert_eq!(*seq, 8300);
+            assert_eq!(*ts_ms, 64000);
+            assert_eq!(got.id, NotificationId(5));
+            assert_eq!(got.title, "Build finished");
+            assert_eq!(got.urgency, NotificationUrgency::Critical);
+        }
+        other => panic!("expected a typed notification event, got {other:?}"),
+    }
+
+    match &result.events[1] {
+        AgpEvent::Other {
+            name,
+            seq,
+            ts_ms,
+            data,
+        } => {
+            assert_eq!(name, "future_kind");
+            assert_eq!(*seq, 8301);
+            assert_eq!(*ts_ms, 64010);
+            assert_eq!(data, &json!({"whatever": true}));
+        }
+        other => panic!("expected AgpEvent::Other for an unknown kind, got {other:?}"),
+    }
+}
+
+/// A `wait_for_events` timeout is a result, not an error.
+///
+/// A response with `timed_out: true` and an empty `events` list decodes to a
+/// `WaitForEventsResult` (not a `ClientError`), preserving `elapsed_ms`/`seq`.
+#[tokio::test]
+async fn wait_for_events_timeout_is_a_result() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let result = round_trip(
+        client.wait_for_events(WaitForEventsRequest::new().timeout_ms(250)),
+        async {
+            let (id, method, params) = server.next_request().await;
+            assert_eq!(method, "wait_for_events");
+            assert_eq!(params["timeout_ms"], json!(250));
+            server
+                .respond(
+                    id,
+                    json!({"events": [], "timed_out": true, "elapsed_ms": 250, "seq": 9000}),
+                )
+                .await;
+        },
+    )
+    .await
+    .expect("a timed-out wait is a semantic result, not an error");
+
+    assert!(result.timed_out);
+    assert!(result.events.is_empty());
+    assert_eq!(result.elapsed_ms, 250);
+    assert_eq!(result.seq, 9000);
+}
+
+/// `WaitForEventsRequest` builder serialises every field it is given.
+///
+/// Assert the client-level params object for a fully populated request so the
+/// wire shape (kinds as snake_case names, window_id/since_seq included) is
+/// pinned without proto canonicalisation.
+#[test]
+fn wait_for_events_builder_serialises_fields() {
+    let request = WaitForEventsRequest::new()
+        .kinds([EventKind::Notification, EventKind::NotificationClosed])
+        .window(WindowId(17))
+        .timeout_ms(1000)
+        .max_events(8)
+        .since_seq(8300);
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({
+            "kinds": ["notification", "notification_closed"],
+            "window_id": 17,
+            "timeout_ms": 1000,
+            "max_events": 8,
+            "since_seq": 8300,
+        })
+    );
 }

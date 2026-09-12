@@ -11,7 +11,10 @@ use adesk_client::{
     AgpEvent, AgpEventStream, Client, ClientError, EventFilter, EventKind, EventStream,
     ImagePayload, QuietEvent,
 };
-use adesk_core::{Rect, RuntimeEvent, WindowId};
+use adesk_core::{
+    NotificationAction, NotificationCloseReason, NotificationId, NotificationUrgency, Rect,
+    RuntimeEvent, WindowId,
+};
 use common::{connect, MockServer, TIMEOUT};
 use futures::StreamExt;
 use serde_json::json;
@@ -787,4 +790,244 @@ fn quiet_event_serde_round_trip() {
     assert_eq!(value, json!({ "window_id": null, "quiet_ms": 100 }));
     let back: QuietEvent = serde_json::from_value(value).expect("deserialise a runtime-wide quiet");
     assert_eq!(back, runtime);
+}
+
+/// One §4 `Notification` wire object with actions and hints.
+fn notification_value() -> serde_json::Value {
+    json!({
+        "id": 5,
+        "source": "user",
+        "title": "Build finished",
+        "body": "The workspace compiled",
+        "urgency": "critical",
+        "category": "message",
+        "actions": [
+            {"key": "view", "label": "View"},
+            {"key": "dismiss", "label": "Dismiss"},
+        ],
+        "hints": {"sound-name": "message-new-instant"},
+        "posted_seq": 8300,
+        "posted_ts_ms": 64000,
+        "dismissed": false,
+        "closed_seq": null,
+        "close_reason": null,
+        "timeout_ms": 5000,
+    })
+}
+
+/// The three notification frames are typed as `RuntimeEvent`s.
+///
+/// §5.9 adds three `adesk_core::RuntimeEvent` variants delivered through the
+/// existing `AgpEvent::Runtime` reconstruction path (no new `AgpEvent` variant):
+/// emit a 'notification' frame (`data.notification` = a `Notification`), a
+/// 'notification_closed' frame and a 'notification_action' frame; assert each
+/// maps to its typed `RuntimeEvent` with fields and the frame `seq`/`ts_ms`
+/// preserved.
+#[tokio::test]
+async fn notification_frames_are_typed() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+    let mut stream = subscribe_frames(&mut server, &client, EventFilter::all(), 20).await;
+
+    server
+        .emit_event(
+            "notification",
+            91,
+            7000,
+            json!({ "notification": notification_value() }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the notification event is typed")
+    {
+        AgpEvent::Runtime(RuntimeEvent::Notification {
+            seq,
+            ts_ms,
+            notification,
+        }) => {
+            assert_eq!(seq, 91, "the frame envelope is retained");
+            assert_eq!(ts_ms, 7000, "the frame envelope is retained");
+            assert_eq!(notification.id, NotificationId(5));
+            assert_eq!(notification.source.as_deref(), Some("user"));
+            assert_eq!(notification.title, "Build finished");
+            assert_eq!(notification.urgency, NotificationUrgency::Critical);
+            assert_eq!(
+                notification.actions,
+                vec![
+                    NotificationAction {
+                        key: "view".into(),
+                        label: "View".into(),
+                    },
+                    NotificationAction {
+                        key: "dismiss".into(),
+                        label: "Dismiss".into(),
+                    },
+                ]
+            );
+            assert_eq!(
+                notification.hints.get("sound-name").map(String::as_str),
+                Some("message-new-instant")
+            );
+        }
+        other => panic!("expected RuntimeEvent::Notification, got {other:?}"),
+    }
+
+    server
+        .emit_event(
+            "notification_closed",
+            92,
+            7010,
+            json!({ "notification_id": 5, "reason": "expired" }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the notification_closed event is typed")
+    {
+        AgpEvent::Runtime(RuntimeEvent::NotificationClosed {
+            seq,
+            ts_ms,
+            notification_id,
+            reason,
+        }) => {
+            assert_eq!(seq, 92);
+            assert_eq!(ts_ms, 7010);
+            assert_eq!(notification_id, NotificationId(5));
+            assert_eq!(reason, NotificationCloseReason::Expired);
+        }
+        other => panic!("expected RuntimeEvent::NotificationClosed, got {other:?}"),
+    }
+
+    server
+        .emit_event(
+            "notification_action",
+            93,
+            7020,
+            json!({ "notification_id": 5, "action_key": "view" }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the notification_action event is typed")
+    {
+        AgpEvent::Runtime(RuntimeEvent::NotificationAction {
+            seq,
+            ts_ms,
+            notification_id,
+            action_key,
+        }) => {
+            assert_eq!(seq, 93);
+            assert_eq!(ts_ms, 7020);
+            assert_eq!(notification_id, NotificationId(5));
+            assert_eq!(action_key, "view");
+        }
+        other => panic!("expected RuntimeEvent::NotificationAction, got {other:?}"),
+    }
+}
+
+/// The notification kinds participate in local kind filtering.
+///
+/// Subscribe with `EventFilter::kinds([EventKind::Notification])`; emit a
+/// 'surface_commit' (a non-matching kind) then a 'notification'; assert only the
+/// notification is yielded, proving the new `EventKind` variant selects it.
+#[tokio::test]
+async fn notification_kind_is_locally_filtered() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+    let mut stream = subscribe_frames(
+        &mut server,
+        &client,
+        EventFilter::kinds([EventKind::Notification]),
+        21,
+    )
+    .await;
+
+    server
+        .emit_event(
+            "surface_commit",
+            94,
+            7100,
+            json!({ "window_id": 17, "commit_seq": 3, "damage": [] }),
+        )
+        .await;
+    server
+        .emit_event(
+            "notification",
+            95,
+            7110,
+            json!({ "notification": notification_value() }),
+        )
+        .await;
+
+    match next_frame(&mut stream)
+        .await
+        .expect("the notification event is typed")
+    {
+        AgpEvent::Runtime(RuntimeEvent::Notification {
+            seq, notification, ..
+        }) => {
+            assert_eq!(seq, 95, "the surface_commit was filtered locally");
+            assert_eq!(notification.id, NotificationId(5));
+        }
+        other => panic!("expected only RuntimeEvent::Notification, got {other:?}"),
+    }
+
+    // A notification has no window, so a window-restricted filter drops it.
+    let mut windowed = subscribe_frames(
+        &mut server,
+        &client,
+        EventFilter::all().window(WindowId(17)),
+        22,
+    )
+    .await;
+    server
+        .emit_event(
+            "notification",
+            96,
+            7120,
+            json!({ "notification": notification_value() }),
+        )
+        .await;
+    server
+        .emit_event(
+            "surface_commit",
+            97,
+            7130,
+            json!({ "window_id": 17, "commit_seq": 4, "damage": [] }),
+        )
+        .await;
+
+    match next_frame(&mut windowed)
+        .await
+        .expect("the window-scoped event is typed")
+    {
+        AgpEvent::Runtime(RuntimeEvent::SurfaceCommit { seq, .. }) => {
+            assert_eq!(seq, 97, "the window-less notification was filtered locally");
+        }
+        other => panic!("expected the window-scoped SurfaceCommit, got {other:?}"),
+    }
+}
+
+/// `EventKind` wire names round-trip for the notification variants.
+///
+/// Pin the snake_case names added for §5.9 and confirm serde accepts them, so
+/// the client's local kind filter matches the wire `event` names.
+#[test]
+fn notification_event_kinds_round_trip() {
+    let expected = [
+        (EventKind::Notification, "notification"),
+        (EventKind::NotificationClosed, "notification_closed"),
+        (EventKind::NotificationAction, "notification_action"),
+    ];
+    for (kind, name) in expected {
+        assert_eq!(kind.as_str(), name);
+        let value = serde_json::to_value(kind).expect("serialise the kind");
+        assert_eq!(value, json!(name));
+        let back: EventKind = serde_json::from_value(value).expect("deserialise the kind");
+        assert_eq!(back, kind);
+    }
 }

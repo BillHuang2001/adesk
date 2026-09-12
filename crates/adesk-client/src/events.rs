@@ -30,7 +30,7 @@ use serde_json::Value;
 use crate::transport::EventReceiver;
 use crate::{ImagePayload, QuietEvent, Result};
 
-/// AGP event kind — the 9 `adesk_core::EventKind` values plus the two
+/// AGP event kind — the 12 `adesk_core::EventKind` values plus the two
 /// protocol-only kinds from §5.6: `surface_damage` (a filter alias that is
 /// never emitted as a frame) and `quiet` (emitted with a typed payload).
 ///
@@ -62,6 +62,12 @@ pub enum EventKind {
     Quiet,
     /// The app registry spawned a process.
     AppLaunched,
+    /// A notification was posted to the runtime inbox (§5.9).
+    Notification,
+    /// A notification was closed (§5.9).
+    NotificationClosed,
+    /// A notification action was invoked (§5.9).
+    NotificationAction,
 }
 
 impl EventKind {
@@ -79,6 +85,9 @@ impl EventKind {
             EventKind::PopupDisappeared => "popup_disappeared",
             EventKind::Quiet => "quiet",
             EventKind::AppLaunched => "app_launched",
+            EventKind::Notification => "notification",
+            EventKind::NotificationClosed => "notification_closed",
+            EventKind::NotificationAction => "notification_action",
         }
     }
 }
@@ -95,6 +104,9 @@ impl From<CoreEventKind> for EventKind {
             CoreEventKind::PopupAppeared => EventKind::PopupAppeared,
             CoreEventKind::PopupDisappeared => EventKind::PopupDisappeared,
             CoreEventKind::AppLaunched => EventKind::AppLaunched,
+            CoreEventKind::Notification => EventKind::Notification,
+            CoreEventKind::NotificationClosed => EventKind::NotificationClosed,
+            CoreEventKind::NotificationAction => EventKind::NotificationAction,
         }
     }
 }
@@ -187,6 +199,9 @@ fn kind_from_name(name: &str) -> Option<EventKind> {
         "popup_disappeared" => Some(EventKind::PopupDisappeared),
         "quiet" => Some(EventKind::Quiet),
         "app_launched" => Some(EventKind::AppLaunched),
+        "notification" => Some(EventKind::Notification),
+        "notification_closed" => Some(EventKind::NotificationClosed),
+        "notification_action" => Some(EventKind::NotificationAction),
         _ => None,
     }
 }
@@ -203,7 +218,7 @@ fn event_window_id(event: &AgpEvent) -> Option<WindowId> {
 
 /// Map one decoded wire event onto the crate's event vocabulary.
 ///
-/// Called by the reader task. The nine core kinds become
+/// Called by the reader task. The twelve core kinds become
 /// [`AgpEvent::Runtime`]; `quiet` becomes [`AgpEvent::Quiet`] when its `data`
 /// fits [`QuietEvent`]; `inspect_frame` becomes [`AgpEvent::InspectFrame`] when
 /// its `data.image` fits [`ImagePayload`]; everything else — the
@@ -313,7 +328,7 @@ pub struct InspectFrame {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum AgpEvent {
-    /// One of the 9 runtime events, typed by `adesk-core`.
+    /// One of the 12 runtime events, typed by `adesk-core`.
     Runtime(RuntimeEvent),
     /// A typed `quiet` event (protocol §5.6): the observer saw no counted
     /// surface commit for the window (or the whole runtime) for `quiet_ms`.
@@ -412,7 +427,7 @@ impl Drop for Subscription {
 }
 
 /// Stream of agent-facing runtime events: `subscribe_events` with a filter that
-/// selects the 9 core kinds.
+/// selects the 12 core kinds.
 ///
 /// Items are `Err(ClientError::Lagged { .. })` if this subscriber fell behind,
 /// then `Err(ClientError::Closed)` (or `Protocol`) once when the connection

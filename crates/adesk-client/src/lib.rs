@@ -12,8 +12,9 @@
 //!   and any number of event subscriptions. Request ids are monotonic per
 //!   connection and responses are matched by id, so out-of-order replies are
 //!   normal and harmless.
-//! - **Typed.** Every AGP method of `docs/protocol.md` §5.1–§5.7 has a typed
-//!   method returning typed results; the public API never exposes raw JSON.
+//! - **Typed.** Every AGP method of `docs/protocol.md` §5.1–§5.7 and §5.9–§5.10
+//!   has a typed method returning typed results; the public API never exposes
+//!   raw JSON.
 //! - **No compositor.** The crate depends on `adesk-core` (vocabulary) and
 //!   `adesk-proto` (wire frames and payloads). It never links Smithay, never
 //!   touches the compositor thread, and has no server-side code.
@@ -121,3 +122,12 @@ pub use api::input::{
 
 // --- AGP §5.7 human inspector ---
 pub use api::inspect::{InspectCaptureRequest, InspectSubscribeRequest};
+
+// --- AGP §5.9 notifications ---
+pub use api::notification::{
+    CloseNotificationResult, InvokeNotificationActionResult, PostNotificationRequest,
+    PostNotificationResult,
+};
+
+// --- AGP §5.10 event waits ---
+pub use api::waits::{WaitForEventsRequest, WaitForEventsResult, DEFAULT_MAX_EVENTS};

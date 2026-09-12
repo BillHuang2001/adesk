@@ -11,8 +11,10 @@ pub(crate) mod apps;
 pub(crate) mod capture;
 pub(crate) mod input;
 pub(crate) mod inspect;
+pub(crate) mod notification;
 pub(crate) mod runtime;
 pub(crate) mod subscribe;
+pub(crate) mod waits;
 pub(crate) mod windows;
 
 use serde::Serialize;
