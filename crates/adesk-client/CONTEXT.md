@@ -149,7 +149,7 @@ Integration tests only (`./tests/`), no compositor, no display, no GPU, no netwo
 Cost centers on the per-request and per-event paths (identified by inspection; the crate has no benchmarks):
 - The inbound event path re-serialises: `EventPayload::to_data` re-serialises the typed payload to a fresh `Value`, and `events::runtime_event` clones the whole event `data` object into a new map plus three inserts per core runtime event.
 - `agp_event_from_raw` clones `data` for the `quiet` arm (the `inspect_frame` image is now moved out of `data` with `Value::take`, so it is not copied).
-- `EventFilter::matches` linearly scans `kinds` (a `Vec::contains` over at most 11 entries). A precomputed bitset is deliberately NOT used: `EventFilter.kinds` is a public mutable field, so a mask cached in the struct could go stale on external reassignment; making `kinds` private or adding a mutation-tracking setter would be a public-API change.
+- `EventFilter::matches` linearly scans `kinds` (a `Vec::contains` over at most 14 entries). A precomputed bitset is deliberately NOT used: `EventFilter.kinds` is a public mutable field, so a mask cached in the struct could go stale on external reassignment; making `kinds` private or adding a mutation-tracking setter would be a public-API change.
 
 ## Known Issues
 
