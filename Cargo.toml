@@ -60,6 +60,9 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # --- imaging / misc ---
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Pure-Rust baseline JPEG encoder: the software screen-recording backend encodes
+# Motion-JPEG frames with it (no C toolchain, no system libraries).
+jpeg-encoder = "0.7"
 tempfile = "3"
 bitflags = "2"
 # Safe pipe creation (OwnedFd pairs) for the testkit data-device helpers; keeps

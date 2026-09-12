@@ -1,0 +1,17 @@
+[package]
+name = "adesk-recorder"
+description = "ADesk screen recording: rendered desktop frames -> encoded video file (pure-Rust software + optional GPU-accelerated backends)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+jpeg-encoder.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
