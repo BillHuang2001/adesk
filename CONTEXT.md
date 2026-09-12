@@ -178,6 +178,11 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 - The server does not push `state` except in reply to `request_state` (the spec's
   advisory per-change push is not implemented), so a viewer refreshes the window
   list by pulling `request_state` rather than via a server push stream.
+- Screen recording's GPU path needs an external `ffmpeg` on `PATH` plus a hardware
+  encoder (VA-API/NVENC/V4L2) and a `/dev/dri` render node; the sandbox has none, so
+  `adesk-recorder`'s hardware tests are detection-gated (they early-return when the
+  facility is absent) and the pure-Rust MJPEG/AVI backend is the always-available path.
+  `--record-encoder auto` selects GPU only when it is actually available.
 
 ## Status
 The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 29 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
