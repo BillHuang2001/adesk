@@ -24,6 +24,7 @@ use adesk_viewer::ViewerTarget;
 
 use crate::bridge::{Bridge, UiEvent};
 use crate::frame_view::FrameView;
+use crate::record::RecordControl;
 use crate::task_bar_view::TaskBarView;
 
 /// The GTK application id (`docs/viewer.md`, GUI front-end).
@@ -52,12 +53,27 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
         .revealed(true)
         .build();
 
+    // The recording control: a header toggle that drives the worker, plus a
+    // status line. Both are updated from the server's status (never just the
+    // local click).
+    let record_control = Rc::new(RefCell::new(RecordControl::new()));
+    let record_button = gtk::ToggleButton::new();
+    record_button.set_label("Record");
+
+    let record_status = gtk::Label::new(None);
+    record_status.set_xalign(0.0);
+    record_status.set_visible(false);
+
+    let header = adw::HeaderBar::new();
+    header.pack_end(&record_button);
+
     let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
     content.append(&banner);
+    content.append(&record_status);
     content.append(&frame_view.widget());
 
     let toolbar = adw::ToolbarView::new();
-    toolbar.add_top_bar(&adw::HeaderBar::new());
+    toolbar.add_top_bar(&header);
     toolbar.add_bottom_bar(&task_bar.widget());
     toolbar.set_content(Some(&content));
 
@@ -89,7 +105,24 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
     // preceding click (a click re-grabs it anyway).
     frame_view.widget().grab_focus();
 
-    let handle = glib::spawn_future_local(event_loop_fn(events, frame_view, task_bar, banner));
+    // A click maps to the next command (start when idle/finished, stop while
+    // recording); the button's label/active state is corrected by the server's
+    // status as it arrives.
+    let click_control = record_control.clone();
+    let click_input = input.clone();
+    record_button.connect_clicked(move |_| {
+        click_input.send(click_control.borrow().toggle_command());
+    });
+
+    let handle = glib::spawn_future_local(event_loop_fn(
+        events,
+        frame_view,
+        task_bar,
+        banner,
+        record_control,
+        record_button,
+        record_status,
+    ));
     *event_loop.borrow_mut() = Some(handle);
 }
 
@@ -100,6 +133,9 @@ async fn event_loop_fn(
     frame_view: FrameView,
     task_bar: TaskBarView,
     banner: adw::Banner,
+    record_control: Rc<RefCell<RecordControl>>,
+    record_button: gtk::ToggleButton,
+    record_status: gtk::Label,
 ) {
     while let Some(event) = events.recv().await {
         match event {
@@ -124,6 +160,17 @@ async fn event_loop_fn(
                 frame_view.set_frame(image);
                 task_bar.set_active(active_window_id);
             }
+            UiEvent::Recording(result) => match result {
+                Ok(status) => {
+                    record_control.borrow_mut().apply(status);
+                    sync_record(&record_control.borrow(), &record_button, &record_status);
+                }
+                Err(message) => {
+                    tracing::debug!(%message, "viewer recording command failed");
+                    record_status.set_text(&format!("recording failed: {message}"));
+                    record_status.set_visible(true);
+                }
+            },
             UiEvent::Disconnected(message) => {
                 tracing::warn!(%message, "viewer disconnected");
                 banner.set_title(&format!("Connection lost: {message}"));
@@ -133,5 +180,19 @@ async fn event_loop_fn(
                 tracing::debug!(%message, "viewer notice");
             }
         }
+    }
+}
+
+/// Reflects the recording control's state onto the toggle button and the status
+/// label (the reactive path: the server's status always wins over the click).
+fn sync_record(control: &RecordControl, button: &gtk::ToggleButton, status: &gtk::Label) {
+    button.set_label(control.button_label());
+    button.set_active(control.is_recording());
+    match control.status_text() {
+        Some(text) => {
+            status.set_text(&text);
+            status.set_visible(true);
+        }
+        None => status.set_visible(false),
     }
 }

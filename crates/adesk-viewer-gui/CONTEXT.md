@@ -5,7 +5,8 @@ The interactive human front-end of an ADesk runtime — the GUI counterpart of t
 headless `adesk-viewer` binary, analogous to `remote-viewer` for a SPICE VM.
 It connects to the runtime's VAP viewer endpoint with `adesk_viewer::ViewerClient`,
 renders the streamed desktop frames, provides a minimal window **task bar** so a
-human can list and switch the tiled windows, and turns local mouse/keyboard/task-bar
+human can list and switch the tiled windows, offers a **recording toggle** that
+starts/stops a runtime-side screen recording, and turns local mouse/keyboard/task-bar
 activity into VAP messages.
 Central principle, inherited from `docs/viewer.md` §5 and the root `CONTEXT.md`:
 the human is placed *in the same seat the agent drives* — a viewer action is never a
@@ -30,8 +31,9 @@ text use the normal seat input path.
     - `pub mod mapping` — `DisplayRect`, `letterbox()`, `widget_to_normalized()`
       (the letterbox math).
     - `pub mod taskbar` — `TaskBarEntry`, `entries(&DesktopState)`, `set_active()`.
-  - Crate-private GTK layer: `keystroke`, `bridge`, `frame_view`, `task_bar_view`,
-    `app`.
+  - Crate-private GTK-free modules: `record` (recording-control state machine),
+    `keystroke` (keystroke routing state machine).
+  - Crate-private GTK layer: `bridge`, `frame_view`, `task_bar_view`, `app`.
 
 ## Constraints
 - **The only GTK4/libadwaita crate in the workspace.** No other crate may gain a
@@ -42,7 +44,7 @@ text use the normal seat input path.
   `v4_8` (gtk4) and `v1_4` (adw) features inline for `gtk::ContentFit`,
   `adw::ToolbarView` and `adw::Banner`.
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files well under the
-  ~1000-line threshold (largest: `./src/bridge.rs`, 432 lines).
+  ~1000-line threshold (largest: `./src/bridge.rs`, 559 lines).
 - All human input goes through `adesk_viewer::ViewerClient` (the same VAP seat path
   the agent's input uses) — never a bespoke or direct-to-compositor path.
 - Coordinates that cross VAP are NORMALIZED `0.0..=1.0` output fractions, never
@@ -61,6 +63,7 @@ text use the normal seat input path.
 | Image payload → RGBA8 decode | `./src/image.rs` |
 | Widget ↔ normalized letterbox math | `./src/mapping.rs` |
 | Task-bar view model | `./src/taskbar.rs` |
+| Recording-control state machine (labels + next command) | `./src/record.rs` |
 | Keystroke routing (key vs text), pure | `./src/keystroke.rs` |
 | tokio ↔ GLib bridge (`Bridge`, `InputCommand`, `UiEvent`, `InputHandle`) | `./src/bridge.rs` |
 | Frame view widget + input controllers | `./src/frame_view.rs` |
@@ -69,9 +72,10 @@ text use the normal seat input path.
 
 ## Design Decisions
 - **GTK-free core, then GTK glue.** All pure logic (CLI, error, image decode,
-  letterbox math, task-bar model, keystroke routing) lives in display-free modules
-  with unit tests; the GTK layer (`app`/`frame_view`/`task_bar_view`) only wires
-  widgets to those helpers and reuses them (no duplicated math).
+  letterbox math, task-bar model, keystroke routing, recording control) lives in
+  display-free modules with unit tests; the GTK layer
+  (`app`/`frame_view`/`task_bar_view`) only wires widgets to those helpers and
+  reuses them (no duplicated math).
 - **tokio ↔ GLib bridge.** `ViewerClient` is tokio-based while GTK runs a glib main
   loop. `bridge` spawns one named OS thread running a single-thread tokio runtime
   that owns the client; the two threads exchange plain `tokio::sync::mpsc`
@@ -98,6 +102,20 @@ text use the normal seat input path.
   toggle rows only when `taskbar::entries` differs from the current model; the
   per-frame `set_active` only re-renders the highlight. Each toggle uses `clicked`
   (not `toggled`) so programmatic highlight updates never re-fire `activate_window`.
+- **Recording control is server-driven.** A `gtk::ToggleButton` in the header
+  sends `InputCommand::StartRecording(RecordRequest::default())` when idle or
+  finished and `InputCommand::StopRecording` while recording; the button's label
+  and active state are then corrected from the server's `RecordingStatus`
+  (`UiEvent::Recording`) — the local click never decides the state. The pure
+  `record::RecordControl` derives `RecordState` from the status (`recording` ⇒
+  Recording, else `error` ⇒ Idle for a retry, else a known `path` ⇒ Finished,
+  else Idle) and produces the labels: button `Record`/`Stop`, status line
+  `REC 12s` while recording, `saved <path>` once finished, or
+  `recording failed: …`. The worker polls `request_recording()` on the existing
+  500 ms tick **only while a recording is active** (gated by the last status),
+  so an idle viewer sends no extra traffic. A start uses the crate-default
+  request (runtime-chosen path, 30 fps, `auto` encoder) — there is no path/fps/
+  encoder UI in v1.
 - **Keystroke routing avoids double-typing.** Both VAP `key` and `text` ultimately
   inject compositor key events (`crates/adesk-server/src/viewer/backend.rs`), so
   `keystroke::KeyRouter` routes a plain text-producing key with no ctrl/alt/super to
@@ -115,7 +133,7 @@ text use the normal seat input path.
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**38 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+**47 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
 - `cli` (7): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target, `socket_path_from` for `None`/empty/set.
 - `mapping` (8): identity, pillarbox, letterbox, corners, center, out-of-rect
@@ -126,8 +144,14 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
 - `error` (2): `ViewerError` → `Client`, message rendering.
 - `keystroke` (7): letter→Text, letter+ctrl→Key press/release, `Return`→Key, Text
   release no-op, no name/unicode→Ignore, space→Text, modified no-name→Ignore.
-- `bridge` (3): decodable frame→`Frame` event, undecodable frame→`Notice`,
-  `InputHandle::close` stops accepting commands.
+- `bridge` (6): decodable frame→`Frame` event, undecodable frame→`Notice`,
+  `InputHandle::close` stops accepting commands, a recording status→
+  `Recording(Ok)` (returning `active`), a recording error→`Recording(Err)`,
+  recording commands reach the worker.
+- `record` (6): new control is idle/`Record`/`StartRecording`, a recording
+  status→Recording/`Stop`/`REC 12s`/`StopRecording`, a finished status→
+  Finished/`Record`/`saved <path>`/`StartRecording`, an error status→Idle with
+  the reason surfaced, an idle status clears the line, duration truncation.
 - The GTK widget wiring (`app`/`frame_view`/`task_bar_view`) is untested glue — it
   needs a display; test pure logic instead, never GUI behavior.
 
@@ -147,12 +171,17 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
 ## Known Issues
 - The connection is one-shot: a dropped connection shows a "Connection lost" banner
   but there is no reconnect affordance (a restart re-connects).
+- The recording toggle always starts with the crate-default `RecordRequest` (a
+  runtime-chosen path, 30 fps, `auto` encoder); there is no UI to choose a path,
+  frame rate or encoder. A runtime that does not support recording answers with
+  an `error`, surfaced as a `recording failed: …` status line.
 
 ## Status
-Implemented and green: `run()`, the GTK application (frame view, task bar, status
-banner), the tokio↔GLib bridge, the CLI, and every pure module with unit tests.
+Implemented and green: `run()`, the GTK application (frame view, task bar,
+recording toggle + status line, status banner), the tokio↔GLib bridge, the CLI,
+and every pure module with unit tests.
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
-`cargo test -p adesk-viewer-gui` (38 passed); `cargo clippy -p adesk-viewer-gui
+`cargo test -p adesk-viewer-gui` (47 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;
 `cargo doc -p adesk-viewer-gui --no-deps --document-private-items` (zero warnings);
 and `cargo check --workspace --all-targets`.

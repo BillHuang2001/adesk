@@ -23,8 +23,10 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use adesk_core::{Button, ButtonState, WindowId};
 use adesk_proto::KeySpec;
-use adesk_viewer::{ViewerClient, ViewerTarget};
-use adesk_viewer_proto::{ControlOwner, DesktopState, KeyAction, ServerHello, ViewerFrame};
+use adesk_viewer::{RecordRequest, ViewerClient, ViewerTarget};
+use adesk_viewer_proto::{
+    ControlOwner, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
+};
 
 use crate::image::{decode, DecodedImage};
 
@@ -78,6 +80,10 @@ pub(crate) enum InputCommand {
     /// Activate a window — the runtime-native `activate_window` path, never
     /// synthesized input.
     ActivateWindow(WindowId),
+    /// Start a screen recording with the given request (`docs/viewer.md` §4).
+    StartRecording(RecordRequest),
+    /// Stop the active screen recording.
+    StopRecording,
 }
 
 /// One event the worker reports to the GTK thread.
@@ -105,6 +111,11 @@ pub(crate) enum UiEvent {
     },
     /// The connection ended; carries a human-readable reason.
     Disconnected(String),
+    /// A screen-recording status (or the failure of a recording command).
+    ///
+    /// The `Err` arm carries the failure's `Display` so it can be surfaced in
+    /// the UI without leaking the error type into the GTK layer.
+    Recording(Result<RecordingStatus, String>),
     /// A non-fatal notice (e.g. a frame that could not be decoded).
     Notice(String),
 }
@@ -258,9 +269,15 @@ async fn session(
 
     let mut frames = std::pin::pin!(client.frames());
 
+    // Reflect a recording that may already be running (e.g. a human attaching
+    // mid-recording); the flag gates the periodic status refresh below.
+    let mut recording = refresh_recording(&client, events).await;
+
     // Refresh the task bar on a modest timer as well as on an active-window
     // change: state is requested inline, so at most one `request_state` is ever
     // in flight (inherent coalescing) and create/destroy/title changes converge.
+    // The recording status is piggybacked on the same tick, but only while a
+    // recording is active, so an idle viewer sends no extra traffic.
     let mut ticker = tokio::time::interval(STATE_REFRESH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Consume the interval's immediately-ready first tick (the initial state
@@ -270,7 +287,7 @@ async fn session(
     loop {
         tokio::select! {
             command = input.recv() => match command {
-                Some(command) => apply_input(&client, command, events).await,
+                Some(command) => apply_input(&client, command, events, &mut recording).await,
                 None => break,
             },
             frame = frames.next() => match frame {
@@ -292,7 +309,12 @@ async fn session(
                     break;
                 }
             },
-            _ = ticker.tick() => refresh_state(&client, events).await,
+            _ = ticker.tick() => {
+                refresh_state(&client, events).await;
+                if recording {
+                    recording = refresh_recording(&client, events).await;
+                }
+            },
         }
     }
 
@@ -330,13 +352,70 @@ async fn refresh_state(client: &ViewerClient, events: &UnboundedSender<UiEvent>)
     }
 }
 
+/// Requests the current recording status and forwards it; returns whether a
+/// recording is active. Logs (never fatal) on error.
+async fn refresh_recording(client: &ViewerClient, events: &UnboundedSender<UiEvent>) -> bool {
+    match client.request_recording().await {
+        Ok(status) => {
+            let recording = status.recording;
+            let _ = events.send(UiEvent::Recording(Ok(status)));
+            recording
+        }
+        Err(error) => {
+            tracing::debug!(%error, "viewer recording status refresh failed");
+            false
+        }
+    }
+}
+
+/// Forwards a recording command's outcome; returns whether a recording is now
+/// active, so the worker can gate its periodic status refresh.
+fn emit_recording(
+    result: Result<RecordingStatus, String>,
+    events: &UnboundedSender<UiEvent>,
+) -> bool {
+    match result {
+        Ok(status) => {
+            let recording = status.recording;
+            let _ = events.send(UiEvent::Recording(Ok(status)));
+            recording
+        }
+        Err(message) => {
+            tracing::debug!(%message, "viewer recording command failed");
+            let _ = events.send(UiEvent::Recording(Err(message)));
+            false
+        }
+    }
+}
+
 /// Applies one input command, logging and noticing (never failing) on error.
+///
+/// Recording commands carry a status reply, so they are forwarded as
+/// [`UiEvent::Recording`] and update `recording`; the seat commands are
+/// fire-and-forget and only produce a [`UiEvent::Notice`] on failure.
 async fn apply_input(
     client: &ViewerClient,
     command: InputCommand,
     events: &UnboundedSender<UiEvent>,
+    recording: &mut bool,
 ) {
     let result = match command {
+        InputCommand::StartRecording(request) => {
+            let result = client
+                .start_recording(request)
+                .await
+                .map_err(|error| error.to_string());
+            *recording = emit_recording(result, events);
+            return;
+        }
+        InputCommand::StopRecording => {
+            let result = client
+                .stop_recording()
+                .await
+                .map_err(|error| error.to_string());
+            *recording = emit_recording(result, events);
+            return;
+        }
         InputCommand::Move { x, y } => client.pointer_move(x, y).await,
         InputCommand::Button {
             button,
@@ -427,5 +506,54 @@ mod tests {
         handle.close();
         handle.send(InputCommand::Move { x: 0.5, y: 0.5 });
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_recording_status_becomes_a_recording_event() {
+        let (events, mut receiver) = unbounded_channel();
+        let status = RecordingStatus::idle()
+            .with_recording(true)
+            .with_counts(3, 500);
+
+        let active = emit_recording(Ok(status.clone()), &events);
+
+        assert!(active);
+        match receiver.try_recv().unwrap() {
+            UiEvent::Recording(Ok(received)) => assert_eq!(received, status),
+            other => panic!("expected a recording event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_recording_error_becomes_an_error_event() {
+        let (events, mut receiver) = unbounded_channel();
+
+        let active = emit_recording(Err("no encoder".to_owned()), &events);
+
+        assert!(!active);
+        match receiver.try_recv().unwrap() {
+            UiEvent::Recording(Err(message)) => assert_eq!(message, "no encoder"),
+            other => panic!("expected a recording error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recording_commands_reach_the_worker() {
+        let (sender, mut receiver) = unbounded_channel();
+        let handle = InputHandle {
+            sender: Rc::new(RefCell::new(Some(sender))),
+        };
+
+        handle.send(InputCommand::StartRecording(RecordRequest::default()));
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InputCommand::StartRecording(_)
+        ));
+
+        handle.send(InputCommand::StopRecording);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InputCommand::StopRecording
+        ));
     }
 }

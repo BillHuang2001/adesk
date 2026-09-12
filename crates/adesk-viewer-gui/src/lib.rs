@@ -18,9 +18,10 @@
 //! - [`taskbar`] — the pure task-bar view model derived from a desktop state.
 //!
 //! The GTK-facing modules are crate-private: `keystroke` (the pure keystroke
-//! routing state machine), `bridge` (the tokio ↔ GLib bridge), `frame_view` and
-//! `task_bar_view` (the widgets) and `app` (the application and event loop). The
-//! public entry point is [`run`].
+//! routing state machine), `record` (the pure recording-control state machine),
+//! `bridge` (the tokio ↔ GLib bridge), `frame_view` and `task_bar_view` (the
+//! widgets) and `app` (the application and event loop). The public entry point
+//! is [`run`].
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -34,6 +35,7 @@ mod app;
 mod bridge;
 mod frame_view;
 mod keystroke;
+mod record;
 mod task_bar_view;
 
 pub use error::{GuiError, Result};
