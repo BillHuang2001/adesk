@@ -58,6 +58,14 @@ numeric_id!(
     LaunchId
 );
 
+numeric_id!(
+    /// Identifies one notification posted to the runtime inbox.
+    ///
+    /// Monotonic, never reused, and independent of the event `seq` domain
+    /// (`docs/protocol.md` §5.9).
+    NotificationId
+);
+
 /// Identifies an application by its desktop-file id, e.g.
 /// `"org.mozilla.firefox"`.
 ///
@@ -123,6 +131,11 @@ mod tests {
         assert_eq!(launch.to_string(), "3");
         assert_eq!(u64::from(launch), 3);
         assert_eq!(LaunchId::from(3_u64), launch);
+
+        let notification = NotificationId(5);
+        assert_eq!(notification.to_string(), "5");
+        assert_eq!(u64::from(notification), 5);
+        assert_eq!(NotificationId::from(5_u64), notification);
     }
 
     #[test]

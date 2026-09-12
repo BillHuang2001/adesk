@@ -26,6 +26,8 @@ pub enum ErrorCode {
     UnknownWindow,
     /// The referenced app id is not known.
     UnknownApp,
+    /// The referenced notification id is not known.
+    UnknownNotification,
     /// The application could not be launched.
     LaunchFailed,
     /// A capture/render request could not produce pixels.
@@ -54,6 +56,7 @@ impl ErrorCode {
             ErrorCode::UnknownMethod => "unknown_method",
             ErrorCode::UnknownWindow => "unknown_window",
             ErrorCode::UnknownApp => "unknown_app",
+            ErrorCode::UnknownNotification => "unknown_notification",
             ErrorCode::LaunchFailed => "launch_failed",
             ErrorCode::CaptureFailed => "capture_failed",
             ErrorCode::RenderFailed => "render_failed",
@@ -141,6 +144,7 @@ mod tests {
             (ErrorCode::UnknownMethod, "unknown_method"),
             (ErrorCode::UnknownWindow, "unknown_window"),
             (ErrorCode::UnknownApp, "unknown_app"),
+            (ErrorCode::UnknownNotification, "unknown_notification"),
             (ErrorCode::LaunchFailed, "launch_failed"),
             (ErrorCode::CaptureFailed, "capture_failed"),
             (ErrorCode::RenderFailed, "render_failed"),
@@ -154,7 +158,7 @@ mod tests {
                 "protocol_version_mismatch",
             ),
         ];
-        assert_eq!(expected.len(), 13);
+        assert_eq!(expected.len(), 14);
         for (code, name) in expected {
             assert_eq!(code.as_str(), name);
             assert_eq!(code.to_string(), name);

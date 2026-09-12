@@ -42,6 +42,7 @@ pub mod geometry;
 pub mod ids;
 pub mod image;
 pub mod input;
+pub mod notification;
 pub mod position;
 pub mod window;
 
@@ -49,8 +50,11 @@ pub use app::AppInfo;
 pub use error::{Error, ErrorCode, Result};
 pub use event::{EventKind, Observation, RuntimeEvent};
 pub use geometry::{Point, Rect, Region, Size};
-pub use ids::{ActionId, AppId, LaunchId, WindowId};
+pub use ids::{ActionId, AppId, LaunchId, NotificationId, WindowId};
 pub use image::{ImageBuffer, PixelFormat};
 pub use input::{Button, ButtonState, KeyState, OverlayKind};
+pub use notification::{
+    Notification, NotificationAction, NotificationCloseReason, NotificationUrgency,
+};
 pub use position::Position;
 pub use window::{WindowInfo, WindowState};

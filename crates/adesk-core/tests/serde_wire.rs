@@ -4,10 +4,12 @@
 //! rely on, using the examples from `docs/protocol.md`.
 
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, ImageBuffer, LaunchId, Observation, OverlayKind, Point,
+    ActionId, AppId, AppInfo, Button, ImageBuffer, LaunchId, Notification, NotificationAction,
+    NotificationCloseReason, NotificationId, NotificationUrgency, Observation, OverlayKind, Point,
     Position, Rect, Region, RuntimeEvent, Size, WindowId, WindowInfo, WindowState,
 };
 use serde_json::json;
+use std::collections::BTreeMap;
 
 fn sample_rect() -> Rect {
     Rect {
@@ -51,6 +53,36 @@ fn sample_app_info() -> AppInfo {
         hidden: false,
         no_display: false,
         try_exec: None,
+    }
+}
+
+fn sample_notification() -> Notification {
+    let mut hints = BTreeMap::new();
+    hints.insert("sound-name".into(), "message-new-instant".into());
+    Notification {
+        id: NotificationId(5),
+        source: Some("user".into()),
+        title: "Build finished".into(),
+        body: "The workspace compiled".into(),
+        urgency: NotificationUrgency::Critical,
+        category: Some("message".into()),
+        actions: vec![
+            NotificationAction {
+                key: "view".into(),
+                label: "View".into(),
+            },
+            NotificationAction {
+                key: "dismiss".into(),
+                label: "Dismiss".into(),
+            },
+        ],
+        hints,
+        posted_seq: 8300,
+        posted_ts_ms: 64000,
+        dismissed: false,
+        closed_seq: None,
+        close_reason: None,
+        timeout_ms: Some(5000),
     }
 }
 
@@ -247,6 +279,131 @@ fn observation_json_matches_protocol() {
 }
 
 #[test]
+fn notification_json_matches_protocol() {
+    let value = serde_json::to_value(sample_notification()).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "id": 5,
+            "source": "user",
+            "title": "Build finished",
+            "body": "The workspace compiled",
+            "urgency": "critical",
+            "category": "message",
+            "actions": [
+                {"key": "view", "label": "View"},
+                {"key": "dismiss", "label": "Dismiss"}
+            ],
+            "hints": {"sound-name": "message-new-instant"},
+            "posted_seq": 8300,
+            "posted_ts_ms": 64000,
+            "dismissed": false,
+            "closed_seq": null,
+            "close_reason": null,
+            "timeout_ms": 5000
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<Notification>(value).unwrap(),
+        sample_notification()
+    );
+}
+
+#[test]
+fn notification_optional_fields_serialize_as_null() {
+    let mut notification = sample_notification();
+    notification.source = None;
+    notification.category = None;
+    notification.close_reason = Some(NotificationCloseReason::Expired);
+    notification.closed_seq = Some(8400);
+    notification.timeout_ms = None;
+    let value = serde_json::to_value(&notification).unwrap();
+    assert!(value["source"].is_null());
+    assert!(value["category"].is_null());
+    assert_eq!(value["close_reason"], json!("expired"));
+    assert_eq!(value["closed_seq"], json!(8400));
+    assert!(value["timeout_ms"].is_null());
+}
+
+#[test]
+fn notification_event_variants_json_match_protocol() {
+    let posted = RuntimeEvent::Notification {
+        seq: 8300,
+        ts_ms: 64000,
+        notification: sample_notification(),
+    };
+    assert_eq!(
+        serde_json::to_value(&posted).unwrap(),
+        json!({
+            "type": "notification",
+            "seq": 8300,
+            "ts_ms": 64000,
+            "notification": {
+                "id": 5,
+                "source": "user",
+                "title": "Build finished",
+                "body": "The workspace compiled",
+                "urgency": "critical",
+                "category": "message",
+                "actions": [
+                    {"key": "view", "label": "View"},
+                    {"key": "dismiss", "label": "Dismiss"}
+                ],
+                "hints": {"sound-name": "message-new-instant"},
+                "posted_seq": 8300,
+                "posted_ts_ms": 64000,
+                "dismissed": false,
+                "closed_seq": null,
+                "close_reason": null,
+                "timeout_ms": 5000
+            }
+        })
+    );
+
+    let closed = RuntimeEvent::NotificationClosed {
+        seq: 8301,
+        ts_ms: 64100,
+        notification_id: NotificationId(5),
+        reason: NotificationCloseReason::Action,
+    };
+    assert_eq!(
+        serde_json::to_value(&closed).unwrap(),
+        json!({
+            "type": "notification_closed",
+            "seq": 8301,
+            "ts_ms": 64100,
+            "notification_id": 5,
+            "reason": "action"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeEvent>(serde_json::to_value(&closed).unwrap()).unwrap(),
+        closed
+    );
+
+    let action = RuntimeEvent::NotificationAction {
+        seq: 8302,
+        ts_ms: 64200,
+        notification_id: NotificationId(5),
+        action_key: "view".into(),
+    };
+    assert_eq!(
+        serde_json::to_value(&action).unwrap(),
+        json!({
+            "type": "notification_action",
+            "seq": 8302,
+            "ts_ms": 64200,
+            "notification_id": 5,
+            "action_key": "view"
+        })
+    );
+    assert_eq!(
+        serde_json::from_value::<RuntimeEvent>(serde_json::to_value(&action).unwrap()).unwrap(),
+        action
+    );
+}
+
+#[test]
 fn runtime_event_json_is_internally_tagged() {
     let event = RuntimeEvent::SurfaceCommit {
         seq: 8291,
@@ -357,6 +514,32 @@ fn every_runtime_event_variant_round_trips_with_its_tag() {
                 pid: Some(42),
             },
             "app_launched",
+        ),
+        (
+            RuntimeEvent::Notification {
+                seq: 1,
+                ts_ms: 2,
+                notification: sample_notification(),
+            },
+            "notification",
+        ),
+        (
+            RuntimeEvent::NotificationClosed {
+                seq: 1,
+                ts_ms: 2,
+                notification_id: NotificationId(5),
+                reason: NotificationCloseReason::Dismissed,
+            },
+            "notification_closed",
+        ),
+        (
+            RuntimeEvent::NotificationAction {
+                seq: 1,
+                ts_ms: 2,
+                notification_id: NotificationId(5),
+                action_key: "view".into(),
+            },
+            "notification_action",
         ),
     ];
     for (event, tag) in events {

@@ -13,7 +13,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Rect, Region};
-use crate::ids::{ActionId, AppId, LaunchId, WindowId};
+use crate::ids::{ActionId, AppId, LaunchId, NotificationId, WindowId};
+use crate::notification::{Notification, NotificationCloseReason};
 
 /// The kind of a [`RuntimeEvent`], without its payload.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -37,6 +38,12 @@ pub enum EventKind {
     PopupDisappeared,
     /// The registry spawned a process.
     AppLaunched,
+    /// A notification was posted to the runtime inbox.
+    Notification,
+    /// A notification was closed.
+    NotificationClosed,
+    /// A notification action was invoked.
+    NotificationAction,
 }
 
 /// Everything the compositor reports to the rest of the runtime.
@@ -154,6 +161,37 @@ pub enum RuntimeEvent {
         /// The spawned process id, when known.
         pid: Option<i32>,
     },
+    /// A notification was posted to the runtime inbox.
+    Notification {
+        /// Global event sequence.
+        seq: u64,
+        /// Monotonic ms since compositor start.
+        ts_ms: u64,
+        /// The posted notification.
+        notification: Notification,
+    },
+    /// A notification was closed.
+    NotificationClosed {
+        /// Global event sequence.
+        seq: u64,
+        /// Monotonic ms since compositor start.
+        ts_ms: u64,
+        /// The closed notification.
+        notification_id: NotificationId,
+        /// Why it was closed.
+        reason: NotificationCloseReason,
+    },
+    /// A notification action was invoked.
+    NotificationAction {
+        /// Global event sequence.
+        seq: u64,
+        /// Monotonic ms since compositor start.
+        ts_ms: u64,
+        /// The notification whose action was invoked.
+        notification_id: NotificationId,
+        /// The invoked action's key.
+        action_key: String,
+    },
 }
 
 /// Generates the uniform [`RuntimeEvent`] accessors from a single variant list.
@@ -200,13 +238,17 @@ runtime_event_accessors! {
     PopupAppeared,
     PopupDisappeared,
     AppLaunched,
+    Notification,
+    NotificationClosed,
+    NotificationAction,
 }
 
 impl RuntimeEvent {
     /// The window this event belongs to, when applicable.
     ///
     /// [`RuntimeEvent::FocusChanged`] carries `Option<WindowId>` and returns it
-    /// unchanged; [`RuntimeEvent::AppLaunched`] has no window and returns `None`.
+    /// unchanged; [`RuntimeEvent::AppLaunched`] and the notification events have
+    /// no window and return `None`.
     pub fn window_id(&self) -> Option<WindowId> {
         match self {
             RuntimeEvent::WindowCreated { window_id, .. }
@@ -217,7 +259,10 @@ impl RuntimeEvent {
             | RuntimeEvent::PopupAppeared { window_id, .. }
             | RuntimeEvent::PopupDisappeared { window_id, .. } => Some(*window_id),
             RuntimeEvent::FocusChanged { window_id, .. } => *window_id,
-            RuntimeEvent::AppLaunched { .. } => None,
+            RuntimeEvent::AppLaunched { .. }
+            | RuntimeEvent::Notification { .. }
+            | RuntimeEvent::NotificationClosed { .. }
+            | RuntimeEvent::NotificationAction { .. } => None,
         }
     }
 }
@@ -269,6 +314,31 @@ pub struct Observation {
 mod tests {
     use super::*;
     use crate::geometry::Rect;
+    use std::collections::BTreeMap;
+
+    fn sample_notification() -> Notification {
+        let mut hints = BTreeMap::new();
+        hints.insert("sound-name".into(), "message-new-instant".into());
+        Notification {
+            id: NotificationId(5),
+            source: Some("user".into()),
+            title: "Build finished".into(),
+            body: "The workspace compiled".into(),
+            urgency: crate::notification::NotificationUrgency::Normal,
+            category: Some("message".into()),
+            actions: vec![crate::notification::NotificationAction {
+                key: "view".into(),
+                label: "View".into(),
+            }],
+            hints,
+            posted_seq: 11,
+            posted_ts_ms: 110,
+            dismissed: false,
+            closed_seq: None,
+            close_reason: None,
+            timeout_ms: None,
+        }
+    }
 
     fn all_events() -> Vec<(RuntimeEvent, EventKind, Option<WindowId>)> {
         vec![
@@ -379,6 +449,35 @@ mod tests {
                 EventKind::AppLaunched,
                 None,
             ),
+            (
+                RuntimeEvent::Notification {
+                    seq: 11,
+                    ts_ms: 110,
+                    notification: sample_notification(),
+                },
+                EventKind::Notification,
+                None,
+            ),
+            (
+                RuntimeEvent::NotificationClosed {
+                    seq: 12,
+                    ts_ms: 120,
+                    notification_id: NotificationId(5),
+                    reason: NotificationCloseReason::Expired,
+                },
+                EventKind::NotificationClosed,
+                None,
+            ),
+            (
+                RuntimeEvent::NotificationAction {
+                    seq: 13,
+                    ts_ms: 130,
+                    notification_id: NotificationId(5),
+                    action_key: "view".into(),
+                },
+                EventKind::NotificationAction,
+                None,
+            ),
         ]
     }
 
@@ -428,6 +527,9 @@ mod tests {
             (EventKind::PopupAppeared, "popup_appeared"),
             (EventKind::PopupDisappeared, "popup_disappeared"),
             (EventKind::AppLaunched, "app_launched"),
+            (EventKind::Notification, "notification"),
+            (EventKind::NotificationClosed, "notification_closed"),
+            (EventKind::NotificationAction, "notification_action"),
         ];
         for (kind, name) in expected {
             assert_eq!(serde_json::to_value(kind).unwrap(), serde_json::json!(name));
