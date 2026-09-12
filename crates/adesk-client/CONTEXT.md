@@ -48,7 +48,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 
 ### Events (`src/events.rs`)
 - `EventFilter{kinds: Option<Vec<EventKind>>, window_id: Option<WindowId>}` + `all()`, `kinds(..)`, `.window(id)`; `None` fields are omitted from the params object (= "all").
-- `EventKind` — the 11 protocol §5.6 names (9 core + `SurfaceDamage`, `Quiet`), snake_case serde, `as_str()`, `From<adesk_core::EventKind>`.
+- `EventKind` — 14 variants: the 12 `adesk_core::EventKind` values (incl. the §5.9 `Notification`/`NotificationClosed`/`NotificationAction`) plus the two protocol-only kinds `SurfaceDamage` and `Quiet`; snake_case serde, `as_str()`, `From<adesk_core::EventKind>`.
+- The three §5.9 notification events are `adesk_core::RuntimeEvent` variants, so they arrive as `AgpEvent::Runtime(RuntimeEvent::Notification{..} / NotificationClosed{..} / NotificationAction{..})` through the existing reconstruction path — there is deliberately no new `AgpEvent` variant for them.
 - `AgpEvent{Runtime(RuntimeEvent), Quiet{seq, ts_ms, event: QuietEvent}, InspectFrame(InspectFrame), Other{name, seq, ts_ms, data}}`; `InspectFrame{seq, ts_ms, image}`.
 - Wire `"quiet"` frames map to `Quiet` with the frame's own `seq`/`ts_ms` (a payload that does not fit → `Other`); `"surface_damage"` is a filter alias and always lands in `Other`.
 - `QuietEvent` — re-export of the shared wire type from `adesk-proto` (`window_id: Option<WindowId>`, `None` = runtime-wide; `quiet_ms: u64`); the frame envelope (`seq`/`ts_ms`) lives on the `Quiet` variant, not in this payload.
