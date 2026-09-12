@@ -32,9 +32,7 @@
 
 use std::time::Duration;
 
-use adesk_client::{
-    AgpEvent, Client, EventKind, PostNotificationRequest, WaitForEventsRequest,
-};
+use adesk_client::{AgpEvent, Client, EventKind, PostNotificationRequest, WaitForEventsRequest};
 use adesk_compositor::RuntimeCommand;
 use adesk_core::{
     ErrorCode, NotificationCloseReason, NotificationId, NotificationUrgency, RuntimeEvent, WindowId,
@@ -269,7 +267,9 @@ fn close_dismisses_and_a_second_close_publishes_nothing() {
         .await
     });
     assert_eq!(
-        frame.pointer("/data/notification_id").and_then(Value::as_u64),
+        frame
+            .pointer("/data/notification_id")
+            .and_then(Value::as_u64),
         Some(posted.notification_id.0),
         "§5.9: the close frame carries the notification id: {frame}"
     );
@@ -304,7 +304,10 @@ fn close_dismisses_and_a_second_close_publishes_nothing() {
         .find(|n| n.id == posted.notification_id)
         .unwrap_or_else(|| panic!("§5.9: `include_dismissed` must report the closed one: {all:?}"));
     assert!(dismissed.dismissed);
-    assert_eq!(dismissed.close_reason, Some(NotificationCloseReason::Dismissed));
+    assert_eq!(
+        dismissed.close_reason,
+        Some(NotificationCloseReason::Dismissed)
+    );
     assert_eq!(dismissed.closed_seq, Some(closed.seq));
 
     // A second close is a successful no-op that still reserves a (gap) seq.
@@ -332,12 +335,14 @@ fn close_dismisses_and_a_second_close_publishes_nothing() {
 
     // And a wait above the no-op close's gap seq is never woken.
     let waited = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .kinds([EventKind::NotificationClosed])
-                .since_seq(again.seq)
-                .timeout_ms(SHORT_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .kinds([EventKind::NotificationClosed])
+                    .since_seq(again.seq)
+                    .timeout_ms(SHORT_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events after the no-op close",
     );
     assert!(
@@ -365,9 +370,7 @@ fn invoke_action_succeeds_without_dismissing_and_validates_keys() {
     );
 
     let invoked = expect_ok(
-        t.block_on_timeout(
-            client.invoke_notification_action(posted.notification_id, "view"),
-        ),
+        t.block_on_timeout(client.invoke_notification_action(posted.notification_id, "view")),
         "invoke_notification_action(view)",
     );
     assert_eq!(invoked.notification_id, posted.notification_id);
@@ -384,7 +387,9 @@ fn invoke_action_succeeds_without_dismissing_and_validates_keys() {
         .await
     });
     assert_eq!(
-        frame.pointer("/data/notification_id").and_then(Value::as_u64),
+        frame
+            .pointer("/data/notification_id")
+            .and_then(Value::as_u64),
         Some(posted.notification_id.0),
         "§5.9: the action frame carries the notification id: {frame}"
     );
@@ -504,7 +509,9 @@ fn each_notification_kind_reaches_its_subscriber() {
             .await
     });
     assert_eq!(
-        frame.pointer("/data/notification/id").and_then(Value::as_u64),
+        frame
+            .pointer("/data/notification/id")
+            .and_then(Value::as_u64),
         Some(posted.notification_id.0),
         "§5.9: the `notification` frame carries the stored notification: {frame}"
     );
@@ -665,11 +672,13 @@ fn wait_for_events_reports_a_timeout_as_a_result() {
     // Nothing is ever published on this empty runtime, so the wait must reach
     // its horizon and report that as a result, never an error.
     let result = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .kinds([EventKind::Notification])
-                .timeout_ms(SHORT_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .kinds([EventKind::Notification])
+                    .timeout_ms(SHORT_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events (no events)",
     );
     assert!(result.timed_out, "§5.10: the horizon was reached");
@@ -727,12 +736,14 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     // notifications are window-less, so the filter excludes them and the wait
     // times out even though matching `kinds` exist in the journal.
     let scoped = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .window(WindowId(7))
-                .since_seq(0)
-                .timeout_ms(SHORT_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .window(WindowId(7))
+                    .since_seq(0)
+                    .timeout_ms(SHORT_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events(window_id)",
     );
     assert!(
@@ -744,15 +755,20 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     // `since_seq = first.seq` moves the filter point past the first event, so
     // only the second qualifies.
     let only_second = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .kinds([EventKind::Notification])
-                .since_seq(first.seq)
-                .timeout_ms(WAKE_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .kinds([EventKind::Notification])
+                    .since_seq(first.seq)
+                    .timeout_ms(WAKE_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events(since_seq = first)",
     );
-    assert!(!only_second.timed_out, "§5.10: the second event is above the filter point");
+    assert!(
+        !only_second.timed_out,
+        "§5.10: the second event is above the filter point"
+    );
     assert_eq!(
         only_second.events.len(),
         1,
@@ -761,7 +777,10 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     );
     match &only_second.events[0] {
         AgpEvent::Runtime(RuntimeEvent::Notification { seq, .. }) => {
-            assert_eq!(*seq, second.seq, "the surviving event is the newer notification");
+            assert_eq!(
+                *seq, second.seq,
+                "the surviving event is the newer notification"
+            );
         }
         other => panic!("expected the newer `notification` event, got {other:?}"),
     }
@@ -769,13 +788,15 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     // `max_events` caps the batch: from the `0` filter point both notifications
     // qualify, but the cap answers with the oldest `max_events` of them.
     let capped = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .kinds([EventKind::Notification])
-                .since_seq(0)
-                .max_events(1)
-                .timeout_ms(WAKE_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .kinds([EventKind::Notification])
+                    .since_seq(0)
+                    .max_events(1)
+                    .timeout_ms(WAKE_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events(max_events = 1)",
     );
     assert!(!capped.timed_out);
@@ -787,7 +808,10 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     );
     match &capped.events[0] {
         AgpEvent::Runtime(RuntimeEvent::Notification { seq, .. }) => {
-            assert_eq!(*seq, first.seq, "§5.10: the batch is oldest-first, capped at the front");
+            assert_eq!(
+                *seq, first.seq,
+                "§5.10: the batch is oldest-first, capped at the front"
+            );
         }
         other => panic!("expected the oldest `notification` event, got {other:?}"),
     }
@@ -795,12 +819,14 @@ fn wait_for_events_honours_kinds_window_id_max_events_and_since_seq() {
     // `since_seq` at the newest event's `seq` excludes everything: nothing is
     // strictly above the newest event.
     let drained = expect_ok(
-        t.block_on_timeout(client.wait_for_events(
-            WaitForEventsRequest::new()
-                .kinds([EventKind::Notification])
-                .since_seq(second.seq)
-                .timeout_ms(SHORT_TIMEOUT_MS),
-        )),
+        t.block_on_timeout(
+            client.wait_for_events(
+                WaitForEventsRequest::new()
+                    .kinds([EventKind::Notification])
+                    .since_seq(second.seq)
+                    .timeout_ms(SHORT_TIMEOUT_MS),
+            ),
+        ),
         "wait_for_events(since_seq = newest)",
     );
     assert!(

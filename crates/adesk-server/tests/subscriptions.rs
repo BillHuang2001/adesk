@@ -36,7 +36,8 @@ mod common;
 use common::{
     eventually, expect_ok, raw_request, subscription_id, write_desktop_entry, TestRuntime,
     REQUEST_TIMEOUT,
-};/// How long a test waits for a server-side registry effect to settle.
+};
+/// How long a test waits for a server-side registry effect to settle.
 ///
 /// Registry mutation happens before the response is written, so this only
 /// exists so a broken runtime fails with a clear message instead of hanging.
