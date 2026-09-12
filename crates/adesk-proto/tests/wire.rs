@@ -364,8 +364,43 @@ fn method_name_table() {
             }),
             "inspect_subscribe",
         ),
+        (
+            Method::PostNotification(PostNotificationParams {
+                source: None,
+                title: "x".to_owned(),
+                body: String::new(),
+                urgency: NotificationUrgency::Normal,
+                category: None,
+                actions: vec![],
+                hints: Default::default(),
+                timeout_ms: None,
+            }),
+            "post_notification",
+        ),
+        (
+            Method::ListNotifications(ListNotificationsParams::default()),
+            "list_notifications",
+        ),
+        (
+            Method::CloseNotification(CloseNotificationParams {
+                notification_id: NotificationId(5),
+                reason: NotificationCloseReason::Dismissed,
+            }),
+            "close_notification",
+        ),
+        (
+            Method::InvokeNotificationAction(InvokeNotificationActionParams {
+                notification_id: NotificationId(5),
+                action_key: "open".to_owned(),
+            }),
+            "invoke_notification_action",
+        ),
+        (
+            Method::WaitForEvents(WaitForEventsParams::default()),
+            "wait_for_events",
+        ),
     ];
-    assert_eq!(cases.len(), 29);
+    assert_eq!(cases.len(), 34);
     let mut names: Vec<&str> = Vec::new();
     for (method, expected) in &cases {
         assert_eq!(method.method_name(), *expected);
@@ -373,7 +408,7 @@ fn method_name_table() {
     }
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 29, "method names must be unique");
+    assert_eq!(names.len(), 34, "method names must be unique");
 }
 
 #[test]

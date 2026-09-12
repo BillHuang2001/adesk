@@ -1,4 +1,4 @@
-//! Method-layer wire behavior (§5.1–§5.7): `Method::from_parts`/`params_value`,
+//! Method-layer wire behavior (§5.1–§5.10): `Method::from_parts`/`params_value`,
 //! the `{"method", "params"}` map serde, the spec defaults and the §4
 //! `ObserveResult` observation/image split.
 //!
@@ -6,13 +6,16 @@
 
 mod common;
 
+use std::collections::BTreeMap;
+
 use adesk_core::{
-    ActionId, AppId, Button, ErrorCode, LaunchId, OverlayKind, Position, Rect, WindowId,
+    ActionId, AppId, Button, ErrorCode, LaunchId, NotificationAction, NotificationCloseReason,
+    NotificationId, NotificationUrgency, OverlayKind, Position, Rect, WindowId,
 };
 use adesk_proto::*;
 use common::*;
 use serde_json::{json, Value};
-/// One instance of every one of the 29 methods (§5.1–§5.7).
+/// One instance of every one of the 34 methods (§5.1–§5.10).
 fn methods() -> Vec<Method> {
     vec![
         Method::Ping(PingParams {}),
@@ -140,13 +143,44 @@ fn methods() -> Vec<Method> {
             overlays: vec![OverlayKind::WindowIds],
             min_interval_ms: 100,
         }),
+        Method::PostNotification(PostNotificationParams {
+            source: Some("adesk-agent".to_owned()),
+            title: "Build finished".to_owned(),
+            body: "workspace compiled".to_owned(),
+            urgency: NotificationUrgency::Critical,
+            category: Some("progress".to_owned()),
+            actions: vec![NotificationAction {
+                key: "open".to_owned(),
+                label: "Open".to_owned(),
+            }],
+            hints: BTreeMap::from([("sender-pid".to_owned(), "4242".to_owned())]),
+            timeout_ms: Some(5000),
+        }),
+        Method::ListNotifications(ListNotificationsParams {
+            include_dismissed: true,
+        }),
+        Method::CloseNotification(CloseNotificationParams {
+            notification_id: NotificationId(5),
+            reason: NotificationCloseReason::Expired,
+        }),
+        Method::InvokeNotificationAction(InvokeNotificationActionParams {
+            notification_id: NotificationId(5),
+            action_key: "open".to_owned(),
+        }),
+        Method::WaitForEvents(WaitForEventsParams {
+            kinds: vec![EventKind::SurfaceCommit, EventKind::Notification],
+            window_id: Some(WindowId(17)),
+            timeout_ms: 1000,
+            max_events: 8,
+            since_seq: Some(8291),
+        }),
     ]
 }
 
 #[test]
 fn every_method_round_trips_through_from_parts_and_serde() {
     let methods = methods();
-    assert_eq!(methods.len(), 29);
+    assert_eq!(methods.len(), 34);
     for method in &methods {
         let name = method.method_name();
 
@@ -251,6 +285,11 @@ fn invalid_params_are_rejected_with_invalid_params() {
         ("unsubscribe_events", json!({})),
         ("inspect_subscribe", json!({})),
         ("capture_region", json!({"window_id": 17})),
+        ("post_notification", json!({})),
+        ("list_notifications", json!({"include_dismissed": "yes"})),
+        ("close_notification", json!({})),
+        ("invoke_notification_action", json!({"notification_id": 5})),
+        ("wait_for_events", json!({"max_events": "lots"})),
     ];
     for (name, params) in cases {
         let err = Method::from_parts(name, params.clone()).unwrap_err();
@@ -748,6 +787,251 @@ fn observe_result_image_is_null_when_absent() {
         json!({"observation": {"image": {"width": "wide"}}})
     )
     .is_err());
+}
+
+#[test]
+fn notification_method_defaults_and_shapes() {
+    // Only `title` is required; the rest carry the §5.9 defaults.
+    let minimal =
+        Method::from_parts("post_notification", json!({"title": "Build finished"})).unwrap();
+    assert_eq!(
+        wire(&minimal)["params"],
+        json!({
+            "title": "Build finished",
+            "body": "",
+            "urgency": "normal",
+            "actions": [],
+            "hints": {}
+        })
+    );
+    // Optional `source`/`category`/`timeout_ms` are omitted when absent.
+    let minimal_params = wire(&minimal)["params"].clone();
+    assert!(minimal_params.get("source").is_none());
+    assert!(minimal_params.get("category").is_none());
+    assert!(minimal_params.get("timeout_ms").is_none());
+
+    // Every field survives verbatim when provided.
+    let full = Method::from_parts(
+        "post_notification",
+        json!({
+            "source": "adesk-agent",
+            "title": "Build finished",
+            "body": "workspace compiled",
+            "urgency": "critical",
+            "category": "progress",
+            "actions": [{"key": "open", "label": "Open"}],
+            "hints": {"sender-pid": "4242"},
+            "timeout_ms": 5000
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        wire(&full),
+        json!({
+            "method": "post_notification",
+            "params": {
+                "source": "adesk-agent",
+                "title": "Build finished",
+                "body": "workspace compiled",
+                "urgency": "critical",
+                "category": "progress",
+                "actions": [{"key": "open", "label": "Open"}],
+                "hints": {"sender-pid": "4242"},
+                "timeout_ms": 5000
+            }
+        })
+    );
+
+    // `list_notifications` defaults to excluding dismissed notifications.
+    assert_eq!(
+        wire(&Method::from_parts("list_notifications", json!({})).unwrap())["params"],
+        json!({"include_dismissed": false})
+    );
+    assert_eq!(
+        wire(
+            &Method::from_parts("list_notifications", json!({"include_dismissed": true})).unwrap()
+        )["params"],
+        json!({"include_dismissed": true})
+    );
+
+    // `close_notification` defaults the reason to `dismissed`.
+    assert_eq!(
+        wire(&Method::from_parts("close_notification", json!({"notification_id": 5})).unwrap())
+            ["params"],
+        json!({"notification_id": 5, "reason": "dismissed"})
+    );
+    assert_eq!(
+        wire(
+            &Method::from_parts(
+                "close_notification",
+                json!({"notification_id": 5, "reason": "expired"})
+            )
+            .unwrap()
+        )["params"],
+        json!({"notification_id": 5, "reason": "expired"})
+    );
+
+    assert_eq!(
+        wire(
+            &Method::from_parts(
+                "invoke_notification_action",
+                json!({"notification_id": 5, "action_key": "open"})
+            )
+            .unwrap()
+        )["params"],
+        json!({"notification_id": 5, "action_key": "open"})
+    );
+}
+
+#[test]
+fn wait_for_events_defaults_to_all_fourteen_filterable_kinds() {
+    let method = Method::from_parts("wait_for_events", json!({})).unwrap();
+    assert_eq!(
+        wire(&method)["params"],
+        json!({
+            "kinds": [
+                "window_created",
+                "window_destroyed",
+                "window_activated",
+                "title_changed",
+                "surface_commit",
+                "surface_damage",
+                "focus_changed",
+                "popup_appeared",
+                "popup_disappeared",
+                "quiet",
+                "app_launched",
+                "notification",
+                "notification_closed",
+                "notification_action"
+            ],
+            "timeout_ms": 5000,
+            "max_events": 32
+        })
+    );
+    // `WaitForEventsParams::default` mirrors the serde defaults.
+    assert_eq!(
+        WaitForEventsParams::default(),
+        WaitForEventsParams {
+            kinds: EventKind::SUBSCRIBABLE.to_vec(),
+            window_id: None,
+            timeout_ms: 5000,
+            max_events: 32,
+            since_seq: None,
+        }
+    );
+
+    // Explicit fields survive verbatim; optionals are omitted when absent.
+    let scoped = Method::from_parts(
+        "wait_for_events",
+        json!({
+            "kinds": ["surface_commit", "notification"],
+            "window_id": 17,
+            "timeout_ms": 1000,
+            "max_events": 8,
+            "since_seq": 8291
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        wire(&scoped)["params"],
+        json!({
+            "kinds": ["surface_commit", "notification"],
+            "window_id": 17,
+            "timeout_ms": 1000,
+            "max_events": 8,
+            "since_seq": 8291
+        })
+    );
+}
+
+#[test]
+fn notification_and_event_wait_result_shapes() {
+    // §5.9 post/close/invoke results.
+    let posted = PostNotificationResult {
+        notification_id: NotificationId(5),
+        seq: 8300,
+    };
+    assert_eq!(wire(&posted), json!({"notification_id": 5, "seq": 8300}));
+    assert_eq!(
+        serde_json::from_value::<PostNotificationResult>(wire(&posted)).unwrap(),
+        posted
+    );
+
+    let closed = CloseNotificationResult {
+        notification_id: NotificationId(5),
+        seq: 8400,
+    };
+    assert_eq!(wire(&closed), json!({"notification_id": 5, "seq": 8400}));
+
+    let invoked = InvokeNotificationActionResult {
+        notification_id: NotificationId(5),
+        action_key: "open".to_owned(),
+        seq: 8500,
+    };
+    assert_eq!(
+        wire(&invoked),
+        json!({"notification_id": 5, "action_key": "open", "seq": 8500})
+    );
+    roundtrip(&invoked);
+
+    let listed = ListNotificationsResult {
+        notifications: vec![notification()],
+    };
+    let listed_value = wire(&listed);
+    assert_eq!(listed_value["notifications"][0]["id"], json!(5));
+    assert_eq!(
+        listed_value["notifications"][0]["urgency"],
+        json!("critical")
+    );
+    assert_eq!(
+        serde_json::from_value::<ListNotificationsResult>(listed_value).unwrap(),
+        listed
+    );
+
+    // §5.10 `EventRecord` is the §1 event-frame envelope minus the frame id.
+    let record = EventRecord {
+        event: EventKind::SurfaceCommit,
+        seq: 8291,
+        ts_ms: 1234,
+        data: json!({"window_id": 17, "damage": [{"x": 630, "y": 220, "w": 410, "h": 180}]}),
+    };
+    assert_eq!(
+        wire(&record),
+        json!({
+            "event": "surface_commit",
+            "seq": 8291,
+            "ts_ms": 1234,
+            "data": {"window_id": 17, "damage": [{"x": 630, "y": 220, "w": 410, "h": 180}]}
+        })
+    );
+    roundtrip(&record);
+
+    let wait = WaitForEventsResult {
+        events: vec![record],
+        timed_out: false,
+        elapsed_ms: 42,
+        seq: 8300,
+    };
+    let wait_value = wire(&wait);
+    assert_eq!(wait_value["timed_out"], json!(false));
+    assert_eq!(wait_value["elapsed_ms"], json!(42));
+    assert_eq!(wait_value["seq"], json!(8300));
+    assert_eq!(wait_value["events"][0]["event"], json!("surface_commit"));
+    assert_eq!(wait_value["events"][0]["data"]["window_id"], json!(17));
+    roundtrip(&wait);
+
+    // The timeout arm carries no events.
+    let timed_out = WaitForEventsResult {
+        events: vec![],
+        timed_out: true,
+        elapsed_ms: 5000,
+        seq: 8300,
+    };
+    assert_eq!(
+        wire(&timed_out),
+        json!({"events": [], "timed_out": true, "elapsed_ms": 5000, "seq": 8300})
+    );
 }
 
 #[test]

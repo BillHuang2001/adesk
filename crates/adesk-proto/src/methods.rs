@@ -1,4 +1,4 @@
-//! Typed method vocabulary (§5.1–§5.7) and the shared action result.
+//! Typed method vocabulary (§5.1–§5.10) and the shared action result.
 //!
 //! One [`Method`] variant per spec method carries its typed params; the typed
 //! result structs live in the per-group modules next to their params:
@@ -12,6 +12,8 @@
 //! | Input (§5.5) | [`input`] |
 //! | Subscriptions (§5.6) | [`subscription`] |
 //! | Human inspector (§5.7) | [`inspector`] |
+//! | Notifications (§5.9) | [`notification`] |
+//! | Event waits (§5.10) | [`events`] |
 
 use adesk_core::ActionId;
 use serde::{Deserialize, Serialize};
@@ -20,16 +22,20 @@ use crate::Result;
 
 pub mod apps;
 pub mod capture;
+pub mod events;
 pub mod input;
 pub mod inspector;
+pub mod notification;
 pub mod runtime;
 pub mod subscription;
 pub mod windows;
 
 pub use apps::*;
 pub use capture::*;
+pub use events::*;
 pub use input::*;
 pub use inspector::*;
+pub use notification::*;
 pub use runtime::*;
 pub use subscription::*;
 pub use windows::*;
@@ -42,7 +48,7 @@ pub struct ActionResult {
     pub action_id: ActionId,
 }
 
-/// A typed AGP method: one variant per method in `docs/protocol.md` §5.1–§5.7.
+/// A typed AGP method: one variant per method in `docs/protocol.md` §5.1–§5.10.
 ///
 /// Wire form: the sibling fields `"method": <name>` and `"params": {...}` of a
 /// request frame (§1). Serialization must emit a map (two entries) so
@@ -107,6 +113,16 @@ pub enum Method {
     InspectCapture(InspectCaptureParams),
     /// §5.7 `inspect_subscribe`.
     InspectSubscribe(InspectSubscribeParams),
+    /// §5.9 `post_notification`.
+    PostNotification(PostNotificationParams),
+    /// §5.9 `list_notifications`.
+    ListNotifications(ListNotificationsParams),
+    /// §5.9 `close_notification`.
+    CloseNotification(CloseNotificationParams),
+    /// §5.9 `invoke_notification_action`.
+    InvokeNotificationAction(InvokeNotificationActionParams),
+    /// §5.10 `wait_for_events`.
+    WaitForEvents(WaitForEventsParams),
 }
 
 impl Method {
@@ -142,6 +158,11 @@ impl Method {
             Method::UnsubscribeEvents(_) => "unsubscribe_events",
             Method::InspectCapture(_) => "inspect_capture",
             Method::InspectSubscribe(_) => "inspect_subscribe",
+            Method::PostNotification(_) => "post_notification",
+            Method::ListNotifications(_) => "list_notifications",
+            Method::CloseNotification(_) => "close_notification",
+            Method::InvokeNotificationAction(_) => "invoke_notification_action",
+            Method::WaitForEvents(_) => "wait_for_events",
         }
     }
 
@@ -190,6 +211,13 @@ impl Method {
             "unsubscribe_events" => Method::UnsubscribeEvents(decode_params(name, params)?),
             "inspect_capture" => Method::InspectCapture(decode_params(name, params)?),
             "inspect_subscribe" => Method::InspectSubscribe(decode_params(name, params)?),
+            "post_notification" => Method::PostNotification(decode_params(name, params)?),
+            "list_notifications" => Method::ListNotifications(decode_params(name, params)?),
+            "close_notification" => Method::CloseNotification(decode_params(name, params)?),
+            "invoke_notification_action" => {
+                Method::InvokeNotificationAction(decode_params(name, params)?)
+            }
+            "wait_for_events" => Method::WaitForEvents(decode_params(name, params)?),
             other => return Err(crate::ProtoError::UnknownMethod(other.to_owned())),
         };
         Ok(method)
@@ -231,6 +259,11 @@ impl Method {
             Method::UnsubscribeEvents(params) => serde_json::to_value(params)?,
             Method::InspectCapture(params) => serde_json::to_value(params)?,
             Method::InspectSubscribe(params) => serde_json::to_value(params)?,
+            Method::PostNotification(params) => serde_json::to_value(params)?,
+            Method::ListNotifications(params) => serde_json::to_value(params)?,
+            Method::CloseNotification(params) => serde_json::to_value(params)?,
+            Method::InvokeNotificationAction(params) => serde_json::to_value(params)?,
+            Method::WaitForEvents(params) => serde_json::to_value(params)?,
         };
         Ok(value)
     }
