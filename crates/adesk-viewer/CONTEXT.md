@@ -14,6 +14,7 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 ### Errors (`src/error.rs`)
 - `ViewerError` (`thiserror`): `Io`, `Protocol(ViewerProtoError)`, `Closed`, `Handshake(String)`, `Backend { code: ErrorCode, message: String }`, `VersionMismatch { client, server }`, `Transport(String)`.
 - `Result<T, E = ViewerError>`.
+- `ViewerError::backend(code, message)` builds a `Backend` failure, and `ViewerError::code_or(fallback)` returns the carried AGP `ErrorCode` (or `fallback` for any other variant). That method is the crate's one backend-error → VAP `error` mapping: the session reports an unknown window as `unknown_window` and an unavailable recorder as `not_supported`.
 - `Backend` carries the AGP `ErrorCode` the backend failure maps to, which the session sends as the VAP `error` code (`docs/viewer.md` §6) — so an unknown window keeps `unknown_window` on the wire.
 - `VersionMismatch` mirrors `ViewerProtoError`'s field meaning: `client` is the peer's version, `server` is `PROTOCOL_VERSION`.
 
