@@ -368,6 +368,67 @@ async fn start_recording_error_maps_to_a_backend_error() {
     }
 }
 
+/// Regression: a recording request the server rejects with a VAP `error` must
+/// consume its own reply-FIFO registration. A stale waiter left at the head of
+/// the FIFO would swallow the *next* `recording` reply, so the second request on
+/// the same connection would hang forever. Driving both requests through one
+/// connection is the guard.
+#[tokio::test]
+async fn a_rejected_recording_request_does_not_swallow_the_next_reply() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // The first request is answered with a VAP `error` (no `recording` reply).
+    harness.backend.set_fail_recording(true);
+    let error = tokio::time::timeout(STEP_TIMEOUT, client.start_recording(RecordRequest::new()))
+        .await
+        .expect("the rejected request must not hang")
+        .expect_err("an unavailable recorder must fail");
+    match error {
+        ViewerError::Backend { code, .. } => assert_eq!(code, ErrorCode::NotSupported),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+
+    // The second request is accepted: it must resolve within the timeout rather
+    // than be swallowed by a stale waiter from the first.
+    harness.backend.set_fail_recording(false);
+    let started = tokio::time::timeout(STEP_TIMEOUT, client.start_recording(RecordRequest::new()))
+        .await
+        .expect("a request after a rejected one must not hang")
+        .expect("the accepted request must succeed");
+    assert!(started.recording);
+    assert_eq!(started.path.as_deref(), Some("/tmp/adesk-rec-7.mkv"));
+}
+
+/// The same regression for the `request_state`/`state` reply path: a state
+/// request the server rejects with a VAP `error` must consume its own FIFO
+/// registration so the next `request_state` still resolves.
+#[tokio::test]
+async fn a_failed_state_request_does_not_swallow_the_next_reply() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // The first request is answered with a VAP `error` (no `state` reply).
+    harness.backend.set_fail_state(true);
+    let error = tokio::time::timeout(STEP_TIMEOUT, client.request_state())
+        .await
+        .expect("the failed request must not hang")
+        .expect_err("a failing desktop_state must fail");
+    match error {
+        ViewerError::Backend { code, .. } => assert_eq!(code, ErrorCode::Internal),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+
+    // The second request is accepted: it must resolve within the timeout rather
+    // than be swallowed by a stale waiter from the first.
+    harness.backend.set_fail_state(false);
+    let state = tokio::time::timeout(STEP_TIMEOUT, client.request_state())
+        .await
+        .expect("a request after a failed one must not hang")
+        .expect("the accepted request must succeed");
+    assert_eq!(state, desktop_state());
+}
+
 /// A clean `ViewerClient::close` must deterministically make `serve()` return
 /// `Ok(())`: the server writes a courtesy `bye` acknowledgement in reply, and the
 /// client has to keep its read half open long enough to receive it. Looping makes

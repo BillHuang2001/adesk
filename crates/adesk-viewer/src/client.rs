@@ -291,6 +291,7 @@ impl ViewerClient {
             errors: Mutex::new(Some(broadcast::channel(ERROR_CHANNEL_CAPACITY).0)),
             state_waiters: Mutex::new(VecDeque::new()),
             recording_waiters: Mutex::new(VecDeque::new()),
+            next_waiter_token: AtomicU64::new(1),
             next_recording_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
@@ -392,16 +393,29 @@ impl ViewerClient {
             return Err(ViewerError::Closed);
         }
         let mut errors = self.subscribe_errors()?;
-        let (sender, mut receiver) = oneshot::channel();
-        lock(&self.inner.state_waiters).push_back(sender);
-        self.send(ClientMessage::RequestState { id: None }).await?;
+        let (token, mut receiver) = self.inner.register_state_waiter();
+        if let Err(error) = self.send(ClientMessage::RequestState { id: None }).await {
+            // The request was never written: drop the registration so it cannot
+            // swallow the next `state` reply.
+            self.inner.remove_state_waiter(token);
+            return Err(error);
+        }
         loop {
             tokio::select! {
                 state = &mut receiver => return state.map_err(|_| ViewerError::Closed),
                 error = errors.recv() => match error {
-                    Ok((code, message)) => return Err(ViewerError::Backend { code, message }),
+                    Ok((code, message)) => {
+                        // A VAP `error` answers this request through the shared
+                        // error stream, not the waiter: consume the registration
+                        // so the FIFO stays aligned for the next request.
+                        self.inner.remove_state_waiter(token);
+                        return Err(ViewerError::Backend { code, message });
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
+                    Err(broadcast::error::RecvError::Closed) => {
+                        self.inner.remove_state_waiter(token);
+                        return Err(ViewerError::Closed);
+                    }
                 },
             }
         }
@@ -474,16 +488,31 @@ impl ViewerClient {
             return Err(ViewerError::Closed);
         }
         let mut errors = self.subscribe_errors()?;
-        let (sender, mut receiver) = oneshot::channel();
-        lock(&self.inner.recording_waiters).push_back(sender);
-        self.send(message).await?;
+        let (token, mut receiver) = self.inner.register_recording_waiter();
+        if let Err(error) = self.send(message).await {
+            // The request was never written: drop the registration so it cannot
+            // swallow the next `recording` reply.
+            self.inner.remove_recording_waiter(token);
+            return Err(error);
+        }
         loop {
             tokio::select! {
                 status = &mut receiver => return status.map_err(|_| ViewerError::Closed),
                 error = errors.recv() => match error {
-                    Ok((code, message)) => return Err(ViewerError::Backend { code, message }),
+                    Ok((code, message)) => {
+                        // A VAP `error` (e.g. `not_supported` for an unavailable
+                        // encoder, `invalid_request` for a conflicting
+                        // transition) answers this request through the shared
+                        // error stream, not the waiter: consume the registration
+                        // so the FIFO stays aligned for the next request.
+                        self.inner.remove_recording_waiter(token);
+                        return Err(ViewerError::Backend { code, message });
+                    }
                     Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => return Err(ViewerError::Closed),
+                    Err(broadcast::error::RecvError::Closed) => {
+                        self.inner.remove_recording_waiter(token);
+                        return Err(ViewerError::Closed);
+                    }
                 },
             }
         }
@@ -690,6 +719,20 @@ trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<T> Transport for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
+/// One registration in a reply FIFO: the sender the dispatcher resolves on the
+/// matching reply, plus a token that identifies the entry.
+///
+/// The token lets the awaiting side remove *its own* entry when a request is
+/// answered by a VAP `error` instead of the expected reply. Without it the stale
+/// entry would stay at the head of the FIFO and swallow the next reply, so a
+/// second request on the same connection would never resolve.
+struct Waiter<T> {
+    /// Unique registration token, matched by the awaiting side.
+    token: u64,
+    /// The sender the dispatcher resolves when the matching reply arrives.
+    sender: oneshot::Sender<T>,
+}
+
 /// Shared client state: the write half plus every fan-out channel and waiter the
 /// dispatcher serves.
 struct Inner {
@@ -708,11 +751,15 @@ struct Inner {
     /// Drop-sender fan-out of server error messages; `None` once shut down.
     errors: Mutex<Option<broadcast::Sender<(ErrorCode, String)>>>,
     /// Pending `request_state` waiters, resolved oldest-first.
-    state_waiters: Mutex<VecDeque<oneshot::Sender<DesktopState>>>,
+    state_waiters: Mutex<VecDeque<Waiter<DesktopState>>>,
     /// Pending recording replies, resolved oldest-first. Recording is reply-only
     /// (there is no unsolicited `recording` push in v1), so it gets its own FIFO
     /// — a `recording` message can never be mistaken for a `state` reply.
-    recording_waiters: Mutex<VecDeque<oneshot::Sender<RecordingStatus>>>,
+    recording_waiters: Mutex<VecDeque<Waiter<RecordingStatus>>>,
+    /// Source of the unique tokens that identify a reply-FIFO registration so the
+    /// awaiting side can remove its own entry when a request is answered by a VAP
+    /// `error` instead of the expected reply.
+    next_waiter_token: AtomicU64,
     /// Monotonic client id stamped on each recording request, echoed by the reply.
     next_recording_id: AtomicU64,
     /// Set once the connection is gone, for a cheap `request_state` early-out.
@@ -734,6 +781,42 @@ impl Inner {
     /// The next recording request id (starting at `1`).
     fn next_recording_id(&self) -> u64 {
         self.next_recording_id.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Allocates a fresh, unique reply-FIFO registration token.
+    fn next_waiter_token(&self) -> u64 {
+        self.next_waiter_token.fetch_add(1, Ordering::SeqCst)
+    }
+
+    /// Registers a `request_state` waiter, returning its token and receiver.
+    fn register_state_waiter(&self) -> (u64, oneshot::Receiver<DesktopState>) {
+        let token = self.next_waiter_token();
+        let (sender, receiver) = oneshot::channel();
+        lock(&self.state_waiters).push_back(Waiter { token, sender });
+        (token, receiver)
+    }
+
+    /// Registers a recording waiter, returning its token and receiver.
+    fn register_recording_waiter(&self) -> (u64, oneshot::Receiver<RecordingStatus>) {
+        let token = self.next_waiter_token();
+        let (sender, receiver) = oneshot::channel();
+        lock(&self.recording_waiters).push_back(Waiter { token, sender });
+        (token, receiver)
+    }
+
+    /// Removes a still-pending `request_state` waiter by its token.
+    ///
+    /// A no-op once the dispatcher has already resolved (and popped) the entry,
+    /// or once the connection shut the FIFO down.
+    fn remove_state_waiter(&self, token: u64) {
+        lock(&self.state_waiters).retain(|waiter| waiter.token != token);
+    }
+
+    /// Removes a still-pending recording waiter by its token.
+    ///
+    /// The recording counterpart of [`Inner::remove_state_waiter`].
+    fn remove_recording_waiter(&self, token: u64) {
+        lock(&self.recording_waiters).retain(|waiter| waiter.token != token);
     }
 }
 
@@ -819,14 +902,14 @@ async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Tran
             }
             ServerMessage::State(state) => {
                 if let Some(waiter) = lock(&inner.state_waiters).pop_front() {
-                    let _ = waiter.send(state);
+                    let _ = waiter.sender.send(state);
                 } else {
                     tracing::trace!("ignoring an unsolicited desktop state message");
                 }
             }
             ServerMessage::Recording { id, status } => {
                 if let Some(waiter) = lock(&inner.recording_waiters).pop_front() {
-                    let _ = waiter.send(status);
+                    let _ = waiter.sender.send(status);
                 } else {
                     tracing::trace!(?id, "ignoring an unsolicited recording status message");
                 }

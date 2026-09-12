@@ -31,6 +31,10 @@ use adesk_viewer_proto::{
 /// describe an empty 1280×800 Pixman desktop at a fixed timestamp `0`, recording
 /// input under `ActionId(7)` and an idle recording.
 ///
+/// [`set_fail_recording`](FakeBackend::set_fail_recording) and
+/// [`set_fail_state`](FakeBackend::set_fail_state) inject backend failures so a
+/// test can drive the server's `error` reply paths.
+///
 /// State is behind interior mutability and no lock is ever held across an
 /// `.await`.
 pub struct FakeBackend {
@@ -57,6 +61,8 @@ pub struct FakeBackend {
     recording: RecordingStatus,
     /// When set, every recording method fails with a `not_supported` error.
     fail_recording: AtomicBool,
+    /// When set, `desktop_state` fails with an `internal` error.
+    fail_state: AtomicBool,
 }
 
 impl Default for FakeBackend {
@@ -83,6 +89,7 @@ impl Default for FakeBackend {
             ts_ms: Some(0),
             recording: RecordingStatus::idle(),
             fail_recording: AtomicBool::new(false),
+            fail_state: AtomicBool::new(false),
         }
     }
 }
@@ -145,6 +152,11 @@ impl FakeBackend {
         self.fail_recording.store(fail, Ordering::SeqCst);
     }
 
+    /// Makes `desktop_state` fail with an `internal` error while `fail` is set.
+    pub fn set_fail_state(&self, fail: bool) {
+        self.fail_state.store(fail, Ordering::SeqCst);
+    }
+
     /// The failure every recording method reports while `fail_recording` is set.
     fn recording_failure(&self) -> Option<ViewerError> {
         self.fail_recording
@@ -175,6 +187,12 @@ impl ViewerBackend for FakeBackend {
     }
 
     async fn desktop_state(&self) -> adesk_viewer::Result<DesktopState> {
+        if self.fail_state.load(Ordering::SeqCst) {
+            return Err(ViewerError::Backend {
+                code: ErrorCode::Internal,
+                message: "the desktop state is unavailable".to_owned(),
+            });
+        }
         Ok(self.desktop.clone())
     }
 
