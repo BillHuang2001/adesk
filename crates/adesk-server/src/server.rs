@@ -7,6 +7,7 @@ use tokio::sync::watch;
 
 use adesk_app_registry::{AppRegistry, Clock, Correlator, MonotonicClock, RegistryOptions};
 use adesk_compositor::CompositorHandle;
+use adesk_notify::NotificationService;
 use adesk_observer::ObserverService;
 
 use crate::config::ServerConfig;
@@ -72,12 +73,15 @@ impl Server {
         let listener = SocketListener::bind(&config.socket_path).await?;
         tracing::info!(socket = %listener.path().display(), "AGP socket bound");
 
-        // 4. Shared context + event pump (observer, fan-out, resync).
+        // 4. Shared context + event pump (observer, notification store/inbox,
+        //    fan-out, resync).
         let observer = ObserverService::new();
+        let notify = NotificationService::new();
         let context = ServerContext::new(
             Arc::clone(&config),
             compositor.clone(),
             observer.clone(),
+            notify,
             Arc::clone(&registry),
             Arc::clone(&correlator),
         );

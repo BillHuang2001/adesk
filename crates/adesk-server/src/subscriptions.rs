@@ -376,6 +376,7 @@ impl InspectRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use adesk_core::{Notification, NotificationCloseReason, NotificationId, NotificationUrgency};
     use adesk_core::{Rect, Region};
 
     fn created(seq: u64, window: u64) -> RuntimeEvent {
@@ -415,6 +416,38 @@ mod tests {
             seq,
             ts_ms: seq * 10,
             window_id: None,
+        }
+    }
+
+    fn notification(seq: u64) -> RuntimeEvent {
+        RuntimeEvent::Notification {
+            seq,
+            ts_ms: seq * 10,
+            notification: Notification {
+                id: NotificationId(1),
+                source: Some("user".to_owned()),
+                title: "hello".to_owned(),
+                body: String::new(),
+                urgency: NotificationUrgency::Normal,
+                category: None,
+                actions: Vec::new(),
+                hints: std::collections::BTreeMap::new(),
+                posted_seq: seq,
+                posted_ts_ms: seq * 10,
+                dismissed: false,
+                closed_seq: None,
+                close_reason: None,
+                timeout_ms: None,
+            },
+        }
+    }
+
+    fn notification_closed(seq: u64) -> RuntimeEvent {
+        RuntimeEvent::NotificationClosed {
+            seq,
+            ts_ms: seq * 10,
+            notification_id: NotificationId(1),
+            reason: NotificationCloseReason::Dismissed,
         }
     }
 
@@ -544,6 +577,39 @@ mod tests {
         registry.fan_out(&created(1, 1));
         registry.fan_out(&commit(2, 1, damaged()));
         assert!(drain(&mut rx).is_empty());
+    }
+
+    #[test]
+    fn notification_kinds_reach_matching_subscribers() {
+        let registry = SubscriptionRegistry::new();
+        let (sink, mut rx) = mpsc::channel(4);
+        registry.subscribe(1, vec![EventKind::Notification], None, sink);
+
+        // A non-notification event is filtered out.
+        registry.fan_out(&created(1, 1));
+        registry.fan_out(&notification_closed(2));
+        assert!(drain(&mut rx).is_empty());
+
+        // The matching notification event reaches the subscriber.
+        let event = notification(3);
+        registry.fan_out(&event);
+        assert_eq!(drain(&mut rx), vec![event_frame(&event)]);
+    }
+
+    #[test]
+    fn notification_events_flow_to_an_unfiltered_subscription() {
+        let registry = SubscriptionRegistry::new();
+        let (sink, mut rx) = mpsc::channel(4);
+        registry.subscribe(1, Vec::new(), None, sink);
+
+        let posted = notification(1);
+        let closed = notification_closed(2);
+        registry.fan_out(&posted);
+        registry.fan_out(&closed);
+        assert_eq!(
+            drain(&mut rx),
+            vec![event_frame(&posted), event_frame(&closed)]
+        );
     }
 
     #[test]

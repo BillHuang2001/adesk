@@ -24,6 +24,10 @@ pub enum ServerError {
     /// The observer rejected the request (unknown window/action, internal).
     #[error("observer error: {0}")]
     Observer(#[from] adesk_observer::Error),
+    /// The notification store or the event inbox rejected the request
+    /// (unknown notification, invalid post, internal).
+    #[error("notify error: {0}")]
+    Notify(#[from] adesk_notify::Error),
     /// The inspector could not compose an inspection frame.
     #[error("inspector error: {0}")]
     Inspector(#[from] adesk_inspector::Error),
@@ -68,6 +72,15 @@ impl ServerError {
                 adesk_observer::Error::UnknownAction(_) => ErrorCode::InvalidRequest,
                 adesk_observer::Error::Internal(_) => ErrorCode::Internal,
             },
+            // `adesk_notify` owns its own lifecycle mapping: an unknown id is
+            // `unknown_notification`, an unusable post/action is
+            // `invalid_request`, everything else is `internal`. Delegating keeps
+            // the AGP code pinned in one place.
+            ServerError::Notify(error) => match error {
+                adesk_notify::Error::UnknownNotification(_) => ErrorCode::UnknownNotification,
+                adesk_notify::Error::InvalidRequest(_) => ErrorCode::InvalidRequest,
+                adesk_notify::Error::Internal(_) => ErrorCode::Internal,
+            },
             // `adesk_app_registry` owns its own mapping; delegate so every code
             // stays pinned in one place, and an `#[non_exhaustive]` addition
             // keeps the registry crate's mapping instead of degrading to
@@ -101,7 +114,7 @@ impl ServerError {
     /// Builds the wire error payload for a failed request.
     ///
     /// `code`/`message` are always present; `data` carries the id that was not
-    /// found for the three lookups where the client can act on it (§6 leaves
+    /// found for the four lookups where the client can act on it (§6 leaves
     /// `data` free-form, so no other variant invents a field). The ids are
     /// transparent newtypes over `u64`/`String`, so building the JSON cannot
     /// fail.
@@ -113,6 +126,9 @@ impl ServerError {
             }
             ServerError::Observer(adesk_observer::Error::UnknownAction(action_id)) => {
                 payload.with_data(serde_json::json!({ "action_id": action_id }))
+            }
+            ServerError::Notify(adesk_notify::Error::UnknownNotification(notification_id)) => {
+                payload.with_data(serde_json::json!({ "notification_id": notification_id }))
             }
             ServerError::Registry(adesk_app_registry::Error::UnknownApp(app_id)) => {
                 payload.with_data(serde_json::json!({ "app_id": app_id }))
@@ -158,6 +174,20 @@ mod tests {
             ),
             (
                 ServerError::Observer(adesk_observer::Error::Internal("state dropped".into())),
+                ErrorCode::Internal,
+            ),
+            (
+                ServerError::Notify(adesk_notify::Error::UnknownNotification(
+                    adesk_core::NotificationId(7),
+                )),
+                ErrorCode::UnknownNotification,
+            ),
+            (
+                ServerError::Notify(adesk_notify::Error::InvalidRequest("empty title".into())),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::Notify(adesk_notify::Error::Internal("inbox poisoned".into())),
                 ErrorCode::Internal,
             ),
             (
@@ -509,6 +539,20 @@ mod tests {
     }
 
     #[test]
+    fn payload_data_carries_unknown_notification_id() {
+        let error = ServerError::Notify(adesk_notify::Error::UnknownNotification(
+            adesk_core::NotificationId(12),
+        ));
+        let payload = error.payload();
+        assert_eq!(payload.code, ErrorCode::UnknownNotification);
+        // `NotificationId` is `#[serde(transparent)]`, so the id is the bare number.
+        assert_eq!(
+            payload.data,
+            Some(serde_json::json!({ "notification_id": 12 }))
+        );
+    }
+
+    #[test]
     fn payload_data_carries_unknown_app_id_as_bare_string() {
         let error = ServerError::Registry(adesk_app_registry::Error::UnknownApp(AppId::from(
             "org.mozilla.firefox",
@@ -526,6 +570,7 @@ mod tests {
     fn payload_omits_data_for_every_other_variant() {
         let variants = vec![
             ServerError::Observer(adesk_observer::Error::Internal("boom".into())),
+            ServerError::Notify(adesk_notify::Error::Internal("inbox poisoned".into())),
             ServerError::Registry(adesk_app_registry::Error::NoExec {
                 app: AppId::from("org.example.dbus"),
             }),

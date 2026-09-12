@@ -12,6 +12,7 @@ use std::time::Instant;
 use adesk_app_registry::{AppRegistry, Correlator};
 use adesk_compositor::CompositorHandle;
 use adesk_core::Point;
+use adesk_notify::NotificationService;
 use adesk_observer::ObserverService;
 
 use crate::config::ServerConfig;
@@ -28,6 +29,9 @@ pub struct ServerContext {
     pub compositor: CompositorHandle,
     /// Temporal observation engine fed by the event pump.
     pub observer: ObserverService,
+    /// Notification store + event inbox (§5.9/§5.10); the store is mutated only
+    /// by the §5.9 handlers, the inbox is fed by the event pump.
+    pub notify: NotificationService,
     /// Application registry (shared by list/get/launch).
     pub registry: Arc<AppRegistry>,
     /// Launch → window correlator; shared with the registry's clock.
@@ -53,6 +57,7 @@ impl ServerContext {
         config: Arc<ServerConfig>,
         compositor: CompositorHandle,
         observer: ObserverService,
+        notify: NotificationService,
         registry: Arc<AppRegistry>,
         correlator: Arc<Mutex<Correlator>>,
     ) -> ServerContext {
@@ -60,6 +65,7 @@ impl ServerContext {
             config,
             compositor,
             observer,
+            notify,
             registry,
             correlator,
             subscriptions: SubscriptionRegistry::new(),

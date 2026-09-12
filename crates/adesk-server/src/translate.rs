@@ -6,13 +6,15 @@
 //! documented on the function.
 
 use adesk_compositor::{RendererName, StateSnapshot as CompositorSnapshot};
-use adesk_core::{Observation, Point, Rect};
+use adesk_core::{EventKind as CoreEventKind, Observation, Point, Rect, RuntimeEvent};
 use adesk_inspector::ActionMarker;
 use adesk_observer::{
     ActionKind as ObserverActionKind, ActionRecord, Condition as ObserverCondition,
     StateSnapshot as ObserverSnapshot, WindowSnapshot,
 };
-use adesk_proto::{Condition as ProtoCondition, ImagePayload, ObserveResult};
+use adesk_proto::{
+    Condition as ProtoCondition, EventPayload, EventRecord, ImagePayload, ObserveResult, ProtoError,
+};
 use adesk_recorder::EncoderKind;
 use adesk_viewer_proto::RecordingEncoder;
 
@@ -175,6 +177,59 @@ pub fn action_marker(record: &ActionRecord, geometry: Option<Rect>, now_ms: u64)
 /// "image attached" distinguishable (`None` vs `Some`).
 pub fn observe_result(observation: Observation, image: Option<ImagePayload>) -> ObserveResult {
     ObserveResult { observation, image }
+}
+
+/// `adesk_core::RuntimeEvent` → the §5.10 wire `EventRecord`.
+///
+/// A `wait_for_events` answer and a pushed §5.6 event frame must describe an
+/// event identically, so the `data` object comes from `adesk-proto`'s
+/// [`EventPayload::from_runtime`] — the *same* mapping the server's event fan-out
+/// uses (via [`adesk_proto::EventFrame::from_runtime`]) rather than a second one.
+/// The `seq`/`ts_ms` envelope fields are the event's own: they are never
+/// re-stamped here.
+///
+/// # Errors
+///
+/// Propagates the [`ProtoError`] a failing `data` serialization yields.
+pub fn event_record(event: &RuntimeEvent) -> Result<EventRecord, ProtoError> {
+    let payload = EventPayload::from_runtime(event);
+    Ok(EventRecord {
+        event: payload.kind(),
+        seq: event.seq(),
+        ts_ms: event.ts_ms(),
+        data: payload.to_data()?,
+    })
+}
+
+/// `adesk_proto::EventKind` → `adesk_core::EventKind` for the §5.10 wait filter.
+///
+/// The two enums differ only in the protocol-only kinds — `surface_damage` (a
+/// §5.6 filter *alias*), `quiet` (no v1 emitter) and `inspect_frame` (never
+/// delivered by a wait, §5.10) — which have no [`RuntimeEvent`] and therefore no
+/// core kind. The `surface_damage` alias resolves to the emitted kind it aliases
+/// ([`CoreEventKind::SurfaceCommit`]); the events inbox filters by kind only, so
+/// the alias's non-empty-damage narrowing is not applied and a waiter asking for
+/// `surface_damage` also observes damage-empty commits. `quiet` and
+/// `inspect_frame` return `None` and are dropped from the filter — a
+/// `wait_for_events` can never observe them anyway, so dropping them cannot hide
+/// an event.
+pub fn proto_event_kind(kind: adesk_proto::EventKind) -> Option<CoreEventKind> {
+    use adesk_proto::EventKind as Proto;
+    Some(match kind {
+        Proto::WindowCreated => CoreEventKind::WindowCreated,
+        Proto::WindowDestroyed => CoreEventKind::WindowDestroyed,
+        Proto::WindowActivated => CoreEventKind::WindowActivated,
+        Proto::TitleChanged => CoreEventKind::TitleChanged,
+        Proto::SurfaceCommit | Proto::SurfaceDamage => CoreEventKind::SurfaceCommit,
+        Proto::FocusChanged => CoreEventKind::FocusChanged,
+        Proto::PopupAppeared => CoreEventKind::PopupAppeared,
+        Proto::PopupDisappeared => CoreEventKind::PopupDisappeared,
+        Proto::AppLaunched => CoreEventKind::AppLaunched,
+        Proto::Notification => CoreEventKind::Notification,
+        Proto::NotificationClosed => CoreEventKind::NotificationClosed,
+        Proto::NotificationAction => CoreEventKind::NotificationAction,
+        Proto::Quiet | Proto::InspectFrame => return None,
+    })
 }
 
 #[cfg(test)]
@@ -443,8 +498,99 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------- recording encoder
+    // ---------------------------------------------------------------- event_record
 
+    #[test]
+    fn event_record_carries_the_envelope_and_the_shared_data_mapping() {
+        let event = RuntimeEvent::WindowCreated {
+            seq: 42,
+            ts_ms: 420,
+            window_id: WindowId(7),
+            app_id: Some(adesk_core::AppId::from("org.example.app")),
+            pid: Some(42),
+            launch_id: None,
+            title: Some("hi".to_owned()),
+        };
+
+        let record = event_record(&event).expect("serializable");
+
+        assert_eq!(record.event, adesk_proto::EventKind::WindowCreated);
+        assert_eq!(record.seq, 42, "the event's own seq is the envelope's");
+        assert_eq!(record.ts_ms, 420, "the event's own ts_ms is the envelope's");
+        // `data` is the same mapping the §5.6 fan-out uses, minus the kind tag.
+        let pushed = serde_json::to_value(EventPayload::from_runtime(&event).to_data().unwrap())
+            .expect("value");
+        assert_eq!(record.data, pushed);
+        assert_eq!(record.data["window_id"], 7);
+    }
+
+    #[test]
+    fn event_record_maps_a_notification_event() {
+        let event = RuntimeEvent::Notification {
+            seq: 5,
+            ts_ms: 50,
+            notification: adesk_core::Notification {
+                id: adesk_core::NotificationId(1),
+                source: Some("user".to_owned()),
+                title: "Build finished".to_owned(),
+                body: "ok".to_owned(),
+                urgency: adesk_core::NotificationUrgency::Normal,
+                category: None,
+                actions: Vec::new(),
+                hints: std::collections::BTreeMap::new(),
+                posted_seq: 5,
+                posted_ts_ms: 50,
+                dismissed: false,
+                closed_seq: None,
+                close_reason: None,
+                timeout_ms: None,
+            },
+        };
+
+        let record = event_record(&event).expect("serializable");
+
+        assert_eq!(record.event, adesk_proto::EventKind::Notification);
+        assert_eq!(record.data["notification"]["title"], "Build finished");
+    }
+
+    // ---------------------------------------------------------- proto_event_kind
+
+    #[test]
+    fn proto_event_kind_maps_the_core_kinds_and_drops_the_wire_only_ones() {
+        use adesk_proto::EventKind as Proto;
+
+        assert_eq!(
+            proto_event_kind(Proto::WindowCreated),
+            Some(CoreEventKind::WindowCreated)
+        );
+        assert_eq!(
+            proto_event_kind(Proto::SurfaceCommit),
+            Some(CoreEventKind::SurfaceCommit)
+        );
+        assert_eq!(
+            proto_event_kind(Proto::SurfaceDamage),
+            Some(CoreEventKind::SurfaceCommit),
+            "the §5.6 filter alias resolves to the emitted kind it aliases"
+        );
+        assert_eq!(proto_event_kind(Proto::Quiet), None, "no v1 emitter");
+        assert_eq!(
+            proto_event_kind(Proto::InspectFrame),
+            None,
+            "a wait never delivers inspect_frame"
+        );
+
+        let mapped = Proto::SUBSCRIBABLE
+            .iter()
+            .filter_map(|kind| proto_event_kind(*kind))
+            .count();
+        assert_eq!(
+            mapped,
+            Proto::SUBSCRIBABLE.len() - 1,
+            "only `quiet` has no core counterpart among the subscribable kinds"
+        );
+    }
+
+    // ---------------------------------------------------------- recording encoder
     #[test]
     fn recorder_encoder_maps_every_variant() {
         assert_eq!(recorder_encoder(RecordingEncoder::Auto), EncoderKind::Auto);

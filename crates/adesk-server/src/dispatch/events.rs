@@ -1,12 +1,16 @@
-//! §5.6 event subscriptions.
+//! §5.6 event subscriptions and the §5.10 event wait.
 //!
 //! `subscribe_events` registers a filtered sink in
 //! [`crate::subscriptions::SubscriptionRegistry`]; the event pump fans matching
 //! `RuntimeEvent`s out as `EventFrame`s. `unsubscribe_events` is idempotent.
+//! `wait_for_events` is the pull counterpart: one request that answers once a
+//! matching event has been published (or the timeout elapsed), driven by the
+//! notification service's event inbox.
 
+use adesk_notify::EventWaitSpec;
 use adesk_proto::{
     ProtoError, SubscribeEventsParams, SubscribeEventsResult, UnsubscribeEventsParams,
-    UnsubscribeEventsResult,
+    UnsubscribeEventsResult, WaitForEventsParams, WaitForEventsResult,
 };
 
 use crate::dispatch::RequestContext;
@@ -63,4 +67,51 @@ pub async fn unsubscribe_events(
         tracing::debug!(subscription_id = id, "unsubscribe of an unknown id ignored");
     }
     Ok(UnsubscribeEventsResult {})
+}
+
+/// `wait_for_events`: block until a matching event is published or the timeout
+/// elapses, then answer with the collected `EventRecord`s and the watermark.
+///
+/// The filter point is `since_seq` when given, else the inbox watermark captured
+/// when the wait began (§5.10), so an idling agent that passes the previous
+/// result's `seq` never misses an event. The inbox records every emitted event
+/// kind (window lifecycle, commits, `app_launched`, notifications, ...); an empty
+/// `kinds` filter means "every emitted kind" and `window_id` restricts delivery to
+/// events carrying that window. A timeout is a normal answer
+/// (`timed_out: true`, empty `events`), never an error.
+///
+/// The inbox yields `RuntimeEvent`s, so each is bridged to the wire `EventRecord`
+/// through `crate::translate::event_record` — the same `data` mapping the §5.6
+/// fan-out uses.
+pub async fn wait_for_events(
+    ctx: &RequestContext<'_>,
+    params: WaitForEventsParams,
+) -> Result<WaitForEventsResult> {
+    let spec = EventWaitSpec {
+        // The inbox filters by `adesk_core::EventKind`; the wire params carry
+        // `adesk_proto::EventKind`. The bridge drops the protocol-only kinds that
+        // a wait can never observe (`quiet`, `inspect_frame`) — an empty result
+        // then means "every emitted kind", the §5.10 default.
+        kinds: params
+            .kinds
+            .iter()
+            .filter_map(|kind| crate::translate::proto_event_kind(*kind))
+            .collect(),
+        window_id: params.window_id,
+        timeout_ms: params.timeout_ms,
+        max_events: params.max_events,
+        since_seq: params.since_seq,
+    };
+    let batch = ctx.server.notify.wait_for_events(spec).await?;
+    let events = batch
+        .events
+        .iter()
+        .map(crate::translate::event_record)
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(WaitForEventsResult {
+        events,
+        timed_out: batch.timed_out,
+        elapsed_ms: batch.elapsed_ms,
+        seq: batch.seq,
+    })
 }

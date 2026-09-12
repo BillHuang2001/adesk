@@ -27,6 +27,10 @@ adesk-core.workspace = true
 adesk-proto.workspace = true
 adesk-compositor.workspace = true
 adesk-observer.workspace = true
+# Notification store + agent event inbox (`docs/protocol.md` §5.9/§5.10): one
+# `NotificationService` lives in `ServerContext`, the §5.9 handlers mutate it and
+# publish the resulting events, and the event pump feeds its inbox.
+adesk-notify.workspace = true
 adesk-app-registry.workspace = true
 adesk-inspector.workspace = true
 adesk-render.workspace = true

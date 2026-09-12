@@ -161,6 +161,7 @@ dependencies = [
  "adesk-compositor",
  "adesk-core",
  "adesk-inspector",
+ "adesk-notify",
  "adesk-observer",
  "adesk-proto",
  "adesk-recorder",

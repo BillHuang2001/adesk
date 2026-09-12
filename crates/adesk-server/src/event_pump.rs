@@ -64,6 +64,11 @@ pub fn handle_event(context: &ServerContext, event: &RuntimeEvent) {
     // The observer is the only writer of the event history; feed it first so
     // any waiter woken by the fan-out already sees the event.
     context.observer.handle_event(event);
+    // The inbox records every event kind (the observer ignores the notification
+    // kinds) so `wait_for_events` can deliver them. `handle_event` only journals
+    // the event — it never mutates the notification store (that is exclusively the
+    // §5.9 handlers' job), so a store mutation and its event cannot disagree.
+    context.notify.handle_event(event);
     update_inspection(context, event);
     context.subscriptions.fan_out(event);
     prune_inspect_streams(context);
@@ -185,6 +190,12 @@ fn prune_inspect_streams(context: &ServerContext) {
 /// Issues `QueryState` to the compositor, translates the snapshot
 /// (`crate::translate::observer_snapshot`) and calls `ObserverService::resync`;
 /// windows the snapshot introduced are marked uncertain until their next commit.
+///
+/// The notification inbox needs no equivalent: it owns no source of truth to
+/// re-derive from (it is a bounded journal of events, not a projection of
+/// compositor state) and its waiters filter by `seq`, so an event lost to lag is
+/// simply absent — exactly what a `subscribe_events` subscriber sees. Replaying
+/// or re-deriving events here would invent events the runtime never emitted.
 ///
 /// # Errors
 ///

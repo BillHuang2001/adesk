@@ -35,6 +35,9 @@ pub mod events;
 pub mod input;
 /// §5.7 human inspector (`inspect_capture`, `inspect_subscribe`).
 pub mod inspect;
+/// §5.9 notifications (`post_notification`, `list_notifications`,
+/// `close_notification`, `invoke_notification_action`).
+pub mod notify;
 /// §5.1 runtime methods (`ping`).
 pub mod runtime;
 /// §5.3 window methods (`list_windows`, `get_window`, `activate_window`,
@@ -92,7 +95,7 @@ impl Dispatcher {
 
 /// Routes one decoded request to its §5 group handler and encodes the result.
 ///
-/// One arm per `adesk_proto::Method` variant (29 methods, `docs/protocol.md` §5);
+/// One arm per `adesk_proto::Method` variant (34 methods, `docs/protocol.md` §5);
 /// the result is serialized by [`ResponseFrame::result`], whose `ProtoError`
 /// becomes a [`ServerError`] through `?`.
 async fn route(
@@ -227,6 +230,28 @@ async fn route(
         }
         Method::InspectSubscribe(params) => {
             let result = inspect::inspect_subscribe(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        // §5.9 notifications
+        Method::PostNotification(params) => {
+            let result = notify::post_notification(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        Method::ListNotifications(params) => {
+            let result = notify::list_notifications(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        Method::CloseNotification(params) => {
+            let result = notify::close_notification(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        Method::InvokeNotificationAction(params) => {
+            let result = notify::invoke_notification_action(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        // §5.10 event waits
+        Method::WaitForEvents(params) => {
+            let result = events::wait_for_events(&ctx, params).await?;
             Ok(ResponseFrame::result(id, &result)?)
         }
     }
