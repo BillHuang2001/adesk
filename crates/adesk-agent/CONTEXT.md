@@ -53,7 +53,7 @@ Flat re-exports at the crate root; the module list below is the authoritative su
 - No test may need a socket, compositor, GPU, network or installed app — use `MockProvider`/`DummyVlmProvider` + `ScriptedClient`.
 - `src/agp.rs` is the only module that adapts `adesk-client`/`adesk-proto` wire plumbing; the loop, context and providers speak domain types (`adesk_core`) plus `adesk_proto::ImagePayload`.
 - The crate contains no `todo!()`/`unimplemented!()`; `unwrap`/`expect`/panics exist only inside `#[cfg(test)]` modules or the `testing` scaffolding module (`#[cfg(any(test, feature = "test-support"))]`), which panics by design on an exhausted or mismatched script.
-- The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait` with explicit timeouts; tests use `retry_backoff_ms = 0`.
+- The loop must never block on wall-clock sleeps for agent semantics — waits go through AGP `observe`/`wait`, and watch idling through `wait_for_events`, always with explicit timeouts; tests use `retry_backoff_ms = 0`.
 - Keep files well under the ~1000-line concern threshold; the loop is split into `src/agent_loop/` (`mod.rs`, `config.rs`, `execute.rs`, `step.rs`, `tests.rs`), so grow it by adding a module rather than by extending `execute.rs`.
 
 ## Known Issues
