@@ -43,6 +43,8 @@ Modules are private; every public item is re-exported flat at the crate root (`a
 - `ClickRequest::window(id)` + `.position/.button/.count`; `PointerButtonRequest::window(id)` + `.position/.button` (used by `double_click`/`mouse_down`/`mouse_up`); `ScrollRequest::new(id, dx, dy)` + `.position`; `DragRequest::new(id, from, to)`.
 - `KeyChord{Single(String), Chord(Vec<String>)}` + `single`/`chord`, `From<&str>`, `From<String>`, `From<Vec<String>>`, `From<&[&str]>`; serialises as string or array per protocol §3.
 - `InspectCaptureRequest::default()` (= `DEFAULT_OVERLAYS`: window_ids+focus+damage) + `.max_dimension`; `InspectSubscribeRequest::new(overlays)`.
+- `PostNotificationRequest::new(title)` (`#[non_exhaustive]`) + `.source/.body/.urgency/.category/.action(key, label)/.hint(key, value)/.timeout_ms`; `source`/`category`/`timeout_ms` are omitted when unset, `body`/`urgency`/`actions`/`hints` always carry a value (the protocol defaults).
+- `WaitForEventsRequest::new()` (= `Default`) + `.kinds(impl IntoIterator<Item = EventKind>)/.window/.timeout_ms/.max_events/.since_seq`; `kinds`/`window_id`/`since_seq` are omitted when unset. `DEFAULT_MAX_EVENTS = 32`; the default timeout reuses `DEFAULT_TIMEOUT_MS`.
 
 ### Events (`src/events.rs`)
 - `EventFilter{kinds: Option<Vec<EventKind>>, window_id: Option<WindowId>}` + `all()`, `kinds(..)`, `.window(id)`; `None` fields are omitted from the params object (= "all").
