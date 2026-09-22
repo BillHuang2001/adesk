@@ -1,0 +1,28 @@
+# adesk-a11y — the runtime's accessibility (text) view of a window's UI.
+#
+# Dependency versions are declared once in the root workspace manifest
+# (`[workspace.dependencies]`); this crate only references them so versions can
+# never drift. `atspi` (AT-SPI2 over pure-Rust zbus D-Bus) is the only D-Bus
+# dependency in the workspace and is used by this crate alone; it is declared
+# here from the start so the whole stack is compiled and version-checked even
+# before the AT-SPI backend lands.
+[package]
+name = "adesk-a11y"
+description = "ADesk accessibility service: backend seam, element-handle registry and the §5.11 text view of a window."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+adesk-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+atspi.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
