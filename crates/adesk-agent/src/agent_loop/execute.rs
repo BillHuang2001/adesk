@@ -9,11 +9,12 @@
 
 use std::time::{Duration, Instant};
 
-use adesk_core::{WindowId, WindowInfo};
+use adesk_core::{ErrorCode, WindowId, WindowInfo};
 use tracing::{debug, warn};
 
 use crate::client::{
-    AgentClient, CaptureRequest, ClickRequest, ObserveOutcome, ObserveRequest, ScrollRequest,
+    AccessibilityTreeRequest, AgentClient, CaptureRequest, ClickRequest, ObserveOutcome,
+    ObserveRequest, ScrollRequest,
 };
 use crate::context::ActionRecord;
 use crate::decision::{ActionKind, AgentDecision, ObserveCondition};
@@ -213,6 +214,74 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                     self.client.observe(&request)
                 )?;
                 record_observation(facts, execution, outcome);
+            }
+            AgentDecision::AccessibilityTree {
+                window_id,
+                max_nodes,
+            } => {
+                let request = AccessibilityTreeRequest {
+                    window_id: *window_id,
+                    max_nodes: *max_nodes,
+                };
+                // Degradation is explicit here. An unavailable accessibility
+                // backend (`not_supported` / `unknown_accessible` /
+                // `unknown_window`) must neither end the run nor count as a step
+                // failure, so those errors are swallowed *inside* the call —
+                // `client_call!` never sees them and records no failure. Every
+                // other error keeps the generic `ErrorClass` policy: retryable
+                // errors are retried, anything else fails the step.
+                let outcome = client_call!(
+                    self,
+                    step,
+                    kind,
+                    execution.attempts,
+                    async {
+                        match self.client.accessibility_tree(&request).await {
+                            Ok(outcome) => Ok(Some(outcome)),
+                            Err(error) if is_accessibility_unavailable(&error) => {
+                                warn!(
+                                    step,
+                                    error = %error,
+                                    "accessibility tree unavailable, continuing without it"
+                                );
+                                Ok(None)
+                            }
+                            Err(error) => Err(error),
+                        }
+                    }
+                )?;
+                match outcome {
+                    Some(outcome) => {
+                        let window = outcome.window_id;
+                        facts.accessibility = Some(outcome.text);
+                        // Mirror the `Capture` arm's window upsert. The outcome
+                        // carries only the window id (no metadata), so an
+                        // untracked window is refreshed through `get_window` —
+                        // best-effort, like [`AgentLoop::refresh_windows`]: a
+                        // failed refresh leaves the cached list untouched.
+                        if !facts.windows.iter().any(|known| known.id == window) {
+                            match bounded_call(
+                                self.config.step_timeout_ms,
+                                step,
+                                self.client.get_window(window),
+                            )
+                            .await
+                            {
+                                Ok(window) => upsert_window(&mut facts.windows, window),
+                                Err(error) => debug!(
+                                    step,
+                                    window = %window,
+                                    error = %error,
+                                    "accessibility window not refreshed"
+                                ),
+                            }
+                        }
+                    }
+                    None => {
+                        facts.accessibility = None;
+                        self.last_error = Some(String::from("accessibility tree unavailable"));
+                    }
+                }
             }
             AgentDecision::Click {
                 window_id,
@@ -482,6 +551,25 @@ fn upsert_window(windows: &mut Vec<WindowInfo>, window: WindowInfo) {
     }
 }
 
+/// True for the errors that mean the accessibility backend simply cannot serve
+/// this request.
+///
+/// They are degraded rather than fatal: the loop continues without accessibility
+/// text. `NotSupported` (no backend / build without one), `UnknownAccessible`
+/// (stale element) and `UnknownWindow` (stale window) are listed explicitly,
+/// because the generic [`ErrorClass`] policy would treat `NotSupported` as
+/// [`ErrorClass::Fatal`] and end the run.
+fn is_accessibility_unavailable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::Client(err)
+            if matches!(
+                err.code,
+                ErrorCode::NotSupported | ErrorCode::UnknownAccessible | ErrorCode::UnknownWindow
+            )
+    )
+}
+
 /// One context action record for an executed decision.
 fn action_record(
     step: u32,
@@ -516,6 +604,7 @@ fn decision_window(decision: &AgentDecision) -> Option<WindowId> {
         | AgentDecision::Scroll { window_id, .. } => Some(*window_id),
         AgentDecision::Observe { window_id, .. }
         | AgentDecision::Wait { window_id, .. }
+        | AgentDecision::AccessibilityTree { window_id, .. }
         | AgentDecision::Type { window_id, .. }
         | AgentDecision::Keypress { window_id, .. } => *window_id,
         AgentDecision::ListApps { .. }
@@ -556,6 +645,10 @@ fn describe_decision(decision: &AgentDecision) -> String {
             "wait window_id={window_id:?} until={}",
             describe_condition(*until)
         ),
+        AgentDecision::AccessibilityTree {
+            window_id,
+            max_nodes,
+        } => format!("accessibility_tree window_id={window_id:?} max_nodes={max_nodes:?}"),
         AgentDecision::Click {
             position,
             button,

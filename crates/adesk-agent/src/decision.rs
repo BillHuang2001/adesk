@@ -98,6 +98,15 @@ pub enum AgentDecision {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    /// Runtime-native: read a window's UI as text through the accessibility stack.
+    AccessibilityTree {
+        /// Target window; `None` = the active window.
+        #[serde(default)]
+        window_id: Option<WindowId>,
+        /// Maximum total node count; `None` = the protocol default.
+        #[serde(default)]
+        max_nodes: Option<u32>,
+    },
     /// Application input: click through the Wayland seat.
     Click {
         /// Target window.
@@ -168,6 +177,7 @@ impl AgentDecision {
             Self::Capture { .. } => ActionKind::Capture,
             Self::Observe { .. } => ActionKind::Observe,
             Self::Wait { .. } => ActionKind::Wait,
+            Self::AccessibilityTree { .. } => ActionKind::AccessibilityTree,
             Self::Click { .. } => ActionKind::Click,
             Self::Type { .. } => ActionKind::TypeText,
             Self::Keypress { .. } => ActionKind::Keypress,
@@ -188,7 +198,7 @@ impl AgentDecision {
     }
 
     /// True for decisions that read or mutate runtime state directly
-    /// (list/launch/activate/close/capture/observe/wait).
+    /// (list/launch/activate/close/capture/observe/wait/accessibility_tree).
     pub fn is_runtime(&self) -> bool {
         matches!(
             self,
@@ -201,6 +211,7 @@ impl AgentDecision {
                 | Self::Capture { .. }
                 | Self::Observe { .. }
                 | Self::Wait { .. }
+                | Self::AccessibilityTree { .. }
         )
     }
 }
@@ -227,6 +238,8 @@ pub enum ActionKind {
     Observe,
     /// `wait` (observation without image).
     Wait,
+    /// `accessibility_tree` (read a window as structured text).
+    AccessibilityTree,
     /// `click` / `double_click`.
     Click,
     /// `type_text`.
@@ -255,6 +268,7 @@ impl ActionKind {
             Self::Capture => "capture_window",
             Self::Observe => "observe",
             Self::Wait => "wait",
+            Self::AccessibilityTree => "accessibility_tree",
             Self::Click => "click",
             Self::TypeText => "type_text",
             Self::Keypress => "keypress",
@@ -356,6 +370,13 @@ mod tests {
                 K::Wait,
             ),
             (
+                AgentDecision::AccessibilityTree {
+                    window_id: Some(window()),
+                    max_nodes: Some(2000),
+                },
+                K::AccessibilityTree,
+            ),
+            (
                 AgentDecision::Click {
                     window_id: window(),
                     position: Position::normalized(0.5, 0.5),
@@ -400,7 +421,7 @@ mod tests {
     #[test]
     fn kind_maps_every_variant() {
         let vocabulary = vocabulary();
-        assert_eq!(vocabulary.len(), 14);
+        assert_eq!(vocabulary.len(), 15);
         for (decision, expected) in &vocabulary {
             assert_eq!(decision.kind(), *expected, "kind of {decision:?}");
         }
@@ -500,6 +521,7 @@ mod tests {
 
         assert_eq!(ActionKind::ListApps.as_str(), "list_apps");
         assert_eq!(ActionKind::Capture.as_str(), "capture_window");
+        assert_eq!(ActionKind::AccessibilityTree.as_str(), "accessibility_tree");
         assert_eq!(ActionKind::TypeText.as_str(), "type_text");
         assert_eq!(ActionKind::Finish.as_str(), "finish");
         for name in names {

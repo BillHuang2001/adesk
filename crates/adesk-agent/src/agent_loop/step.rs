@@ -72,6 +72,8 @@ pub(super) struct RuntimeFacts {
     pub(super) active_window: Option<WindowId>,
     pub(super) apps: Vec<AppInfo>,
     pub(super) observation: Option<Observation>,
+    /// Latest accessibility outline, when the backend produced one.
+    pub(super) accessibility: Option<String>,
 }
 
 /// What one executed decision produced.

@@ -411,6 +411,7 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
             active_window: facts.active_window,
             apps: &facts.apps,
             observation: facts.observation.as_ref(),
+            accessibility: facts.accessibility.as_deref(),
             last_error: self.last_error.as_deref(),
         })
     }
