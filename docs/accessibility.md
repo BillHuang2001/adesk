@@ -151,6 +151,13 @@ activation semantics (a `check_box` toggling, a `page_tab` being selected, a
 inference. The response carries an ordinary AGP `action_id`, so an agent can reference
 the invocation with `after_action` (§5.4) exactly like any other action.
 
+Backend availability is checked **before** the node id is resolved, so with no
+accessibility backend *every* `invoke_accessible_action` answers `not_supported`,
+whatever `node_id` it carries — even an id the runtime never handed out. A runtime with
+no backend knows nothing about any element, so `unknown_accessible` is reserved for an
+available backend that does not recognise the id, and `invalid_request` for an action
+name the element does not expose.
+
 ## Handle stability
 
 An `AccessibleId` is assigned per backend element handle and retained by the runtime's
@@ -170,7 +177,7 @@ makes ids safe to cache between observations.
 - `adesk-core` — the accessibility value vocabulary (`AccessibleId`,
   `AccessibleState`, `AccessibleNode`, `AccessibleTree`, `AccessibleMatch`) and
   `ErrorCode::UnknownAccessible`.
-- `adesk-a11y` — the service: the `AccessibleSource` seam, the AT-SPI and fixture
+- `adesk-a11y` — the service: the `AccessibilitySource` seam, the AT-SPI and fixture
   backends, the element-handle → `AccessibleId` registry, window → accessible
   correlation and the text renderer.
 - `adesk-proto` — the §5.11 methods and their wire payloads.

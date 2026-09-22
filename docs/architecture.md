@@ -328,7 +328,7 @@ Seat and input:
   `ADESK_ACCESSIBILITY`). `auto` (the default) connects lazily on first use and
   degrades to `not_supported` when there is no accessibility bus; `off` never touches
   D-Bus.
-- The `ServerBuilder` also accepts an injected source, so tests and tools supply a
+- `ServerConfig` also accepts an injected source, so tests and tools supply a
   deterministic fixture backend instead of a real bus.
 - The request path is bounded — `max_depth`, `max_nodes` and a backend call timeout —
   so an unresponsive or hostile client application can never block the runtime.
