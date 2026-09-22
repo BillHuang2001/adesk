@@ -139,7 +139,9 @@ is the design record and `docs/architecture.md` §12 the subsystem contract.
 - **Backend model.** `adesk-a11y` owns the AT-SPI2 client and is the only crate that
   speaks D-Bus; `auto` (default) connects lazily on first use and degrades to
   `not_supported`, `off` never touches D-Bus (`--accessibility auto|off`,
-  `ADESK_ACCESSIBILITY`), and a deterministic fixture backend is injected for tests.
+  `ADESK_ACCESSIBILITY`), and a deterministic fixture backend is injected for tests. With no
+  backend, *every* §5.11 method — `invoke_accessible_action` included — answers
+  `not_supported`, because availability is probed before a node id is resolved.
 - **On demand, no coupling.** The one `AccessibilityService` lives in `ServerContext`, off
   the compositor thread and owning no compositor state; the event pump, the observer and
   the window model are untouched, and there are no accessibility event kinds — the view is
@@ -230,12 +232,11 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   `adesk-recorder`'s hardware tests are detection-gated (they early-return when the
   facility is absent) and the pure-Rust MJPEG/AVI backend is the always-available path.
   `--record-encoder auto` selects GPU only when it is actually available.
-- The real AT-SPI2 path needs a running accessibility bus (a session bus with an
-  activatable `at-spi` registry) *and* applications that expose accessibility; the sandbox
-  has the former but no ordinary accessible applications, so `adesk-a11y`'s real backend is
-  covered by detection-gated tests (which early-return without a bus) plus a unit-tested
-  walk, while the deterministic path is exercised by `adesk-testkit`'s injected fixture
-  backend.
+- The real AT-SPI2 path needs a running accessibility bus (an activatable `at-spi` registry)
+  and accessible applications; the sandbox has only the former, so `adesk-a11y`'s real backend
+  is covered by detection-gated tests, a unit-tested walk and an end-to-end mock-provider suite
+  on a private `dbus-daemon` (`crates/adesk-a11y/tests/atspi_provider.rs`; skips cleanly
+  without the `dbus-daemon` binary), while `adesk-testkit`'s fixture backend stays deterministic.
 - Accessibility *events* are explicitly out of scope: there is no reactive accessibility
   event stream and no accessibility `EventKind` — the text view is observed only on
   request.
@@ -246,12 +247,12 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 ## Status
 The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 37 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
 Four new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec, incl. the recording messages; 43 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary, incl. `--record`; 120 tests), `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 84 tests) and `adesk-recorder` (software MJPEG/AVI encoder + muxer, optional `ffmpeg` hardware-H.264 backend, `Recorder`/`RecordingSession`; 33 tests).
-`adesk-a11y` adds the runtime's accessibility (text) view: the AT-SPI2 client (the workspace's only D-Bus speaker), window→accessible correlation, the element-handle → `AccessibleId` registry and the outline renderer behind the three §5.11 methods, backed by a deterministic fixture source that `adesk-testkit` injects and a lazy `auto`/`off` backend selection.
-`adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; it also backs the recording messages with an fps-paced capture loop (`--recordings-dir` / `ADESK_RECORDINGS_DIR` default). Its suite is 231 passed / 0 failed.
+`adesk-a11y` adds the runtime's accessibility (text) view: the AT-SPI2 client (the workspace's only D-Bus speaker), window→accessible correlation, the element-handle → `AccessibleId` registry and the outline renderer behind the three §5.11 methods, backed by a deterministic fixture source that `adesk-testkit` injects and a lazy `auto`/`off` backend selection. Its suite is 106 unit + 1 integration (the mock AT-SPI2 provider suite) + 1 doc test, and `invoke_accessible_action` answers `not_supported` for any id when there is no backend because availability is probed before the id is resolved.
+`adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; it also backs the recording messages with an fps-paced capture loop (`--recordings-dir` / `ADESK_RECORDINGS_DIR` default). Its suite is 272 passed / 0 failed.
 `cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
-`cargo test --workspace --no-fail-fast` = 1557 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
+`cargo test --workspace --no-fail-fast` = 1713 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
 The on-demand capture path reuses a size-keyed pool of offscreen render targets (`adesk_render::TargetPool`, owned per backend by the compositor's `HeadlessRenderer`), so repeated captures of a given size no longer re-allocate a fresh ~4 MiB target each time.
-Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 133 passed.
+Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 146 passed.
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 77 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.

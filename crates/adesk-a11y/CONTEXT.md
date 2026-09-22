@@ -74,9 +74,10 @@ projection/trim helpers, and all of `atspi::{map, dbus, correlate, walk}`.
   timed-out call is `A11yError::Backend`, a vanished element is `A11yError::UnknownNode`.
 - `tracing` only; never log pixel payloads or whole trees (a tree is user content). The AT-SPI
   backend logs at `debug!`/`trace!` only, and never a per-element payload.
-- Keep files well under ~1000 lines (cohesive inline test modules may exceed it); tests live
-  in inline `#[cfg(test)]` modules (the `adesk-core` convention — this crate has no `tests/`
-  directory).
+- Keep files well under ~1000 lines (cohesive test modules may exceed it). Unit tests live in
+  inline `#[cfg(test)]` modules (the `adesk-core` convention); the crate's single `tests/` file,
+  `tests/atspi_provider.rs`, is the backend-level suite that must own a private `dbus-daemon` and
+  therefore cannot be an inline module.
 
 ## Routing Table
 
@@ -96,6 +97,7 @@ This node has no child directories: every module of the crate lives here.
 | D-Bus connect, element addressing, error classification | `src/atspi/dbus.rs` |
 | Window → accessible-frame correlation | `src/atspi/correlate.rs` |
 | Element read + bounded pre-order walk + `invoke` | `src/atspi/walk.rs` |
+| Real backend against a mock AT-SPI2 provider (integration) | `tests/atspi_provider.rs` |
 
 ## Design Decisions
 
@@ -224,8 +226,10 @@ This node has no child directories: every module of the crate lives here.
 
 ## Test Strategy
 
-Everything here is exercised by display-free unit tests in the modules themselves (105 tests,
-all inline, plus one doc test on `normalize_role`):
+Everything here is exercised by display-free unit tests in the modules themselves (106 tests,
+all inline, plus one doc test on `normalize_role`), except the backend-level suite in
+`tests/atspi_provider.rs` (1 test), which drives the real `AtspiSource` against a mock AT-SPI2
+provider on a private `dbus-daemon`:
 
 - `role` (6): the documented examples, case folding, digits, separator runs and dangling
   separators, non-ASCII as separators, idempotence on already-normalized names.
@@ -272,12 +276,17 @@ all inline, plus one doc test on `normalize_role`):
   `snapshot` and `invoke` answer `Unavailable` inside a 1 s bound; that the `off` backend answers
   `Unavailable(reason)` verbatim and immediately; that both selectors return working trait
   objects whose `name()` differs (`"atspi"` vs `"off"`); and that clones share one cache.
-
-Verification for this package is scoped — the workspace as a whole does not currently compile
-because `adesk-server` has not yet grown the dispatcher arms for the three new §5.11 methods:
+- `tests/atspi_provider.rs` (1): the whole real request path against a mock AT-SPI2 provider —
+  `org.a11y.Bus.GetAddress` so the backend's own connect runs unchanged, a served
+  application/frame tree for each correlation rung (pid, exact title, `app_id`) plus the
+  never-guessing `NotCorrelated` case, the bounded walk (roles/names/values/states/bounds/handles,
+  depth/node truncation) and every `InvokeOutcome` including the recorded `DoAction` effect.
+  The provider is served in-process and the test skips cleanly (printing the reason) when
+  `dbus-daemon` cannot be started, so no display, GPU, network or installed GUI application is
+  required.
 
 ```sh
-bash scripts/dev.sh cargo test -p adesk-a11y        # 105 + 1 doc test
+bash scripts/dev.sh cargo test -p adesk-a11y        # 106 unit + 1 integration + 1 doc test
 bash scripts/dev.sh cargo fmt --all --check
 bash scripts/dev.sh cargo clippy -p adesk-a11y --all-targets -- -D warnings
 bash scripts/dev.sh cargo doc -p adesk-a11y --no-deps --document-private-items
@@ -291,8 +300,9 @@ bash scripts/dev.sh cargo doc -p adesk-a11y --no-deps --document-private-items
   the lazy/`off` tests assert the `Unavailable` path only when `is_available()` is `false`.
   The current dev sandbox *does* expose a session bus with an activatable `org.a11y.Bus`, so
   there the connect path runs for real (and the no-bus assertions are the ones skipped); the
-  fixture backend remains the always-available path that proves the §5.11 surface. The bus is
-  only probed — no test requires a toolkit or an application to be registered.
+  fixture backend remains the always-available path that proves the §5.11 surface. The host bus
+  is only probed — no test requires an installed toolkit or application to be registered;
+  `tests/atspi_provider.rs` serves its own mock application in-process.
 - `AccessibleState` is `#[non_exhaustive]`, so `text::state_name`'s catch-all arm is
   unreachable-but-required today; a future `adesk-core` variant renders as `unknown` until the
   mapping is extended (the `serde_json` cross-check test will flag it).
@@ -305,3 +315,8 @@ bash scripts/dev.sh cargo doc -p adesk-a11y --no-deps --document-private-items
   the runtime cannot describe at all answers `not_supported` rather than a tree. Correlation
   also reads the applications' accessible names one call at a time, so a bus with many
   applications pays several round trips per snapshot (bounded by `SNAPSHOT_TIMEOUT`).
+- `tests/atspi_provider.rs` needs a `dbus-daemon` binary, because it starts its own private
+  session bus; where that is missing the suite prints the reason and returns early instead of
+  failing. It binds the provider in-process (`zbus`), so it needs no accessibility bus of the
+  host and no accessible application, and it serialises on a process-wide mutex because
+  `DBUS_SESSION_BUS_ADDRESS` is global.

@@ -25,7 +25,7 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
 
 ## Known Gaps
 
-- `protocol.md` §6 (lines 498-501) lists the 14 `ErrorCode` wire values but gives no per-code meaning and no retryable-vs-fatal classification.
+- `protocol.md` §6 (lines 504-507) lists the 15 `ErrorCode` wire values but gives no per-code meaning and no retryable-vs-fatal classification.
   No other file in `docs/` classifies errors; only incidental mentions exist (`render_failed` architecture.md:152, `not_supported` architecture.md:210, `shutting_down` architecture.md:268).
   The per-code *meanings* are derivable from the mapping tables in `crates/adesk-server/src/error.rs`; a retryable-vs-fatal taxonomy is an **open design question**, not an unstated behaviour — no crate implements (or needs) one.
 - No systematic method-to-error table exists: only a few methods state theirs normatively (`activate_window` §5.3, the observation image §4 → `unknown_window` / `render_failed`); the rest are implied by the §6 example and the code names.
