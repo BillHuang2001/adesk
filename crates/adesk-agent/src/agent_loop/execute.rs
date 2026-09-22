@@ -190,6 +190,18 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                     self.client.observe(&request)
                 )?;
                 record_observation(facts, execution, outcome);
+                // Proactive text-first enrichment: once an observation resolves,
+                // pull the observed window's accessibility outline so the next
+                // decision can reason over UI text without a pixel readback.
+                if self.config.include_accessibility {
+                    let observed = facts
+                        .observation
+                        .as_ref()
+                        .and_then(|observation| observation.window_id)
+                        .or(*window_id);
+                    self.enrich_accessibility(observed, None, kind, facts, step, execution)
+                        .await?;
+                }
             }
             AgentDecision::Wait {
                 window_id,
@@ -219,63 +231,17 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                 window_id,
                 max_nodes,
             } => {
-                let request = AccessibilityTreeRequest {
-                    window_id: *window_id,
-                    max_nodes: *max_nodes,
-                };
-                // Degradation is explicit here. An unavailable accessibility
-                // backend (`not_supported` / `unknown_accessible` /
-                // `unknown_window`) must neither end the run nor count as a step
-                // failure, so those errors are swallowed *inside* the call —
-                // `client_call!` never sees them and records no failure. Every
-                // other error keeps the generic `ErrorClass` policy: retryable
-                // errors are retried, anything else fails the step.
-                let outcome = client_call!(self, step, kind, execution.attempts, async {
-                    match self.client.accessibility_tree(&request).await {
-                        Ok(outcome) => Ok(Some(outcome)),
-                        Err(error) if is_accessibility_unavailable(&error) => {
-                            warn!(
-                                step,
-                                error = %error,
-                                "accessibility tree unavailable, continuing without it"
-                            );
-                            Ok(None)
-                        }
-                        Err(error) => Err(error),
-                    }
-                })?;
-                match outcome {
-                    Some(outcome) => {
-                        let window = outcome.window_id;
-                        facts.accessibility = Some(outcome.text);
-                        // Mirror the `Capture` arm's window upsert. The outcome
-                        // carries only the window id (no metadata), so an
-                        // untracked window is refreshed through `get_window` —
-                        // best-effort, like [`AgentLoop::refresh_windows`]: a
-                        // failed refresh leaves the cached list untouched.
-                        if !facts.windows.iter().any(|known| known.id == window) {
-                            match bounded_call(
-                                self.config.step_timeout_ms,
-                                step,
-                                self.client.get_window(window),
-                            )
-                            .await
-                            {
-                                Ok(window) => upsert_window(&mut facts.windows, window),
-                                Err(error) => debug!(
-                                    step,
-                                    window = %window,
-                                    error = %error,
-                                    "accessibility window not refreshed"
-                                ),
-                            }
-                        }
-                    }
-                    None => {
-                        facts.accessibility = None;
-                        self.last_error = Some(String::from("accessibility tree unavailable"));
-                    }
+                if !self.config.include_accessibility {
+                    // Opt-in capability: with the gate off the loop makes no
+                    // runtime call at all and leaves a benign note for the agent
+                    // instead of failing the step.
+                    self.last_error = Some(String::from(
+                        "accessibility is disabled; set include_accessibility",
+                    ));
+                    return Ok(());
                 }
+                self.enrich_accessibility(*window_id, *max_nodes, kind, facts, step, execution)
+                    .await?;
             }
             AgentDecision::Click {
                 window_id,
@@ -394,6 +360,92 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
             self.client.observe(&request)
         )?;
         record_observation(facts, execution, outcome);
+        // Same proactive text-first enrichment as the explicit `observe` arm.
+        if self.config.include_accessibility {
+            let observed = facts
+                .observation
+                .as_ref()
+                .and_then(|observation| observation.window_id)
+                .or(window_id);
+            self.enrich_accessibility(observed, None, kind, facts, step, execution)
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Fetch a window's accessibility outline and cache it in `facts`.
+    ///
+    /// `window_id` is `None` for the runtime's active window. This is the single
+    /// implementation of the accessibility call: the explicit
+    /// [`AgentDecision::AccessibilityTree`] arm and the proactive text-first
+    /// enrichment both go through it, so the degradation policy lives in exactly
+    /// one place.
+    ///
+    /// A backend that cannot serve the request (`not_supported` /
+    /// `unknown_accessible` / `unknown_window`) is degraded benignly: the error is
+    /// swallowed *inside* `client_call!`, so it records no failure and never ends
+    /// the run — the cached outline is cleared and a note is left in `last_error`.
+    /// Every other error keeps the generic [`ErrorClass`] policy (retryable errors
+    /// are retried, anything else fails the step).
+    async fn enrich_accessibility(
+        &mut self,
+        window_id: Option<WindowId>,
+        max_nodes: Option<u32>,
+        kind: ActionKind,
+        facts: &mut RuntimeFacts,
+        step: u32,
+        execution: &mut Execution,
+    ) -> Result<()> {
+        let request = AccessibilityTreeRequest {
+            window_id,
+            max_nodes,
+        };
+        let outcome = client_call!(self, step, kind, execution.attempts, async {
+            match self.client.accessibility_tree(&request).await {
+                Ok(outcome) => Ok(Some(outcome)),
+                Err(error) if is_accessibility_unavailable(&error) => {
+                    warn!(
+                        step,
+                        error = %error,
+                        "accessibility tree unavailable, continuing without it"
+                    );
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        })?;
+        match outcome {
+            Some(outcome) => {
+                let window = outcome.window_id;
+                facts.accessibility = Some(outcome.text);
+                // Mirror the `Capture` arm's window upsert. The outcome carries
+                // only the window id (no metadata), so an untracked window is
+                // refreshed through `get_window` — best-effort, like
+                // [`AgentLoop::refresh_windows`]: a failed refresh leaves the
+                // cached list untouched.
+                if !facts.windows.iter().any(|known| known.id == window) {
+                    match bounded_call(
+                        self.config.step_timeout_ms,
+                        step,
+                        self.client.get_window(window),
+                    )
+                    .await
+                    {
+                        Ok(window) => upsert_window(&mut facts.windows, window),
+                        Err(error) => debug!(
+                            step,
+                            window = %window,
+                            error = %error,
+                            "accessibility window not refreshed"
+                        ),
+                    }
+                }
+            }
+            None => {
+                facts.accessibility = None;
+                self.last_error = Some(String::from("accessibility tree unavailable"));
+            }
+        }
         Ok(())
     }
 

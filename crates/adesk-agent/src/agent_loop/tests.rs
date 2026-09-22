@@ -7,13 +7,16 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use adesk_core::{
-    ActionId, Button, Observation, Position, Rect, Size, WindowId, WindowInfo, WindowState,
+    ActionId, Button, ErrorCode, Observation, Position, Rect, Size, WindowId, WindowInfo,
+    WindowState,
 };
 use adesk_proto::{ImageFormat, ImagePayload};
 use async_trait::async_trait;
 
-use super::{AgentLoop, LoopConfig};
-use crate::client::{CaptureOutcome, ObserveOutcome, RuntimeInfo, PROTOCOL_VERSION};
+use super::{AgentLoop, LoopConfig, StepStatus};
+use crate::client::{
+    AccessibilityOutcome, CaptureOutcome, ObserveOutcome, RuntimeInfo, PROTOCOL_VERSION,
+};
 use crate::context::{AgentContext, TaskDescription};
 use crate::decision::{AgentDecision, ObserveCondition};
 use crate::error::ProviderError;
@@ -284,5 +287,210 @@ async fn image_requests_are_gated_on_provider_capability() {
         agent.context().image_count(),
         0,
         "no frame was attached to the text-only provider's context"
+    );
+}
+
+/// A window with `id`, for the `get_window` refresh the accessibility upsert
+/// issues for an untracked window.
+fn window(id: WindowId) -> WindowInfo {
+    WindowInfo {
+        id,
+        app_id: None,
+        title: Some(String::from("editor")),
+        geometry: Rect::new(0, 0, 1280, 800),
+        state: WindowState::Active,
+        mapped: true,
+        pid: None,
+        created_seq: 1,
+        last_commit_seq: 3,
+        popup_count: 0,
+    }
+}
+
+/// An accessibility outline for `window_id`.
+fn accessibility_outcome(window_id: WindowId, text: &str) -> AccessibilityOutcome {
+    AccessibilityOutcome {
+        window_id,
+        node_count: 3,
+        truncated: false,
+        text: text.to_owned(),
+    }
+}
+
+/// An `observe` on `window_id`, explicitly without an image request.
+fn observe_decision(window_id: WindowId) -> AgentDecision {
+    AgentDecision::Observe {
+        window_id: Some(window_id),
+        after_action: None,
+        until: ObserveCondition::Quiet { quiet_ms: 250 },
+        timeout_ms: None,
+        include_image: Some(false),
+        max_dimension: None,
+        region: None,
+    }
+}
+
+/// A successful `finish`.
+fn finish() -> AgentDecision {
+    AgentDecision::Finish {
+        success: true,
+        summary: String::from("done"),
+    }
+}
+
+/// With [`LoopConfig::include_accessibility`] on, an `observe` decision pulls the
+/// observed window's accessibility outline through one extra `accessibility_tree`
+/// call, and the outline reaches the next provider context — with no readback.
+#[tokio::test]
+async fn accessibility_enrichment_reaches_the_context_without_pixels() {
+    let task = TaskDescription::new("read the preferences dialog");
+    let outline = "- window \"Preferences\"\n  - button \"Dark Mode\"\n";
+
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        quiet_after(None),
+        ScriptedResponse::AccessibilityTree(accessibility_outcome(WindowId(1), outline)),
+        ScriptedResponse::Window(window(WindowId(1))),
+    ]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        observe_decision(WindowId(1)),
+        finish(),
+    ]));
+    let config = LoopConfig {
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent.run(&task).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(handle.call_count(ClientMethod::AccessibilityTree), 1);
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 0,
+        "text-first enrichment never reads pixels back"
+    );
+    assert!(
+        provider
+            .contexts()
+            .iter()
+            .any(|context| context.accessibility.as_deref() == Some(outline)),
+        "the outline must reach the provider context"
+    );
+    assert!(
+        provider
+            .contexts()
+            .iter()
+            .all(|context| context.image.is_none() && context.keyframe.is_none()),
+        "no frame is ever attached to the context"
+    );
+}
+
+/// With the gate off (the default) the same run makes no accessibility call: the
+/// script carries no `AccessibilityTree` response, so an extra call would exhaust
+/// it and panic — yet the run still finishes and no outline reaches the context.
+#[tokio::test]
+async fn accessibility_is_not_fetched_when_the_gate_is_off() {
+    let task = TaskDescription::new("read the preferences dialog");
+    assert!(
+        !LoopConfig::default().include_accessibility,
+        "the capability is opt-in and off by default"
+    );
+
+    let mut client = ScriptedClient::new();
+    client.push_all([ScriptedResponse::Ping(runtime_info()), quiet_after(None)]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        observe_decision(WindowId(1)),
+        finish(),
+    ]));
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), LoopConfig::default());
+    let outcome = agent.run(&task).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(handle.call_count(ClientMethod::AccessibilityTree), 0);
+    assert!(
+        provider
+            .contexts()
+            .iter()
+            .all(|context| context.accessibility.is_none()),
+        "the disabled capability adds nothing to the context"
+    );
+}
+
+/// An unavailable accessibility backend degrades benignly: the run survives and
+/// the context simply carries no outline.
+#[tokio::test]
+async fn unavailable_accessibility_is_non_fatal() {
+    let task = TaskDescription::new("read the preferences dialog");
+
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        quiet_after(None),
+        ScriptedResponse::Error(adesk_core::Error::new(
+            ErrorCode::NotSupported,
+            "no accessibility backend",
+        )),
+    ]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        observe_decision(WindowId(1)),
+        finish(),
+    ]));
+    let config = LoopConfig {
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent
+        .run(&task)
+        .await
+        .expect("an unavailable backend must not end the run");
+
+    assert!(outcome.success);
+    assert_eq!(handle.call_count(ClientMethod::AccessibilityTree), 1);
+    assert!(
+        provider
+            .contexts()
+            .iter()
+            .all(|context| context.accessibility.is_none()),
+        "an unavailable backend leaves no outline"
+    );
+}
+
+/// The explicit `accessibility_tree` decision is gated the same way: with the
+/// capability off it makes no runtime call and does not fail the step.
+#[tokio::test]
+async fn explicit_accessibility_decision_is_gated_and_non_fatal() {
+    let task = TaskDescription::new("read the preferences dialog");
+
+    let mut client = ScriptedClient::new();
+    // No `AccessibilityTree` response: a gated decision must not call out.
+    client.push(ScriptedResponse::Ping(runtime_info()));
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        AgentDecision::AccessibilityTree {
+            window_id: Some(WindowId(1)),
+            max_nodes: None,
+        },
+        finish(),
+    ]));
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), LoopConfig::default());
+    let outcome = agent.run(&task).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(handle.call_count(ClientMethod::AccessibilityTree), 0);
+    assert_eq!(
+        outcome.history[0].status,
+        StepStatus::Ok,
+        "a gated decision is a benign no-op, not a failed step"
     );
 }
