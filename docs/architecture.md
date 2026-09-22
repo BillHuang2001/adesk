@@ -332,3 +332,9 @@ Seat and input:
   deterministic fixture backend instead of a real bus.
 - The request path is bounded — `max_depth`, `max_nodes` and a backend call timeout —
   so an unresponsive or hostile client application can never block the runtime.
+- `invoke_accessible_action` records its action **before** performing the invocation,
+  window-less (the request names only a node). The recorded `seq` must causally precede
+  the surface commits the invoked action may trigger, or `wait_for_quiet(after_action =
+  ...)` would filter them out as pre-action; an invocation that then fails therefore
+  leaves an orphan action record, which is harmless because ids are never reused and
+  nothing references the record unless the caller does.

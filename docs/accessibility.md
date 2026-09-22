@@ -64,7 +64,7 @@ across toolkits that spell the same role differently.
 
 ## Backend seam
 
-The subsystem talks to one seam, `AccessibleSource`: connect, list the applications
+The subsystem talks to one seam, `AccessibilitySource`: connect, list the applications
 and frames on the accessibility bus, walk a frame's subtree, resolve an element handle
 back to a node, and invoke an element action. Two implementations ship behind it.
 
@@ -116,12 +116,12 @@ the root at depth 0. A node renders as `{role} "{name}"` and then, in a fixed or
 the geometry is known, and ` id={id}`. Children follow their parent, one per line:
 
 ```text
-frame "Open File"
-  dialog "Open File" id=1
-    text "File name:" id=2 bounds=0,0,80,24
-    entry "" value="report.txt" states=[focused] actions=[set_value] id=3 bounds=88,0,400,24
-    push_button "Open" actions=[click] id=4
-    push_button "Cancel" states=[enabled,sensitive] id=5
+frame "Open File" bounds=0,0,640,480 id=1
+  dialog "Open File" bounds=10,10,620,460 id=2
+    text "File name:" bounds=0,0,80,24 id=3
+    entry "" value="report.txt" states=[focused] actions=[set_value] bounds=88,0,400,24 id=4
+    push_button "Open" actions=[click] id=5
+    push_button "Cancel" states=[enabled,sensitive] id=6
 ```
 
 Inside names and values, `\`, `"`, newline and tab are escaped as `\\`, `\"`, `\n` and

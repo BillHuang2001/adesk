@@ -456,8 +456,9 @@ is strictly on demand — there are no accessibility events and no accessibility
 `EventKind`.
 
 - `window_id` omitted resolves like an unscoped observation (§5.4): the runtime's
-  active window, else the keyboard-focus window; an unknown `window_id` fails with
-  `unknown_window`.
+  active window, else the keyboard-focus window. An unknown `window_id` fails with
+  `unknown_window`, and so does an omitted one when the runtime has neither an active
+  nor a keyboard-focus window (message `"no active window is available"`).
 - `max_depth` bounds recursion below the window root (`0` = the root alone);
   `max_nodes` bounds the total node count. Hitting either sets
   `AccessibleTree.truncated` and stops the walk — a partial tree is returned, never
@@ -490,6 +491,9 @@ node id the runtime does not know, or an element that has since disappeared, fai
 with `unknown_accessible`; an action name the element does not expose fails with
 `invalid_request`; with no accessibility backend it fails with `not_supported`. The
 returned `action_id` is an ordinary AGP action id, usable with `after_action` (§5.4).
+It is registered in the runtime's action registry window-less — the request names only
+a node — so it is a valid `after_action` anchor for the §5.4 waits and for
+`wait_for_quiet`.
 
 ## 6. Errors
 
