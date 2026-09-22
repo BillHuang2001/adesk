@@ -6,7 +6,7 @@ End-to-end coverage of the runtime's two endpoints: the AGP v1 server and the vi
 starts a real runtime (`Server::start`) on a private temp socket, driven through `adesk-client` / `adesk-viewer` (typed)
 and raw NDJSON, with no display, GPU, network or installed application.
 These suites are the acceptance gate for the server's composition (compositor + observer + registry + inspector + viewer + transport).
-Ten integration targets totalling 65 tests (alongside the lib's 144 in-module unit tests and the binary's 9) are green.
+Twelve integration targets totalling 94 tests (alongside the lib's 167 in-module unit tests and the binary's 11) are green.
 They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-clock timing beyond generous bounds.
 
 ## Harness (`./common/mod.rs` — shared module, not a test target; keeps `#![allow(dead_code)]`)
@@ -57,10 +57,12 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
 | `sequence.rs` | §1 seq-monotonicity for server-synthesized events: an `observe(until=timeout)` watermark before a launch; the first `app_launched` strictly above it, the second strictly above the first and above the re-sampled watermark; ≥2 consecutive `inspect_frame` seqs strictly increasing above the pre-subscription watermark; `server_synthesized_seqs_interleave_with_the_compositor_counter` brackets both emission sites with out-of-band `ReserveSeq` probes — every synthesized `seq` above the probe reserved before it, every probe reserved after it above the `seq`. |
 | `notify.rs` | §5.9 notifications + §5.10 event waits: `post_notification` allocates monotonic ids and reveals the stored record (defaults filled, `posted_seq` = the event's `seq`) in a newest-first `list_notifications`; an empty `title` is `invalid_request` and stores nothing; `close_notification` dismisses (gone from the default list, present with `include_dismissed` + `close_reason`/`closed_seq`) and a **second** close is a successful no-op that publishes nothing (no `notification_closed` frame reaches a subscriber, and a `wait_for_events` above its gap `seq` times out); `invoke_notification_action` succeeds on a declared key without dismissing, `invalid_request` on an undeclared one; `close_notification`/`invoke_notification_action` on an unknown id answer `unknown_notification` with `ErrorPayload.data = {"notification_id": id}` and keep the connection open. Each of the three notification kinds reaches its own raw §5.6 subscriber with the exact `data` payload and the reserved `seq`, while a disjoint-only subscriber receives nothing. `wait_for_events` resolves with a notification posted while it is outstanding (typed through `adesk-client`), reports a horizon as `timed_out: true` with `events: []` (a result, never an error), and honours `kinds`/`window_id`/`max_events`/`since_seq` (exclusive, oldest-first, capped at the front). `notification_seqs_interleave_with_the_compositor_counter` brackets the three mutation sites with out-of-band `ReserveSeq` probes (the `sequence.rs` technique), proving one global monotonic `seq` counter with gaps but no reuse. |
 | `viewer.rs` | VAP v1 endpoint (`docs/viewer.md`): §2 handshake (`protocol_version`, the 1280x720 output, `pixman`); §4/§5 `request_frame` (a full-output PNG whose own `IHDR` carries the output size, and a strictly greater `seq` on the second frame) and `request_state` (empty runtime → `active_window_id: null`, `windows: []`); **viewer input through the seat** — a real `WaylandTestClient` toplevel is activated over AGP, then a viewer `pointer_button` and a `key` chord tap each answer an `input_ack` with a fresh `ActionId` and the *client* observes the delivered move/press/release in its own `wl_pointer`/`wl_keyboard` history; `without_viewer()` (no socket path, no socket file, AGP still serves, clean shutdown); teardown removes both socket files and a fresh runtime rebinds the same viewer path; an input with no active window is answered with a VAP `error` (`invalid_request`) that leaves the connection usable. |
+| `accessibility.rs` | §5.11 accessibility against a real mapped `WaylandTestClient` toplevel (needed because the methods target a window) with a deterministic injected `adesk_a11y::FixtureSource` (`TestRuntimeBuilder::with_accessibility_source`), never a D-Bus backend. `accessibility_tree` returns the fixture's multi-level tree verbatim (`node_count`, roles/names/values/states/bounds/actions, `truncated: false`) and the exact rendered `text` outline; `include_text = false` yields `""`; `include_states`/`include_bounds`/`include_actions = false` empty those node fields *and* drop them from `text`; `max_depth`/`max_nodes` cut the tree with `truncated: true` (never an error); an omitted `window_id` resolves the active window. `find_accessible` AND-s its role/name/`name_contains` filters, reports each match's ancestor `path` (ids stable against a preceding `accessibility_tree`), caps at `max_results` with `truncated: true`, and rejects `max_results = 0` as `invalid_request`. `invoke_accessible_action` answers `{action_id, node_id, action}`, the fixture records the exact `(handle, action)`, an omitted `action` reports the element's default, a bogus `node_id` is `unknown_accessible` (rejected by the registry, never reaching the backend) and an action the element does not expose is `invalid_request`; the returned `action_id` is a real record (a following `wait_for_quiet { after_action }` accepts it). Errors: an unknown explicit `window_id` and a runtime with no candidate window are `unknown_window` (the latter names "no active window is available"); a fixture reporting itself unavailable answers `not_supported` for a tree/find and `unknown_accessible` for an invoke (the registry is empty, so the id is unknown — see the notes). `accessibility_tree`/`find_accessible` publish no `RuntimeEvent` under a subscription. |
 
-Per-file test counts (81 total, all plain sync `#[test]`; no `#[tokio::test]`, no `#[ignore]`):
-`viewer.rs` 12, `notify.rs` 11, `observation.rs` 11, `protocol.rs` 10, `subscriptions.rs` 8,
-`windows.rs` 7, `apps.rs` 6, `inspector.rs` 5, `shutdown.rs` 5, `capture.rs` 3, `sequence.rs` 3.
+Per-file test counts (94 total, all plain sync `#[test]`; no `#[tokio::test]`, no `#[ignore]`):
+`accessibility.rs` 13, `viewer.rs` 12, `notify.rs` 11, `observation.rs` 11, `protocol.rs` 10,
+`subscriptions.rs` 8, `windows.rs` 7, `apps.rs` 6, `inspector.rs` 5, `shutdown.rs` 5,
+`capture.rs` 3, `sequence.rs` 3.
 
 ## Notes for Agents
 
@@ -83,13 +85,15 @@ Per-file test counts (81 total, all plain sync `#[test]`; no `#[tokio::test]`, n
   `inspector.rs` therefore asserts ≤1 stray frame in a 500 ms grace window, then zero for 1.5 s.
   Do not tighten this back to "zero strays after the response" — that flakes on a correct server.
 - Window-creating E2E is not covered by the *AGP* suites (they run against an empty runtime with no Wayland client, so
-  tiling/focus/input delivery there is exercised in the `adesk-testkit` / `adesk-agent` suites). `viewer.rs` is the one
-  exception: viewer input carries **no `window_id`** and targets the runtime's *active* window (§4/§5), so a viewer input
-  can only be delivered when a toplevel exists — that suite therefore needs a real Wayland client. It has one because
-  `adesk-testkit` is a dev-dependency (the same dev-dep cycle `crates/adesk-compositor/tests/` already uses), and it
-  connects the in-repo client with `WaylandTestClient::connect_in(runtime.runtime_dir(), &display)`. The §5.4
-  image-*present* branch of `observe(include_image=true)` is still out of scope here: `observation.rs` pins only the
-  no-candidate `image: null` case, and the rendering half lives in `crates/adesk-testkit/tests/e2e_launch_observe.rs`.
+  tiling/focus/input delivery there is exercised in the `adesk-testkit` / `adesk-agent` suites). **Two suites are the
+  exception** and each drives a real Wayland client for a protocol reason: `viewer.rs` because viewer input carries **no
+  `window_id`** and targets the runtime's *active* window (§4/§5), so a viewer input can only be delivered when a toplevel
+  exists; and `accessibility.rs` because every §5.11 method resolves a window (an explicit `window_id`, else the active
+  one) and `resolve_window` rejects a runtime with no candidate window. Both connect the in-repo client with
+  `WaylandTestClient::connect_in(runtime.runtime_dir(), &display)` — `adesk-testkit` is a dev-dependency (the same
+  dev-dep cycle `crates/adesk-compositor/tests/` already uses). The §5.4 image-*present* branch of
+  `observe(include_image=true)` is still out of scope here: `observation.rs` pins only the no-candidate `image: null`
+  case, and the rendering half lives in `crates/adesk-testkit/tests/e2e_launch_observe.rs`.
 - Viewer input is fire-and-forget and its ack fan-out is a **broadcast** channel, so the ack stream must be subscribed
   *before* the input is sent (`let mut acks = Box::pin(client.input_ack());` then send, then `acks.next().await`) — a
   late subscriber misses the ack. `input_ack()` yields a non-`Unpin` stream, hence the `Box::pin`.
@@ -149,9 +153,20 @@ Per-file test counts (81 total, all plain sync `#[test]`; no `#[tokio::test]`, n
   `TestRuntime::with_viewer_socket` / `TestRuntime::without_viewer`).
   `RawClient::read_line` and `RawClient::expect_line` are `pub` but only called by `read_json` / `expect_json`
   inside `common/mod.rs`.
-- Viewer-only harness accessors (single target today): `TestRuntime::connect_viewer`, `connect_viewer_raw`,
-  `viewer_socket_path`, `runtime_dir`, `wayland_display_name` are reached only from `viewer.rs`;
+- Harness accessors with narrow call sites: `TestRuntime::connect_viewer`, `connect_viewer_raw` and
+  `viewer_socket_path` are reached only from `viewer.rs`; `runtime_dir` and `wayland_display_name` only from
+  `viewer.rs` and `accessibility.rs` (the two suites that connect a real Wayland client);
   `RawClient::expect_closed` only from `protocol.rs`, `TestRuntime::running` only from `shutdown.rs`;
-  `RawClient::read_json` is reached from `inspector.rs` and `notify.rs` (bounded "nothing arrived" windows).
+  `RawClient::read_json` is reached from `inspector.rs`, `notify.rs` and `accessibility.rs` (bounded "nothing arrived" windows).
 - `raw_request` and `subscription_id` live once in `common/mod.rs` (see the helpers bullet above) and are
-  shared by `subscriptions.rs`, `sequence.rs` and `notify.rs` instead of being copied per target.
+  shared by `subscriptions.rs`, `sequence.rs`, `notify.rs` and `accessibility.rs` instead of being copied per target.
+- `accessibility.rs` injects its backend through the harness (`TestRuntimeBuilder::with_accessibility_source`), so the
+  §5.11 suite is fully deterministic and headless: no test is gated on D-Bus, and every test is a plain `#[test]`.
+  Its fixture handles derive from the tree path (root `fixture`, child *i* `fixture/{i}`), and the service assigns
+  `AccessibleId`s in pre-order — **ids are registered only for nodes a request returns**, so a `find_accessible` issued
+  before any `accessibility_tree` yields different ids than one issued after. Assert id stability against a preceding
+  tree snapshot rather than against absolute numbers.
+- `invoke_accessible_action` maps a backend that reports itself unavailable to `unknown_accessible`, not `not_supported`:
+  `AccessibilityService::invoke` resolves the `AccessibleId` against its element registry *before* it calls the backend,
+  and with no readable tree the registry is necessarily empty, so the id is unknown. `not_supported` for an invoke is only
+  reachable with a registry that still holds a handle (e.g. a bus that vanished after a successful read).
