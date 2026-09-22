@@ -109,6 +109,11 @@ struct Cli {
     /// Quiet window (ms) used when observing after an input action.
     #[arg(long, default_value_t = 250)]
     quiet_ms: u64,
+
+    /// Opt in to the text-first accessibility capability: the agent may read a
+    /// window's UI as a text outline (`accessibility_tree`) instead of a screenshot.
+    #[arg(long, env = "ADESK_AGENT_INCLUDE_ACCESSIBILITY")]
+    include_accessibility: bool,
 }
 
 #[tokio::main]
@@ -255,6 +260,7 @@ fn loop_config(cli: &Cli) -> LoopConfig {
         max_steps: cli.max_steps,
         quiet_ms: cli.quiet_ms,
         capture_max_dimension: Some(cli.max_dimension),
+        include_accessibility: cli.include_accessibility,
         context_budget: ContextBudget {
             max_dimension: Some(cli.max_dimension),
             ..ContextBudget::default()
