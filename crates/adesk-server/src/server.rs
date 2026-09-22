@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
-use adesk_app_registry::{AppRegistry, Clock, Correlator, MonotonicClock, RegistryOptions};
 use adesk_a11y::AccessibilityService;
+use adesk_app_registry::{AppRegistry, Clock, Correlator, MonotonicClock, RegistryOptions};
 use adesk_compositor::CompositorHandle;
 use adesk_notify::NotificationService;
 use adesk_observer::ObserverService;

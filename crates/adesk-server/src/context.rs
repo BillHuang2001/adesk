@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
-use adesk_app_registry::{AppRegistry, Correlator};
 use adesk_a11y::AccessibilityService;
+use adesk_app_registry::{AppRegistry, Correlator};
 use adesk_compositor::CompositorHandle;
 use adesk_core::Point;
 use adesk_notify::NotificationService;

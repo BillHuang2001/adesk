@@ -51,7 +51,10 @@ impl fmt::Debug for ServerConfig {
             .field("accessibility", &self.accessibility)
             .field(
                 "accessibility_source",
-                &self.accessibility_source.as_ref().map(|source| source.name()),
+                &self
+                    .accessibility_source
+                    .as_ref()
+                    .map(|source| source.name()),
             )
             .finish()
     }
@@ -459,7 +462,9 @@ mod tests {
         assert_eq!(config.accessibility, AccessibilityKind::Auto);
         assert!(config.accessibility_source.is_none());
         assert_eq!(
-            config.with_accessibility(AccessibilityKind::Off).accessibility,
+            config
+                .with_accessibility(AccessibilityKind::Off)
+                .accessibility,
             AccessibilityKind::Off
         );
     }
