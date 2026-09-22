@@ -29,3 +29,7 @@ serde_json.workspace = true
 # `start_paused` lets the backend-timeout tests advance the clock instead of
 # waiting five real seconds for a wedged backend.
 tokio = { workspace = true, features = ["test-util"] }
+# The same D-Bus transport the `atspi` stack runs on, used by
+# `tests/atspi_provider.rs` to *serve* a mock AT-SPI2 provider (the interface
+# macros and the object server) rather than to call one.
+zbus.workspace = true
