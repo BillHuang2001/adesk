@@ -45,6 +45,12 @@ required-features = ["test-support"]
 name = "watch"
 path = "tests/watch.rs"
 required-features = ["test-support"]
+
+[[test]]
+name = "accessibility"
+path = "tests/accessibility.rs"
+required-features = ["test-support"]
+
 [[test]]
 name = "e2e_runtime"
 path = "tests/e2e_runtime.rs"
