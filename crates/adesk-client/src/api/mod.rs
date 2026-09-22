@@ -7,6 +7,7 @@
 //! (waiting, filtering, ordering) live in the server; the client never
 //! synthesises protocol behaviour.
 
+pub(crate) mod accessibility;
 pub(crate) mod apps;
 pub(crate) mod capture;
 pub(crate) mod input;

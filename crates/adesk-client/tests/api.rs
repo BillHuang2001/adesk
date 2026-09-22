@@ -12,15 +12,16 @@ mod common;
 use std::future::Future;
 
 use adesk_client::{
-    AgpEvent, CaptureRegionRequest, CaptureRequest, ClickRequest, ClientError, DragRequest,
-    EventFilter, EventKind, ImagePayload, InspectCaptureRequest, InspectSubscribeRequest, KeyChord,
+    AccessibilityTreeRequest, AgpEvent, CaptureRegionRequest, CaptureRequest, ClickRequest,
+    ClientError, DragRequest, EventFilter, EventKind, FindAccessibleRequest, ImagePayload,
+    InspectCaptureRequest, InspectSubscribeRequest, InvokeAccessibleActionRequest, KeyChord,
     ObserveRequest, PointerButtonRequest, PostNotificationRequest, Renderer, ScrollRequest,
     WaitForChangeRequest, WaitForEventsRequest, WaitForQuietRequest,
 };
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, LaunchId, NotificationAction, NotificationCloseReason,
-    NotificationId, NotificationUrgency, OverlayKind, Position, Rect, RuntimeEvent, Size, WindowId,
-    WindowState,
+    AccessibleId, AccessibleState, ActionId, AppId, AppInfo, Button, ErrorCode, LaunchId,
+    NotificationAction, NotificationCloseReason, NotificationId, NotificationUrgency, OverlayKind,
+    Position, Rect, RuntimeEvent, Size, WindowId, WindowState,
 };
 use common::{connect, window_info, MockServer, TIMEOUT};
 use image::ImageEncoder as _;
@@ -1573,4 +1574,351 @@ fn wait_for_events_builder_serialises_fields() {
             "since_seq": 8300,
         })
     );
+}
+
+/// An §4 `AccessibleMatch` fixture: the "Sign in" push button.
+fn accessible_match() -> Value {
+    json!({
+        "id": 3,
+        "role": "push_button",
+        "name": "Sign in",
+        "value": null,
+        "states": ["enabled", "focusable", "showing"],
+        "bounds": {"x": 40, "y": 120, "w": 96, "h": 32},
+        "actions": ["click", "activate"],
+        "path": ["frame"],
+    })
+}
+
+/// An §4 `AccessibleTree` fixture: a window frame with one push-button child.
+fn accessible_tree() -> Value {
+    json!({
+        "window_id": 17,
+        "app_id": "org.mozilla.firefox",
+        "app_name": "Firefox",
+        "root": {
+            "id": 1,
+            "role": "frame",
+            "name": "GitHub",
+            "description": null,
+            "value": null,
+            "states": ["enabled", "showing", "visible"],
+            "bounds": {"x": 0, "y": 0, "w": 1280, "h": 800},
+            "actions": [],
+            "children": [{
+                "id": 3,
+                "role": "push_button",
+                "name": "Sign in",
+                "description": "Sign in to GitHub",
+                "value": null,
+                "states": ["enabled", "focusable", "showing"],
+                "bounds": {"x": 40, "y": 120, "w": 96, "h": 32},
+                "actions": ["click", "activate"],
+                "children": [],
+            }],
+        },
+        "node_count": 2,
+        "truncated": false,
+    })
+}
+
+/// `accessibility_tree` (§5.11) round-trip.
+///
+/// Wire: method 'accessibility_tree', params 'window_id'/'max_depth'/
+/// 'max_nodes'/'include_bounds'/'include_states'/'include_actions'/
+/// 'include_text'. Result: 'tree' (an §4 `AccessibleTree`) + 'text'.
+/// Expect an `AccessibilityTreeResult` with the tree decoded into the
+/// `adesk_core` domain types.
+#[tokio::test]
+async fn accessibility_tree_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let request = AccessibilityTreeRequest::new()
+        .window(WindowId(17))
+        .max_depth(6)
+        .max_nodes(100)
+        .include_bounds(true)
+        .include_states(true)
+        .include_actions(false)
+        .include_text(true);
+
+    // Client-level serialisation: every field the builder set is present.
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({
+            "window_id": 17,
+            "max_depth": 6,
+            "max_nodes": 100,
+            "include_bounds": true,
+            "include_states": true,
+            "include_actions": false,
+            "include_text": true,
+        })
+    );
+
+    let outline = "frame \"GitHub\" states=[enabled,showing,visible] bounds=0,0,1280,800 id=1\n  \
+                   push_button \"Sign in\" states=[enabled,focusable,showing] \
+                   actions=[click,activate] bounds=40,120,96,32 id=3";
+
+    let result = round_trip(client.accessibility_tree(request), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "accessibility_tree");
+        assert_eq!(params["window_id"], json!(17));
+        assert_eq!(params["max_depth"], json!(6));
+        assert_eq!(params["max_nodes"], json!(100));
+        assert_eq!(params["include_bounds"], json!(true));
+        assert_eq!(params["include_states"], json!(true));
+        assert_eq!(params["include_actions"], json!(false));
+        assert_eq!(params["include_text"], json!(true));
+        server
+            .respond(id, json!({"tree": accessible_tree(), "text": outline}))
+            .await;
+    })
+    .await
+    .expect("accessibility_tree succeeds");
+
+    assert_eq!(result.text, outline);
+    let tree = &result.tree;
+    assert_eq!(tree.window_id, WindowId(17));
+    assert_eq!(tree.app_id, Some(AppId::from("org.mozilla.firefox")));
+    assert_eq!(tree.app_name.as_deref(), Some("Firefox"));
+    assert_eq!(tree.node_count, 2);
+    assert!(!tree.truncated);
+    assert_eq!(tree.root.id, AccessibleId(1));
+    assert_eq!(tree.root.role, "frame");
+    assert_eq!(tree.root.name, "GitHub");
+    assert_eq!(tree.root.description, None);
+    assert_eq!(tree.root.value, None);
+    assert_eq!(tree.root.bounds, Some(Rect::new(0, 0, 1280, 800)));
+    assert!(tree.root.actions.is_empty());
+    assert_eq!(tree.root.children.len(), 1);
+
+    let button = &tree.root.children[0];
+    assert_eq!(button.id, AccessibleId(3));
+    assert_eq!(button.role, "push_button");
+    assert_eq!(button.name, "Sign in");
+    assert_eq!(button.description.as_deref(), Some("Sign in to GitHub"));
+    assert_eq!(button.value, None);
+    assert_eq!(
+        button.states,
+        vec![
+            AccessibleState::Enabled,
+            AccessibleState::Focusable,
+            AccessibleState::Showing,
+        ]
+    );
+    assert_eq!(button.bounds, Some(Rect::new(40, 120, 96, 32)));
+    assert_eq!(
+        button.actions,
+        vec!["click".to_owned(), "activate".to_owned()]
+    );
+    assert!(button.children.is_empty());
+}
+
+/// `accessibility_tree` omits unset optional fields on the wire.
+///
+/// A bare `AccessibilityTreeRequest::new` serialises to `{}`, so the runtime
+/// applies its §5.11 defaults (max_depth 12, max_nodes 2000, all projection
+/// flags true, active/focused window). Setting one field adds only that field.
+#[test]
+fn accessibility_tree_omits_unset_optionals() {
+    let bare =
+        serde_json::to_value(AccessibilityTreeRequest::new()).expect("serialise the request");
+    assert_eq!(bare, json!({}));
+
+    let scoped = serde_json::to_value(AccessibilityTreeRequest::new().window(WindowId(17)))
+        .expect("serialise the request");
+    assert_eq!(scoped, json!({"window_id": 17}));
+}
+
+/// `find_accessible` (§5.11) round-trip with several AND-ed filters.
+///
+/// Wire: method 'find_accessible', params 'window_id'/'role'/'name'/
+/// 'name_contains'/'value_contains'/'max_results'. The unset 'name' filter is
+/// omitted. Result: 'window_id' + 'matches' (a list of §4 `AccessibleMatch`s) +
+/// 'truncated'. Expect a `FindAccessibleResult`.
+#[tokio::test]
+async fn find_accessible_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let request = FindAccessibleRequest::new()
+        .window(WindowId(17))
+        .role("push_button")
+        .name_contains("sign")
+        .value_contains("github")
+        .max_results(5);
+
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({
+            "window_id": 17,
+            "role": "push_button",
+            "name_contains": "sign",
+            "value_contains": "github",
+            "max_results": 5,
+        })
+    );
+    assert!(serde_json::to_value(&request)
+        .expect("serialise the request")
+        .get("name")
+        .is_none());
+
+    let result = round_trip(client.find_accessible(request), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "find_accessible");
+        assert_eq!(params["window_id"], json!(17));
+        assert_eq!(params["role"], json!("push_button"));
+        assert!(
+            params.get("name").is_none(),
+            "the unset name filter is omitted"
+        );
+        assert_eq!(params["name_contains"], json!("sign"));
+        assert_eq!(params["value_contains"], json!("github"));
+        assert_eq!(params["max_results"], json!(5));
+        server
+            .respond(
+                id,
+                json!({
+                    "window_id": 17,
+                    "matches": [accessible_match()],
+                    "truncated": true,
+                }),
+            )
+            .await;
+    })
+    .await
+    .expect("find_accessible succeeds");
+
+    assert_eq!(result.window_id, WindowId(17));
+    assert!(result.truncated);
+    assert_eq!(result.matches.len(), 1);
+    let hit = &result.matches[0];
+    assert_eq!(hit.id, AccessibleId(3));
+    assert_eq!(hit.role, "push_button");
+    assert_eq!(hit.name, "Sign in");
+    assert_eq!(hit.value, None);
+    assert_eq!(hit.bounds, Some(Rect::new(40, 120, 96, 32)));
+    assert_eq!(hit.actions, vec!["click".to_owned(), "activate".to_owned()]);
+    assert_eq!(hit.path, vec!["frame".to_owned()]);
+}
+
+/// `invoke_accessible_action` (§5.11) round-trip with an explicit action.
+///
+/// Wire: method 'invoke_accessible_action', params 'node_id' + 'action'.
+/// Result: 'action_id' + 'node_id' + 'action'. Expect an
+/// `InvokeAccessibleActionResult` whose `action_id` is an ordinary AGP
+/// `ActionId`.
+#[tokio::test]
+async fn invoke_accessible_action_roundtrip() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let request = InvokeAccessibleActionRequest::new(AccessibleId(3)).action("activate");
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({"node_id": 3, "action": "activate"})
+    );
+
+    let result = round_trip(client.invoke_accessible_action(request), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "invoke_accessible_action");
+        assert_eq!(params["node_id"], json!(3));
+        assert_eq!(params["action"], json!("activate"));
+        server
+            .respond(
+                id,
+                json!({"action_id": 582, "node_id": 3, "action": "activate"}),
+            )
+            .await;
+    })
+    .await
+    .expect("invoke_accessible_action succeeds");
+
+    assert_eq!(result.action_id, ActionId(582));
+    assert_eq!(result.node_id, AccessibleId(3));
+    assert_eq!(result.action, "activate");
+}
+
+/// `invoke_accessible_action` with no explicit action invokes the default one.
+///
+/// The unset 'action' is omitted from the wire, so the runtime invokes the
+/// element's default (first) action; the response reports the name actually
+/// invoked, which the client returns verbatim.
+#[tokio::test]
+async fn invoke_accessible_action_default_action() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    let request = InvokeAccessibleActionRequest::new(AccessibleId(3));
+    assert_eq!(
+        serde_json::to_value(&request).expect("serialise the request"),
+        json!({"node_id": 3})
+    );
+
+    let result = round_trip(client.invoke_accessible_action(request), async {
+        let (id, method, params) = server.next_request().await;
+        assert_eq!(method, "invoke_accessible_action");
+        assert_eq!(params["node_id"], json!(3));
+        assert!(
+            params.get("action").is_none(),
+            "the unset action is omitted on the wire"
+        );
+        server
+            .respond(
+                id,
+                json!({"action_id": 583, "node_id": 3, "action": "click"}),
+            )
+            .await;
+    })
+    .await
+    .expect("invoke_accessible_action succeeds");
+
+    assert_eq!(result.action_id, ActionId(583));
+    assert_eq!(result.node_id, AccessibleId(3));
+    assert_eq!(result.action, "click");
+}
+
+/// Accessibility errors surface as `ClientError::Server` (§5.11, §6).
+///
+/// A node the runtime does not know fails with `unknown_accessible`; a runtime
+/// with no accessibility backend fails with `not_supported`. Both arrive as an
+/// error frame the client maps to `ClientError::Server` with the code and
+/// message preserved — never `Protocol`/`Closed`/`InvalidPayload`.
+#[tokio::test]
+async fn accessibility_errors_map_to_server_errors() {
+    let mut server = MockServer::start().await;
+    let client = connect(&mut server).await;
+
+    for (code, message) in [
+        (ErrorCode::UnknownAccessible, "node 99 is not known"),
+        (ErrorCode::NotSupported, "no accessibility backend"),
+    ] {
+        let err = round_trip(
+            client.invoke_accessible_action(InvokeAccessibleActionRequest::new(AccessibleId(99))),
+            async {
+                let (id, method, params) = server.next_request().await;
+                assert_eq!(method, "invoke_accessible_action");
+                assert_eq!(params["node_id"], json!(99));
+                server.respond_error(id, code, message).await;
+            },
+        )
+        .await
+        .expect_err("an AGP error frame surfaces as a ClientError");
+
+        match err {
+            ClientError::Server {
+                code: got,
+                message: got_message,
+            } => {
+                assert_eq!(got, code, "the error code is preserved");
+                assert_eq!(got_message, message, "the error message is preserved");
+            }
+            other => panic!(
+                "expected ClientError::Server for {}, got {other:?}",
+                code.as_str()
+            ),
+        }
+    }
 }

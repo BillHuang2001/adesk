@@ -12,7 +12,7 @@
 //!   and any number of event subscriptions. Request ids are monotonic per
 //!   connection and responses are matched by id, so out-of-order replies are
 //!   normal and harmless.
-//! - **Typed.** Every AGP method of `docs/protocol.md` §5.1–§5.7 and §5.9–§5.10
+//! - **Typed.** Every AGP method of `docs/protocol.md` §5.1–§5.7 and §5.9–§5.11
 //!   has a typed method returning typed results; the public API never exposes
 //!   raw JSON.
 //! - **No compositor.** The crate depends on `adesk-core` (vocabulary) and
@@ -131,3 +131,9 @@ pub use api::notification::{
 
 // --- AGP §5.10 event waits ---
 pub use api::waits::{WaitForEventsRequest, WaitForEventsResult, DEFAULT_MAX_EVENTS};
+
+// --- AGP §5.11 accessibility (results expose adesk-core's accessibility types) ---
+pub use api::accessibility::{
+    AccessibilityTreeRequest, AccessibilityTreeResult, FindAccessibleRequest, FindAccessibleResult,
+    InvokeAccessibleActionRequest, InvokeAccessibleActionResult,
+};
