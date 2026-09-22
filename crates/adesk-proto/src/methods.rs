@@ -1,4 +1,4 @@
-//! Typed method vocabulary (§5.1–§5.10) and the shared action result.
+//! Typed method vocabulary (§5.1–§5.11) and the shared action result.
 //!
 //! One [`Method`] variant per spec method carries its typed params; the typed
 //! result structs live in the per-group modules next to their params:
@@ -14,12 +14,14 @@
 //! | Human inspector (§5.7) | [`inspector`] |
 //! | Notifications (§5.9) | [`notification`] |
 //! | Event waits (§5.10) | [`events`] |
+//! | Accessibility (§5.11) | [`accessibility`] |
 
 use adesk_core::ActionId;
 use serde::{Deserialize, Serialize};
 
 use crate::Result;
 
+pub mod accessibility;
 pub mod apps;
 pub mod capture;
 pub mod events;
@@ -30,6 +32,7 @@ pub mod runtime;
 pub mod subscription;
 pub mod windows;
 
+pub use accessibility::*;
 pub use apps::*;
 pub use capture::*;
 pub use events::*;
@@ -48,7 +51,7 @@ pub struct ActionResult {
     pub action_id: ActionId,
 }
 
-/// A typed AGP method: one variant per method in `docs/protocol.md` §5.1–§5.10.
+/// A typed AGP method: one variant per method in `docs/protocol.md` §5.1–§5.11.
 ///
 /// Wire form: the sibling fields `"method": <name>` and `"params": {...}` of a
 /// request frame (§1). Serialization must emit a map (two entries) so
@@ -123,6 +126,12 @@ pub enum Method {
     InvokeNotificationAction(InvokeNotificationActionParams),
     /// §5.10 `wait_for_events`.
     WaitForEvents(WaitForEventsParams),
+    /// §5.11 `accessibility_tree`.
+    AccessibilityTree(AccessibilityTreeParams),
+    /// §5.11 `find_accessible`.
+    FindAccessible(FindAccessibleParams),
+    /// §5.11 `invoke_accessible_action`.
+    InvokeAccessibleAction(InvokeAccessibleActionParams),
 }
 
 impl Method {
@@ -163,6 +172,9 @@ impl Method {
             Method::CloseNotification(_) => "close_notification",
             Method::InvokeNotificationAction(_) => "invoke_notification_action",
             Method::WaitForEvents(_) => "wait_for_events",
+            Method::AccessibilityTree(_) => "accessibility_tree",
+            Method::FindAccessible(_) => "find_accessible",
+            Method::InvokeAccessibleAction(_) => "invoke_accessible_action",
         }
     }
 
@@ -218,6 +230,11 @@ impl Method {
                 Method::InvokeNotificationAction(decode_params(name, params)?)
             }
             "wait_for_events" => Method::WaitForEvents(decode_params(name, params)?),
+            "accessibility_tree" => Method::AccessibilityTree(decode_params(name, params)?),
+            "find_accessible" => Method::FindAccessible(decode_params(name, params)?),
+            "invoke_accessible_action" => {
+                Method::InvokeAccessibleAction(decode_params(name, params)?)
+            }
             other => return Err(crate::ProtoError::UnknownMethod(other.to_owned())),
         };
         Ok(method)
@@ -264,6 +281,9 @@ impl Method {
             Method::CloseNotification(params) => serde_json::to_value(params)?,
             Method::InvokeNotificationAction(params) => serde_json::to_value(params)?,
             Method::WaitForEvents(params) => serde_json::to_value(params)?,
+            Method::AccessibilityTree(params) => serde_json::to_value(params)?,
+            Method::FindAccessible(params) => serde_json::to_value(params)?,
+            Method::InvokeAccessibleAction(params) => serde_json::to_value(params)?,
         };
         Ok(value)
     }

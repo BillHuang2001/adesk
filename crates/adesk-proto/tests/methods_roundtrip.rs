@@ -1,4 +1,4 @@
-//! Method-layer wire behavior (§5.1–§5.10): `Method::from_parts`/`params_value`,
+//! Method-layer wire behavior (§5.1–§5.11): `Method::from_parts`/`params_value`,
 //! the `{"method", "params"}` map serde, the spec defaults and the §4
 //! `ObserveResult` observation/image split.
 //!
@@ -9,13 +9,14 @@ mod common;
 use std::collections::BTreeMap;
 
 use adesk_core::{
-    ActionId, AppId, Button, ErrorCode, LaunchId, NotificationAction, NotificationCloseReason,
-    NotificationId, NotificationUrgency, OverlayKind, Position, Rect, WindowId,
+    AccessibleId, ActionId, AppId, Button, ErrorCode, LaunchId, NotificationAction,
+    NotificationCloseReason, NotificationId, NotificationUrgency, OverlayKind, Position, Rect,
+    WindowId,
 };
 use adesk_proto::*;
 use common::*;
 use serde_json::{json, Value};
-/// One instance of every one of the 34 methods (§5.1–§5.10).
+/// One instance of every one of the 37 methods (§5.1–§5.11).
 fn methods() -> Vec<Method> {
     vec![
         Method::Ping(PingParams {}),
@@ -174,13 +175,34 @@ fn methods() -> Vec<Method> {
             max_events: 8,
             since_seq: Some(8291),
         }),
+        Method::AccessibilityTree(AccessibilityTreeParams {
+            window_id: Some(WindowId(17)),
+            max_depth: 12,
+            max_nodes: 2000,
+            include_bounds: true,
+            include_states: true,
+            include_actions: true,
+            include_text: true,
+        }),
+        Method::FindAccessible(FindAccessibleParams {
+            window_id: Some(WindowId(17)),
+            role: Some("push_button".to_owned()),
+            name: Some("Save".to_owned()),
+            name_contains: Some("sav".to_owned()),
+            value_contains: Some("doc".to_owned()),
+            max_results: 50,
+        }),
+        Method::InvokeAccessibleAction(InvokeAccessibleActionParams {
+            node_id: AccessibleId(3),
+            action: Some("click".to_owned()),
+        }),
     ]
 }
 
 #[test]
 fn every_method_round_trips_through_from_parts_and_serde() {
     let methods = methods();
-    assert_eq!(methods.len(), 34);
+    assert_eq!(methods.len(), 37);
     for method in &methods {
         let name = method.method_name();
 
@@ -290,6 +312,12 @@ fn invalid_params_are_rejected_with_invalid_params() {
         ("close_notification", json!({})),
         ("invoke_notification_action", json!({"notification_id": 5})),
         ("wait_for_events", json!({"max_events": "lots"})),
+        ("accessibility_tree", json!({"max_depth": "deep"})),
+        ("accessibility_tree", json!({"include_states": "yes"})),
+        ("find_accessible", json!({"max_results": "many"})),
+        ("find_accessible", json!({"role": 7})),
+        ("invoke_accessible_action", json!({})),
+        ("invoke_accessible_action", json!({"node_id": "three"})),
     ];
     for (name, params) in cases {
         let err = Method::from_parts(name, params.clone()).unwrap_err();
@@ -881,6 +909,187 @@ fn notification_method_defaults_and_shapes() {
         )["params"],
         json!({"notification_id": 5, "action_key": "open"})
     );
+}
+
+#[test]
+fn accessibility_method_defaults_and_shapes() {
+    // `accessibility_tree`: the booleans default to true, the bounds default
+    // per §5.11; `window_id` is the only optional field.
+    let minimal = Method::from_parts("accessibility_tree", json!({})).unwrap();
+    assert_eq!(
+        wire(&minimal)["params"],
+        json!({
+            "max_depth": 12,
+            "max_nodes": 2000,
+            "include_bounds": true,
+            "include_states": true,
+            "include_actions": true,
+            "include_text": true
+        })
+    );
+    assert!(wire(&minimal)["params"].get("window_id").is_none());
+
+    // Every field survives verbatim when provided.
+    let scoped = Method::from_parts(
+        "accessibility_tree",
+        json!({
+            "window_id": 17,
+            "max_depth": 3,
+            "max_nodes": 100,
+            "include_bounds": false,
+            "include_states": false,
+            "include_actions": false,
+            "include_text": false
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        wire(&scoped)["params"],
+        json!({
+            "window_id": 17,
+            "max_depth": 3,
+            "max_nodes": 100,
+            "include_bounds": false,
+            "include_states": false,
+            "include_actions": false,
+            "include_text": false
+        })
+    );
+
+    // `AccessibilityTreeParams::default` mirrors the serde defaults.
+    assert_eq!(
+        AccessibilityTreeParams::default(),
+        AccessibilityTreeParams {
+            window_id: None,
+            max_depth: 12,
+            max_nodes: 2000,
+            include_bounds: true,
+            include_states: true,
+            include_actions: true,
+            include_text: true,
+        }
+    );
+
+    // `find_accessible`: all filters are optional; `max_results` defaults to 50.
+    let find = Method::from_parts("find_accessible", json!({})).unwrap();
+    assert_eq!(wire(&find)["params"], json!({"max_results": 50}));
+    let find_params = wire(&find)["params"].clone();
+    for absent in [
+        "window_id",
+        "role",
+        "name",
+        "name_contains",
+        "value_contains",
+    ] {
+        assert!(
+            find_params.get(absent).is_none(),
+            "{absent} must be omitted"
+        );
+    }
+    assert_eq!(
+        wire(
+            &Method::from_parts(
+                "find_accessible",
+                json!({
+                    "window_id": 17,
+                    "role": "push_button",
+                    "name": "Save",
+                    "name_contains": "sav",
+                    "value_contains": "doc",
+                    "max_results": 5
+                })
+            )
+            .unwrap()
+        )["params"],
+        json!({
+            "window_id": 17,
+            "role": "push_button",
+            "name": "Save",
+            "name_contains": "sav",
+            "value_contains": "doc",
+            "max_results": 5
+        })
+    );
+    assert_eq!(
+        FindAccessibleParams::default(),
+        FindAccessibleParams {
+            window_id: None,
+            role: None,
+            name: None,
+            name_contains: None,
+            value_contains: None,
+            max_results: 50,
+        }
+    );
+
+    // `invoke_accessible_action`: `action` is optional and omitted when absent.
+    let invoke = Method::from_parts("invoke_accessible_action", json!({"node_id": 3})).unwrap();
+    assert_eq!(wire(&invoke)["params"], json!({"node_id": 3}));
+    assert_eq!(
+        wire(
+            &Method::from_parts(
+                "invoke_accessible_action",
+                json!({"node_id": 3, "action": "click"})
+            )
+            .unwrap()
+        )["params"],
+        json!({"node_id": 3, "action": "click"})
+    );
+}
+
+#[test]
+fn accessibility_result_shapes() {
+    // §5.11 `accessibility_tree` result: a tree plus its rendered outline.
+    let tree = AccessibilityTreeResult {
+        tree: accessible_tree(),
+        text: "frame \"Document\"\n  push_button \"Save\"".to_owned(),
+    };
+    let value = wire(&tree);
+    assert_eq!(value["tree"]["window_id"], json!(17));
+    assert_eq!(value["tree"]["node_count"], json!(2));
+    assert_eq!(value["tree"]["truncated"], json!(false));
+    assert_eq!(value["tree"]["root"]["id"], json!(1));
+    assert_eq!(value["tree"]["root"]["role"], json!("frame"));
+    assert_eq!(
+        value["tree"]["root"]["children"][0]["role"],
+        json!("push_button")
+    );
+    assert_eq!(
+        value["tree"]["root"]["children"][0]["states"],
+        json!(["enabled", "focusable", "showing"])
+    );
+    assert_eq!(
+        value["text"],
+        json!("frame \"Document\"\n  push_button \"Save\"")
+    );
+    roundtrip(&tree);
+
+    // §5.11 `find_accessible` result: the flat matches plus a truncation flag.
+    let found = FindAccessibleResult {
+        window_id: WindowId(17),
+        matches: vec![accessible_match()],
+        truncated: true,
+    };
+    let value = wire(&found);
+    assert_eq!(value["window_id"], json!(17));
+    assert_eq!(value["truncated"], json!(true));
+    assert_eq!(value["matches"][0]["id"], json!(3));
+    assert_eq!(value["matches"][0]["role"], json!("push_button"));
+    assert_eq!(value["matches"][0]["path"], json!(["frame", "toolbar"]));
+    roundtrip(&found);
+
+    // §5.11 `invoke_accessible_action` result: `action_id` is an ordinary AGP
+    // action id (§5.4), and `node_id` echoes the invoked element.
+    let invoked = InvokeAccessibleActionResult {
+        action_id: ActionId(582),
+        node_id: AccessibleId(3),
+        action: "click".to_owned(),
+    };
+    assert_eq!(
+        wire(&invoked),
+        json!({"action_id": 582, "node_id": 3, "action": "click"})
+    );
+    roundtrip(&invoked);
 }
 
 #[test]

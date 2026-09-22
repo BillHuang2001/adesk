@@ -36,6 +36,27 @@ pub(crate) const fn count() -> u32 {
 pub(crate) const fn max_events() -> u32 {
     32
 }
+
+/// Default `max_depth` for `accessibility_tree` (§5.11, `12`).
+pub(crate) const fn accessibility_max_depth() -> u32 {
+    12
+}
+
+/// Default `max_nodes` for `accessibility_tree` (§5.11, `2000`).
+pub(crate) const fn accessibility_max_nodes() -> u32 {
+    2000
+}
+
+/// Default `max_results` for `find_accessible` (§5.11, `50`).
+pub(crate) const fn find_max_results() -> u32 {
+    50
+}
+
+/// Default of the four `accessibility_tree` projection flags (§5.11, `true`).
+pub(crate) const fn accessibility_include() -> bool {
+    true
+}
+
 /// Default `include_image` for `observe` (§5.4, `true`).
 pub(crate) const fn include_image() -> bool {
     true

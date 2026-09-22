@@ -6,7 +6,7 @@
 //! It is pure serialization — no I/O, no async, no runtime, no Smithay.
 //!
 //! - [`Frame`] is the top-level NDJSON frame: request, response or event (§1).
-//! - [`Method`] is the typed method vocabulary (§5.1–§5.10) with typed params;
+//! - [`Method`] is the typed method vocabulary (§5.1–§5.11) with typed params;
 //!   typed results live next to their params in [`methods`] and are decoded from
 //!   a response with [`ResultPayload::decode`].
 //! - [`EventKind`] / [`EventPayload`] are the subscription filter and the typed

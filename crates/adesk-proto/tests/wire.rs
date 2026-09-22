@@ -7,7 +7,8 @@
 mod common;
 
 use adesk_core::{
-    ActionId, AppId, Button, ErrorCode, NotificationId, OverlayKind, Position, Rect, Size, WindowId,
+    AccessibleId, ActionId, AppId, Button, ErrorCode, NotificationId, OverlayKind, Position, Rect,
+    Size, WindowId,
 };
 use adesk_proto::*;
 use common::*;
@@ -399,8 +400,23 @@ fn method_name_table() {
             Method::WaitForEvents(WaitForEventsParams::default()),
             "wait_for_events",
         ),
+        (
+            Method::AccessibilityTree(AccessibilityTreeParams::default()),
+            "accessibility_tree",
+        ),
+        (
+            Method::FindAccessible(FindAccessibleParams::default()),
+            "find_accessible",
+        ),
+        (
+            Method::InvokeAccessibleAction(InvokeAccessibleActionParams {
+                node_id: AccessibleId(3),
+                action: Some("click".to_owned()),
+            }),
+            "invoke_accessible_action",
+        ),
     ];
-    assert_eq!(cases.len(), 34);
+    assert_eq!(cases.len(), 37);
     let mut names: Vec<&str> = Vec::new();
     for (method, expected) in &cases {
         assert_eq!(method.method_name(), *expected);
@@ -408,7 +424,7 @@ fn method_name_table() {
     }
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 34, "method names must be unique");
+    assert_eq!(names.len(), 37, "method names must be unique");
 }
 
 #[test]

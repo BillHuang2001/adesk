@@ -3,7 +3,7 @@
 ## Intent
 
 `adesk-proto` is the single implementation of `docs/protocol.md` (normative Agent GUI Protocol v1).
-It defines the frames, the typed method vocabulary (§5.1–§5.10), the event subscription kinds (§5.6), the notification vocabulary (§5.9), the image payload (§4) and the NDJSON codec (§1).
+It defines the frames, the typed method vocabulary (§5.1–§5.11), the event subscription kinds (§5.6), the notification vocabulary (§5.9), the accessibility vocabulary (§5.11), the image payload (§4) and the NDJSON codec (§1).
 It is pure serialization: no I/O, no async, no tokio, no Smithay.
 `adesk-server` serves these frames, `adesk-client`/`adesk-agent` consume them and `adesk-testkit` drives the server through them, so every wire detail lives here and nowhere else.
 
@@ -23,9 +23,9 @@ Frames (`src/frame.rs`):
 - Crate-internal `Frame::from_value(serde_json::Value) -> Result<Frame>` — the decoder every entry point routes through (see Design Decisions).
 
 Methods (`src/methods.rs` + `src/methods/*.rs`):
-- `Method` — 34 variants, one per spec method — plus `method_name()`, `from_parts(name, params)`, `params_value()`, manual map serde.
+- `Method` — 37 variants, one per spec method — plus `method_name()`, `from_parts(name, params)`, `params_value()`, manual map serde.
 - `ActionResult { action_id: ActionId }` (result of pointer/key actions).
-- `runtime::PingParams/PingResult`; `apps::ListAppsParams/Result`, `GetAppParams/Result`, `LaunchAppParams/Result`; `windows::ListWindowsParams/Result`, `GetWindowParams/Result`, `ActivateWindowParams`, `CloseWindowParams`, `GetFocusParams/Result`; `capture::CaptureWindowParams`, `CaptureRegionParams`, `CaptureResult`, `ObserveParams`, `ObserveResult`, `WaitForChangeParams`, `WaitForQuietParams`; `input::` params for all 11 input methods plus `TypeTextResult`; `subscription::SubscribeEventsParams/Result`, `UnsubscribeEventsParams/Result`; `inspector::InspectCaptureParams/Result`, `InspectSubscribeParams/Result`; `notification::PostNotificationParams/PostNotificationResult`, `ListNotificationsParams/ListNotificationsResult`, `CloseNotificationParams/CloseNotificationResult`, `InvokeNotificationActionParams/InvokeNotificationActionResult` (§5.9); `events::WaitForEventsParams/WaitForEventsResult`, `EventRecord` (§5.10).
+- `runtime::PingParams/PingResult`; `apps::ListAppsParams/Result`, `GetAppParams/Result`, `LaunchAppParams/Result`; `windows::ListWindowsParams/Result`, `GetWindowParams/Result`, `ActivateWindowParams`, `CloseWindowParams`, `GetFocusParams/Result`; `capture::CaptureWindowParams`, `CaptureRegionParams`, `CaptureResult`, `ObserveParams`, `ObserveResult`, `WaitForChangeParams`, `WaitForQuietParams`; `input::` params for all 11 input methods plus `TypeTextResult`; `subscription::SubscribeEventsParams/Result`, `UnsubscribeEventsParams/Result`; `inspector::InspectCaptureParams/Result`, `InspectSubscribeParams/Result`; `notification::PostNotificationParams/PostNotificationResult`, `ListNotificationsParams/ListNotificationsResult`, `CloseNotificationParams/CloseNotificationResult`, `InvokeNotificationActionParams/InvokeNotificationActionResult` (§5.9); `events::WaitForEventsParams/WaitForEventsResult`, `EventRecord` (§5.10); `accessibility::AccessibilityTreeParams/AccessibilityTreeResult`, `FindAccessibleParams/FindAccessibleResult`, `InvokeAccessibleActionParams/InvokeAccessibleActionResult` (§5.11).
 
 Events (`src/event.rs`):
 - `EventKind` — 15 snake_case variants (`window_created` … `inspect_frame`, incl. the §5.9 `notification`/`notification_closed`/`notification_action`) — with `SUBSCRIBABLE: [EventKind; 14]` (the filterable set), `is_subscribable()`, `matches(&RuntimeEvent)`.
@@ -59,6 +59,7 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 | `Method` enum, `ActionResult`, per-group params/results | `src/methods.rs`, `src/methods/*.rs` |
 | §5.9 notification methods (post/list/close/invoke) params + results | `src/methods/notification.rs` |
 | §5.10 `wait_for_events` params/result + `EventRecord` | `src/methods/events.rs` |
+| §5.11 accessibility methods (tree/find/invoke) params + results | `src/methods/accessibility.rs` |
 | `EventKind` filter, `EventPayload`, event data structs | `src/event.rs` |
 | `ImagePayload` and base64/RGBA conversions | `src/image.rs` |
 | `Codec` trait, `NdjsonCodec` | `src/codec.rs` |
@@ -81,6 +82,8 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - The three §5.9 notification kinds (`notification`, `notification_closed`, `notification_action`) are ordinary subscribable/filterable kinds, even though §5.6's prose enumerates only 11: §5.9 declares them event kinds and §5.10's "all" default is the §5.6 set. They map 1:1 to `RuntimeEvent::{Notification,NotificationClosed,NotificationAction}`; `is_subscribable()` excludes only `InspectFrame`.
 - `EventRecord` (§5.10) is the untyped waiter envelope (`{event, seq, ts_ms, data: Value}`, `data` raw JSON) — deliberately distinct from the typed `EventFrame`; it lives with `wait_for_events` in `src/methods/events.rs`.
 - Notification domain types (`Notification`, `NotificationAction`, `NotificationUrgency`, `NotificationCloseReason`, `NotificationId`) are owned by `adesk-core` and re-exported by `adesk-proto` — never forked.
+- The §5.11 accessibility domain types (`AccessibleId`, `AccessibleState`, `AccessibleNode`, `AccessibleTree`, `AccessibleMatch`) are owned by `adesk-core` and imported by `src/methods/accessibility.rs`; unlike the §5.9 notification vocabulary they are NOT re-exported here (consumers take them from `adesk_core`, exactly as they take `WindowInfo`/`Observation`/`AppInfo`) — never forked.
+- §5.11 params/results type their ids with the core newtypes: `AccessibleId` (`InvokeAccessibleActionParams.node_id`, `InvokeAccessibleActionResult.node_id`) and `ActionId` (`InvokeAccessibleActionResult.action_id`, the ordinary AGP action id of §5.4). Both are `#[serde(transparent)]` over `u64`, so the wire stays the spec's bare numbers.
 - `QuietEvent` and `InspectFrameEvent` are the data structs of the two protocol-only kinds: §5.7 fixes `inspect_frame`'s shape (`{"subscription_id", "image"}`), while `quiet` — a reserved filterable kind with no v1 emitter (§5.6) — keeps a crate-defined shape (additive, §7).
 - `EventKind::Quiet` is subscribable (`is_subscribable()` returns true; it is in `SUBSCRIBABLE`) but protocol-only: no `RuntimeEvent` maps to `EventPayload::Quiet` (`from_runtime` has no such arm), `EventKind::Quiet::matches` is always false, and within this crate the payload is produced only by wire decoding (`EventPayload::from_data`) and tests.
 - Response results are untyped at frame level (`ResultPayload(serde_json::Value)`): a codec cannot correlate an `id` to a method, so server/client decode with the method's typed result via `ResultPayload::decode::<R>()`.
@@ -93,7 +96,8 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 - `Codec` is payload-oriented (bytes, no terminator) so a future binary framing (§7) needs no method-definition changes; NDJSON adds the string helpers.
 - `ProtoError::error_code()` maps `UnknownMethod` → `ErrorCode::UnknownMethod`, `VersionMismatch` → `ProtocolVersionMismatch` and everything else → `InvalidRequest`.
 - `CaptureResult` and `InspectCaptureResult` derive `PartialEq` but not `Eq` because `ImagePayload::scale` is `f64`.
-- Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+- Spec defaults live in crate-private `defaults.rs` and are wired through `#[serde(default = ...)]`: `timeout_ms=5000`, `quiet_ms=250`, `duration_ms=150`, `min_interval_ms=100`, `count=1`, `max_events=32`, `accessibility_tree` `max_depth=12`/`max_nodes=2000` and all four projection booleans `true`, `find_accessible.max_results=50`, `observe.include_image=true` (waits default `false`), `format=png`, `kinds=SUBSCRIBABLE`, `overlays=["window_ids","focus","damage"]`, `scale=1.0`.
+- `AccessibilityTreeParams` and `FindAccessibleParams` carry a manual `Default` (the `true` booleans and `50`/`12`/`2000` values are not `#[derive(Default)]`-representable), mirroring `WaitForEventsParams`/`InspectCaptureParams`; every §5.11 optional field (`window_id`, the `find_accessible` filters, `invoke_accessible_action.action`) is `Option` + `skip_serializing_if`, so it is omitted from the wire when absent while the defaulted fields are always emitted.
 - The `quiet_ms=250` default is scoped to `WaitForQuietParams`; `Condition::Quiet { quiet_ms }` has no serde default, so an `observe`/`until` of `{"type":"quiet"}` without `quiet_ms` fails as `InvalidParams`, and no field on `ObserveParams`/`WaitForChangeParams` can carry a quiet threshold for a non-quiet condition.
 - `QuietEvent.quiet_ms` is required when decoding `quiet` event data (`window_id` is optional).
 - `ImagePayload::from_rgba8` rejects dimension/byte-count overflow and length mismatch with `Malformed`; `to_rgba8_buffer` is strict — non-`Rgba8` format, `stride != width*4` (including `stride: null`), or length mismatch is an error.
@@ -101,13 +105,13 @@ Errors (`src/error.rs`): `ProtoError` (`Malformed`, `UnknownMethod`, `InvalidPar
 
 ## Test Strategy
 
-- `tests/common/mod.rs` holds the shared helpers and fixtures (`wire<T: Serialize>`, `roundtrip<T>`, `image_payload()`, `observation()`, `damage()`, `window_info()`, `app_info()`, `ping_result()`); each test file declares `mod common;`. It carries `#![allow(dead_code)]` because every test binary compiles the whole module.
+- `tests/common/mod.rs` holds the shared helpers and fixtures (`wire<T: Serialize>`, `roundtrip<T>`, `image_payload()`, `observation()`, `damage()`, `window_info()`, `app_info()`, `notification()`, `accessible_node()`/`accessible_tree()`/`accessible_match()`, `ping_result()`); each test file declares `mod common;`. It carries `#![allow(dead_code)]` because every test binary compiles the whole module.
 - `tests/wire.rs` (24) pins the type layer: golden JSON for the spec examples, wire names, defaults, `Condition`/`KeySpec` shapes, error-code mapping and the `Method::method_name` table.
 - `tests/codec.rs` (3) keeps the frame-envelope NDJSON goldens unique to it: the exact encoded `ping`/`click` request lines and a full encode/decode round-trip over every frame kind.
-- `tests/methods_roundtrip.rs` (22): all 34 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape, §5.9 notification defaults/shapes and §5.10 `EventRecord`/`WaitForEventsResult` goldens.
+- `tests/methods_roundtrip.rs` (24): all 37 methods through `from_parts`/`params_value`/serde, golden params JSON, error cases, `ObserveResult` wire shape, §5.9 notification defaults/shapes, §5.10 `EventRecord`/`WaitForEventsResult` goldens and §5.11 accessibility defaults/result shapes.
 - `tests/frames_events_roundtrip.rs` (15): response/error/event golden JSON, all 14 payload kinds and all 12 `RuntimeEvent`s round-tripped, `EventKind::matches` table, malformed lines, codec trait.
 - `tests/image_roundtrip.rs` (15): base64/RGBA/PNG conversions, overflow, stride and length edge cases, plus the authoritative `image_payload_base64_helpers` constructor golden.
-- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (79 tests + 1 doctest at `lib.rs:17`) — the dev shell is required for linking.
+- Run with `./scripts/dev.sh cargo test -p adesk-proto --all-targets` (81 tests + 1 doctest at `lib.rs:17`) — the dev shell is required for linking.
 - There are 0 lib unit tests: no `#[cfg(test)] mod tests` exists anywhere in `src/`; every assertion is an integration test or the single `lib.rs` doctest.
 - `wire<T>` is the single shared golden-JSON helper; no test file re-defines it. There are no `rect()`/`size()`/`position()`/`client()`/`server()` helpers — `Rect`/`Size`/`Position` are built inline via `Rect::new`/`Size::new`/`Position::pixels`/`Position::normalized`.
 - Cross-file goldens sit at different envelope layers and each is pinned once: the `click` normalized-position literal at the type layer (`wire.rs`), the method envelope (`methods_roundtrip.rs`) and the encoded NDJSON frame line (`codec.rs`); `ErrorPayload` at the type layer (`wire.rs`) and the frame envelope (`frames_events_roundtrip.rs`); the `surface_commit` event JSON at the frame envelope (`frames_events_roundtrip.rs`); `ImagePayload` at the type layer (`wire.rs`), method layer (`methods_roundtrip.rs`), frame layer (`frames_events_roundtrip.rs`) and image layer (`image_roundtrip.rs`). This is layered spec-golden coverage (§2/§3/§4 type layer vs §5 method envelope vs §1 frame envelope), not independent verification — all drive the same serde impls.
@@ -145,6 +149,6 @@ Every frame is on the hot path: the server encodes each response/event (`connect
 ## Status
 
 - `src/` has no `todo!()`/`unimplemented!()` and no crate-level `allow` attributes.
-- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 79/79 green (+1 doctest); `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
+- `./scripts/dev.sh cargo test -p adesk-proto --all-targets` is 81/81 green (+1 doctest); `cargo clippy -p adesk-proto --all-targets --no-deps -- -D warnings` and `cargo fmt -p adesk-proto --check` are clean.
 - `cargo check -p adesk-proto --all-targets` is green (the crate builds standalone).
 - `cargo doc -p adesk-proto --no-deps --document-private-items` is warning-free: every intra-doc link resolves and no link carries a redundant explicit target (write `[`ProtoError::Json`]`, not `[`ProtoError::Json`](crate::ProtoError::Json)`, and qualify out-of-scope items as `[`crate::ProtoError::Json`]`).

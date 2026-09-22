@@ -9,8 +9,9 @@
 use std::collections::BTreeMap;
 
 use adesk_core::{
-    ActionId, AppId, AppInfo, NotificationId, Observation, Rect, Region, Size, WindowId,
-    WindowInfo, WindowState,
+    AccessibleId, AccessibleMatch, AccessibleNode, AccessibleState, AccessibleTree, ActionId,
+    AppId, AppInfo, NotificationId, Observation, Rect, Region, Size, WindowId, WindowInfo,
+    WindowState,
 };
 use adesk_proto::{
     ImageFormat, ImagePayload, Notification, NotificationAction, NotificationUrgency, PingResult,
@@ -127,6 +128,61 @@ pub fn notification() -> Notification {
         closed_seq: None,
         close_reason: None,
         timeout_ms: Some(5000),
+    }
+}
+
+/// An `AccessibleNode` fixture (§5.11): a root frame with one child button.
+pub fn accessible_node() -> AccessibleNode {
+    AccessibleNode {
+        id: AccessibleId(1),
+        role: "frame".to_owned(),
+        name: "Document".to_owned(),
+        description: None,
+        value: None,
+        states: vec![AccessibleState::Showing],
+        bounds: Some(Rect::new(0, 0, 1280, 800)),
+        actions: Vec::new(),
+        children: vec![AccessibleNode {
+            id: AccessibleId(3),
+            role: "push_button".to_owned(),
+            name: "Save".to_owned(),
+            description: Some("Save the document".to_owned()),
+            value: Some("Save".to_owned()),
+            states: vec![
+                AccessibleState::Enabled,
+                AccessibleState::Focusable,
+                AccessibleState::Showing,
+            ],
+            bounds: Some(Rect::new(10, 20, 80, 30)),
+            actions: vec!["click".to_owned(), "activate".to_owned()],
+            children: Vec::new(),
+        }],
+    }
+}
+
+/// An `AccessibleTree` fixture (§4/§5.11).
+pub fn accessible_tree() -> AccessibleTree {
+    AccessibleTree {
+        window_id: WindowId(17),
+        app_id: Some(AppId::from("org.mozilla.firefox")),
+        app_name: Some("Firefox".to_owned()),
+        root: accessible_node(),
+        node_count: 2,
+        truncated: false,
+    }
+}
+
+/// An `AccessibleMatch` fixture (§4/§5.11).
+pub fn accessible_match() -> AccessibleMatch {
+    AccessibleMatch {
+        id: AccessibleId(3),
+        role: "push_button".to_owned(),
+        name: "Save".to_owned(),
+        value: Some("Save".to_owned()),
+        states: vec![AccessibleState::Enabled, AccessibleState::Focusable],
+        bounds: Some(Rect::new(10, 20, 80, 30)),
+        actions: vec!["click".to_owned()],
+        path: vec!["frame".to_owned(), "toolbar".to_owned()],
     }
 }
 
