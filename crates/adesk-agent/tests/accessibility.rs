@@ -12,14 +12,16 @@ mod common;
 
 use std::sync::Arc;
 
-use adesk_agent::client::AccessibilityOutcome;
+use adesk_agent::client::{AccessibilityOutcome, FindAccessibleOutcome};
 use adesk_agent::testing::{ClientMethod, ScriptedClient, ScriptedResponse};
 use adesk_agent::{
     ActionKind, AgentDecision, AgentLoop, Expectation, LoopConfig, MockProvider, ObserveCondition,
     ObserveOutcome, Scenario, ScenarioId, ScenarioRunner, ScriptEntry, StepStatus, StopReason,
     TaskDescription,
 };
-use adesk_core::{Rect, WindowId, WindowInfo, WindowState};
+use adesk_core::{
+    AccessibleId, AccessibleMatch, ActionId, Rect, WindowId, WindowInfo, WindowState,
+};
 use common::{observation, runtime_info};
 
 /// The task every test runs (only the goal matters to the loop).
@@ -263,4 +265,216 @@ async fn unavailable_accessibility_backend_is_non_fatal() {
     assert_eq!(outcome.metrics.gpu_readbacks, 0);
     assert_eq!(outcome.metrics.visual_tokens, 0);
     assert_eq!(handle.remaining(), 0, "every canned response was consumed");
+}
+
+/// A `find_accessible` decision on `window_id`, filtering by role and name.
+fn find_decision(window_id: u64) -> AgentDecision {
+    AgentDecision::FindAccessible {
+        window_id: Some(WindowId(window_id)),
+        role: Some(String::from("push_button")),
+        name: None,
+        name_contains: Some(String::from("Apply")),
+        value_contains: None,
+        max_results: Some(5),
+    }
+}
+
+/// An `invoke_accessible_action` decision on `node_id`.
+fn invoke_decision(node_id: u64) -> AgentDecision {
+    AgentDecision::InvokeAccessibleAction {
+        node_id: AccessibleId(node_id),
+        action: Some(String::from("click")),
+    }
+}
+
+/// A `find_accessible` result with one `push_button` match for `window_id`.
+fn found(window_id: u64) -> FindAccessibleOutcome {
+    FindAccessibleOutcome {
+        window_id: WindowId(window_id),
+        matches: vec![AccessibleMatch {
+            id: AccessibleId(11),
+            role: String::from("push_button"),
+            name: String::from("Apply"),
+            value: Some(String::from("Apply")),
+            states: Vec::new(),
+            bounds: Some(Rect::new(10, 20, 80, 30)),
+            actions: vec![String::from("click")],
+            path: vec![String::from("frame"), String::from("toolbar")],
+        }],
+        truncated: false,
+    }
+}
+
+/// A `find_accessible` decision locates a named element and renders its matches
+/// as TEXT into the model context — still with no pixel readback, so the agent
+/// can go from a name to a node id without ever seeing a frame.
+#[tokio::test]
+async fn find_accessible_text_reaches_the_model_context_without_pixels() {
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        ScriptedResponse::FindAccessible(found(1)),
+    ]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![find_decision(1), finish()]));
+    let config = LoopConfig {
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent.run(&task()).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(outcome.stop_reason, StopReason::Finished);
+    assert_eq!(
+        handle.call_count(ClientMethod::FindAccessible),
+        1,
+        "exactly one text search, in place of pixels"
+    );
+
+    // The whole point: the found elements are text, not pixels.
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 0,
+        "no pixel readback happened"
+    );
+    assert_eq!(outcome.metrics.images_sent, 0, "no image was embedded");
+    assert_eq!(
+        outcome.metrics.visual_tokens, 0,
+        "no visual tokens were spent"
+    );
+    assert_eq!(outcome.metrics.failures, 0, "the search is not a failure");
+    assert_eq!(
+        handle.call_count(ClientMethod::CaptureWindow),
+        0,
+        "a capture must never be issued for a text search"
+    );
+
+    // The rendered match reach the model as the window's only view.
+    let contexts = provider.contexts();
+    let rendered = contexts
+        .iter()
+        .filter_map(|context| context.accessibility.as_deref())
+        .find(|text| text.contains("push_button"))
+        .expect("the found elements reach the provider context");
+    assert!(
+        rendered.contains("Apply"),
+        "the element name is rendered: {rendered}"
+    );
+    assert!(
+        rendered.contains("id=11"),
+        "the node id is rendered: {rendered}"
+    );
+    assert!(
+        rendered.contains("frame"),
+        "the ancestor path is rendered: {rendered}"
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.image.is_none() && context.keyframe.is_none()),
+        "no frame is ever attached to the context"
+    );
+    assert_eq!(handle.remaining(), 0, "every canned response was consumed");
+}
+
+/// `invoke_accessible_action` is runtime-native actuation: the action id the
+/// runtime returns becomes the loop's causal anchor and is recorded on the step.
+#[tokio::test]
+async fn invoke_accessible_action_records_the_returned_action_id() {
+    let mut client = ScriptedClient::new();
+    client.push_all([
+        ScriptedResponse::Ping(runtime_info()),
+        ScriptedResponse::AccessibleAction(ActionId(42)),
+    ]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![invoke_decision(11), finish()]));
+    let config = LoopConfig {
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent.run(&task()).await.expect("run succeeds");
+
+    assert!(outcome.success);
+    assert_eq!(outcome.stop_reason, StopReason::Finished);
+    assert_eq!(handle.call_count(ClientMethod::InvokeAccessibleAction), 1);
+    assert_eq!(outcome.metrics.failures, 0);
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 0,
+        "actuation reads no pixels"
+    );
+    assert_eq!(
+        outcome.history[0].action_id,
+        Some(ActionId(42)),
+        "the invoked element's action id is recorded"
+    );
+    assert_eq!(outcome.history[0].status, StepStatus::Ok);
+
+    let invoke = handle
+        .calls()
+        .into_iter()
+        .find(|call| call.method == ClientMethod::InvokeAccessibleAction)
+        .expect("the invoke was issued");
+    assert!(
+        invoke.summary.contains("node_id=11"),
+        "the element is addressed: {}",
+        invoke.summary
+    );
+    assert!(
+        invoke.summary.contains("click"),
+        "the action is named: {}",
+        invoke.summary
+    );
+    assert_eq!(handle.remaining(), 0, "every canned response was consumed");
+}
+
+/// With the accessibility gate off, neither `find_accessible` nor
+/// `invoke_accessible_action` issues a runtime call: the decisions are benign
+/// no-ops and the run finishes instead of failing.
+#[tokio::test]
+async fn disabled_accessibility_gate_makes_find_and_invoke_noops() {
+    let mut client = ScriptedClient::new();
+    // Only the ping is scripted: a gated-out decision must make no call at all.
+    client.push_all([ScriptedResponse::Ping(runtime_info())]);
+    let handle = client.clone();
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        find_decision(1),
+        invoke_decision(11),
+        finish(),
+    ]));
+    let config = LoopConfig {
+        include_accessibility: false,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent
+        .run(&task())
+        .await
+        .expect("a gated-out accessibility decision must not end the run");
+
+    assert!(outcome.success);
+    assert_eq!(outcome.stop_reason, StopReason::Finished);
+    assert_eq!(handle.call_count(ClientMethod::FindAccessible), 0);
+    assert_eq!(handle.call_count(ClientMethod::InvokeAccessibleAction), 0);
+    assert_eq!(
+        outcome.metrics.failures, 0,
+        "a benign no-op is not a step failure"
+    );
+    assert_eq!(outcome.metrics.gpu_readbacks, 0);
+    assert_eq!(
+        outcome.history[0].status,
+        StepStatus::Ok,
+        "the gated-out step still succeeds"
+    );
+    assert_eq!(
+        handle.remaining(),
+        0,
+        "only the ping was scripted and it was consumed"
+    );
 }

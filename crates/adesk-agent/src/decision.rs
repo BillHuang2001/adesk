@@ -7,7 +7,7 @@
 //! seat). The wire shape is a single internally-tagged JSON object (`{"op": ...}`),
 //! which is also the schema the provider is prompted to emit.
 
-use adesk_core::{ActionId, AppId, Button, Position, Rect, WindowId};
+use adesk_core::{AccessibleId, ActionId, AppId, Button, Position, Rect, WindowId};
 use serde::{Deserialize, Serialize};
 
 /// One decision produced by an [`crate::provider::LlmProvider`] and executed by
@@ -107,6 +107,35 @@ pub enum AgentDecision {
         #[serde(default)]
         max_nodes: Option<u32>,
     },
+    /// Runtime-native: find the accessible elements matching the AND-ed filters.
+    FindAccessible {
+        /// Target window; `None` = the active window.
+        #[serde(default)]
+        window_id: Option<WindowId>,
+        /// Exact lowercase role name to match.
+        #[serde(default)]
+        role: Option<String>,
+        /// Exact accessible name to match.
+        #[serde(default)]
+        name: Option<String>,
+        /// Case-insensitive substring of the accessible name.
+        #[serde(default)]
+        name_contains: Option<String>,
+        /// Case-insensitive substring of the node's value.
+        #[serde(default)]
+        value_contains: Option<String>,
+        /// Maximum number of matches to return.
+        #[serde(default)]
+        max_results: Option<u32>,
+    },
+    /// Runtime-native: invoke an accessible element's action.
+    InvokeAccessibleAction {
+        /// Element whose action is invoked.
+        node_id: AccessibleId,
+        /// Action to invoke; `None` = the element's default action.
+        #[serde(default)]
+        action: Option<String>,
+    },
     /// Application input: click through the Wayland seat.
     Click {
         /// Target window.
@@ -178,6 +207,8 @@ impl AgentDecision {
             Self::Observe { .. } => ActionKind::Observe,
             Self::Wait { .. } => ActionKind::Wait,
             Self::AccessibilityTree { .. } => ActionKind::AccessibilityTree,
+            Self::FindAccessible { .. } => ActionKind::FindAccessible,
+            Self::InvokeAccessibleAction { .. } => ActionKind::InvokeAccessibleAction,
             Self::Click { .. } => ActionKind::Click,
             Self::Type { .. } => ActionKind::TypeText,
             Self::Keypress { .. } => ActionKind::Keypress,
@@ -198,7 +229,8 @@ impl AgentDecision {
     }
 
     /// True for decisions that read or mutate runtime state directly
-    /// (list/launch/activate/close/capture/observe/wait/accessibility_tree).
+    /// (list/launch/activate/close/capture/observe/wait/accessibility_tree and
+    /// the §5.11 `find_accessible` / `invoke_accessible_action` operations).
     pub fn is_runtime(&self) -> bool {
         matches!(
             self,
@@ -212,6 +244,8 @@ impl AgentDecision {
                 | Self::Observe { .. }
                 | Self::Wait { .. }
                 | Self::AccessibilityTree { .. }
+                | Self::FindAccessible { .. }
+                | Self::InvokeAccessibleAction { .. }
         )
     }
 }
@@ -240,6 +274,10 @@ pub enum ActionKind {
     Wait,
     /// `accessibility_tree` (read a window as structured text).
     AccessibilityTree,
+    /// `find_accessible` (search a window's UI for named elements).
+    FindAccessible,
+    /// `invoke_accessible_action` (runtime-native element actuation).
+    InvokeAccessibleAction,
     /// `click` / `double_click`.
     Click,
     /// `type_text`.
@@ -269,6 +307,8 @@ impl ActionKind {
             Self::Observe => "observe",
             Self::Wait => "wait",
             Self::AccessibilityTree => "accessibility_tree",
+            Self::FindAccessible => "find_accessible",
+            Self::InvokeAccessibleAction => "invoke_accessible_action",
             Self::Click => "click",
             Self::TypeText => "type_text",
             Self::Keypress => "keypress",
@@ -377,6 +417,24 @@ mod tests {
                 K::AccessibilityTree,
             ),
             (
+                AgentDecision::FindAccessible {
+                    window_id: Some(window()),
+                    role: Some("push_button".into()),
+                    name: Some("Save".into()),
+                    name_contains: None,
+                    value_contains: None,
+                    max_results: Some(5),
+                },
+                K::FindAccessible,
+            ),
+            (
+                AgentDecision::InvokeAccessibleAction {
+                    node_id: AccessibleId(3),
+                    action: Some("click".into()),
+                },
+                K::InvokeAccessibleAction,
+            ),
+            (
                 AgentDecision::Click {
                     window_id: window(),
                     position: Position::normalized(0.5, 0.5),
@@ -421,7 +479,7 @@ mod tests {
     #[test]
     fn kind_maps_every_variant() {
         let vocabulary = vocabulary();
-        assert_eq!(vocabulary.len(), 15);
+        assert_eq!(vocabulary.len(), 17);
         for (decision, expected) in &vocabulary {
             assert_eq!(decision.kind(), *expected, "kind of {decision:?}");
         }
@@ -522,6 +580,11 @@ mod tests {
         assert_eq!(ActionKind::ListApps.as_str(), "list_apps");
         assert_eq!(ActionKind::Capture.as_str(), "capture_window");
         assert_eq!(ActionKind::AccessibilityTree.as_str(), "accessibility_tree");
+        assert_eq!(ActionKind::FindAccessible.as_str(), "find_accessible");
+        assert_eq!(
+            ActionKind::InvokeAccessibleAction.as_str(),
+            "invoke_accessible_action"
+        );
         assert_eq!(ActionKind::TypeText.as_str(), "type_text");
         assert_eq!(ActionKind::Finish.as_str(), "finish");
         for name in names {

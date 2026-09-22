@@ -13,8 +13,9 @@ use adesk_core::{ErrorCode, WindowId, WindowInfo};
 use tracing::{debug, warn};
 
 use crate::client::{
-    AccessibilityTreeRequest, AgentClient, CaptureRequest, ClickRequest, ObserveOutcome,
-    ObserveRequest, ScrollRequest,
+    AccessibilityTreeRequest, AgentClient, CaptureRequest, ClickRequest, FindAccessibleOutcome,
+    FindAccessibleRequest, InvokeAccessibleActionRequest, ObserveOutcome, ObserveRequest,
+    ScrollRequest,
 };
 use crate::context::ActionRecord;
 use crate::decision::{ActionKind, AgentDecision, ObserveCondition};
@@ -243,6 +244,82 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                 self.enrich_accessibility(*window_id, *max_nodes, kind, facts, step, execution)
                     .await?;
             }
+            AgentDecision::FindAccessible {
+                window_id,
+                role,
+                name,
+                name_contains,
+                value_contains,
+                max_results,
+            } => {
+                if !self.config.include_accessibility {
+                    // Same opt-in gate as `AccessibilityTree`: with it off the
+                    // loop makes no runtime call and leaves a benign note
+                    // instead of failing the step.
+                    self.last_error = Some(String::from(
+                        "accessibility is disabled; set include_accessibility",
+                    ));
+                    return Ok(());
+                }
+                let request = FindAccessibleRequest {
+                    window_id: *window_id,
+                    role: role.clone(),
+                    name: name.clone(),
+                    name_contains: name_contains.clone(),
+                    value_contains: value_contains.clone(),
+                    max_results: *max_results,
+                };
+                let outcome = client_call!(self, step, kind, execution.attempts, async {
+                    degrade_accessibility(
+                        step,
+                        "find_accessible",
+                        self.client.find_accessible(&request).await,
+                    )
+                })?;
+                match outcome {
+                    Some(outcome) => {
+                        // The found elements land in the SAME accessibility slot
+                        // as a tree outline, so the model reads UI text with no
+                        // pixel readback.
+                        facts.accessibility = Some(render_accessible_matches(&outcome));
+                    }
+                    None => {
+                        facts.accessibility = None;
+                        self.last_error = Some(String::from("find_accessible unavailable"));
+                    }
+                }
+            }
+            AgentDecision::InvokeAccessibleAction { node_id, action } => {
+                if !self.config.include_accessibility {
+                    self.last_error = Some(String::from(
+                        "accessibility is disabled; set include_accessibility",
+                    ));
+                    return Ok(());
+                }
+                let request = InvokeAccessibleActionRequest {
+                    node_id: *node_id,
+                    action: action.clone(),
+                };
+                let outcome = client_call!(self, step, kind, execution.attempts, async {
+                    degrade_accessibility(
+                        step,
+                        "invoke_accessible_action",
+                        self.client.invoke_accessible_action(&request).await,
+                    )
+                })?;
+                match outcome {
+                    Some(action_id) => {
+                        // Runtime-native actuation: the returned action id is the
+                        // loop's causal anchor, exactly like `activate_window`.
+                        execution.action_id = Some(action_id);
+                        self.last_action_id = Some(action_id);
+                    }
+                    None => {
+                        self.last_error =
+                            Some(String::from("invoke_accessible_action unavailable"));
+                    }
+                }
+            }
             AgentDecision::Click {
                 window_id,
                 position,
@@ -401,18 +478,11 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
             max_nodes,
         };
         let outcome = client_call!(self, step, kind, execution.attempts, async {
-            match self.client.accessibility_tree(&request).await {
-                Ok(outcome) => Ok(Some(outcome)),
-                Err(error) if is_accessibility_unavailable(&error) => {
-                    warn!(
-                        step,
-                        error = %error,
-                        "accessibility tree unavailable, continuing without it"
-                    );
-                    Ok(None)
-                }
-                Err(error) => Err(error),
-            }
+            degrade_accessibility(
+                step,
+                "accessibility_tree",
+                self.client.accessibility_tree(&request).await,
+            )
         })?;
         match outcome {
             Some(outcome) => {
@@ -616,6 +686,56 @@ fn is_accessibility_unavailable(error: &Error) -> bool {
     )
 }
 
+/// Classify one §5.11 accessibility call result, degrading a backend-unavailable
+/// error to `Ok(None)`.
+///
+/// This is the single implementation of the accessibility degradation policy:
+/// [`AgentLoop::enrich_accessibility`] and the `FindAccessible` /
+/// `InvokeAccessibleAction` arms all funnel their result through it, so a
+/// missing, stale or unsupported backend is a benign no-op in exactly one place.
+/// Every other error is passed through unchanged and keeps the generic
+/// [`ErrorClass`] policy.
+fn degrade_accessibility<T>(step: u32, what: &str, result: Result<T>) -> Result<Option<T>> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(error) if is_accessibility_unavailable(&error) => {
+            warn!(
+                step,
+                operation = what,
+                error = %error,
+                "accessibility backend unavailable, continuing without it"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Render `find_accessible` matches as a compact TEXT block for the model.
+///
+/// One line per match (role, name, value, node id and ancestor path), so the
+/// agent can pick an element to invoke without any pixel readback. The block is
+/// stored in the same accessibility slot as a tree outline, so it is truncated
+/// by the same `max_accessibility_chars` context budget.
+fn render_accessible_matches(outcome: &FindAccessibleOutcome) -> String {
+    let mut text = format!(
+        "find_accessible window={} matches={} truncated={}",
+        outcome.window_id,
+        outcome.matches.len(),
+        outcome.truncated
+    );
+    if outcome.matches.is_empty() {
+        text.push_str("\n(no matches)");
+    }
+    for element in &outcome.matches {
+        text.push_str(&format!(
+            "\n- {} \"{}\" value={:?} id={} path={:?}",
+            element.role, element.name, element.value, element.id, element.path
+        ));
+    }
+    text
+}
+
 /// One context action record for an executed decision.
 fn action_record(
     step: u32,
@@ -651,11 +771,13 @@ fn decision_window(decision: &AgentDecision) -> Option<WindowId> {
         AgentDecision::Observe { window_id, .. }
         | AgentDecision::Wait { window_id, .. }
         | AgentDecision::AccessibilityTree { window_id, .. }
+        | AgentDecision::FindAccessible { window_id, .. }
         | AgentDecision::Type { window_id, .. }
         | AgentDecision::Keypress { window_id, .. } => *window_id,
         AgentDecision::ListApps { .. }
         | AgentDecision::ListWindows
         | AgentDecision::LaunchApp { .. }
+        | AgentDecision::InvokeAccessibleAction { .. }
         | AgentDecision::Finish { .. } => None,
     }
 }
@@ -695,6 +817,21 @@ fn describe_decision(decision: &AgentDecision) -> String {
             window_id,
             max_nodes,
         } => format!("accessibility_tree window_id={window_id:?} max_nodes={max_nodes:?}"),
+        AgentDecision::FindAccessible {
+            window_id,
+            role,
+            name,
+            name_contains,
+            value_contains,
+            max_results,
+        } => format!(
+            "find_accessible window_id={window_id:?} role={role:?} name={name:?} \
+             name_contains={name_contains:?} value_contains={value_contains:?} \
+             max_results={max_results:?}"
+        ),
+        AgentDecision::InvokeAccessibleAction { node_id, action } => {
+            format!("invoke_accessible_action node_id={node_id} action={action:?}")
+        }
         AgentDecision::Click {
             position,
             button,
