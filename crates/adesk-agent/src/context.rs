@@ -17,6 +17,7 @@
 //! | `max_changed_regions` | 4 | `Observation::changed_regions` truncated to the largest rects; extras merge into their bounds |
 //! | `max_images` | 2 | exactly one current image + one previous keyframe, never a history |
 //! | `max_detail_chars` | 160 | each summary `detail` string is truncated |
+//! | `max_accessibility_chars` | 4000 | the accessibility outline is truncated |
 //! | `max_dimension` | `Some(1024)` | default downscale for images sent to the provider |
 
 use std::cmp::Reverse;
@@ -76,6 +77,8 @@ pub struct ContextBudget {
     pub max_images: usize,
     /// Maximum characters per summary `detail` string.
     pub max_detail_chars: usize,
+    /// Maximum characters of the accessibility outline kept.
+    pub max_accessibility_chars: usize,
     /// Default downscale target for images sent to the provider.
     pub max_dimension: Option<u32>,
 }
@@ -90,6 +93,7 @@ impl Default for ContextBudget {
             max_changed_regions: 4,
             max_images: 2,
             max_detail_chars: 160,
+            max_accessibility_chars: 4000,
             max_dimension: Some(1024),
         }
     }
@@ -358,6 +362,9 @@ pub struct AgentContext {
     /// Latest observation, trimmed to the budget.
     #[serde(default)]
     pub observation: Option<Observation>,
+    /// Text rendering of the active window's UI from the accessibility backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessibility: Option<String>,
     /// Last error the loop hit, for recovery reasoning.
     #[serde(default)]
     pub last_error: Option<String>,
@@ -401,6 +408,8 @@ pub struct ContextInput<'a> {
     pub apps: &'a [AppInfo],
     /// Latest observation.
     pub observation: Option<&'a Observation>,
+    /// Latest accessibility outline, when the backend produced one.
+    pub accessibility: Option<&'a str>,
     /// Last error message shown to the agent.
     pub last_error: Option<&'a str>,
 }
@@ -609,6 +618,9 @@ impl ContextBuilder {
             observation: input
                 .observation
                 .map(|observation| self.trim_observation(observation)),
+            accessibility: input
+                .accessibility
+                .map(|text| truncate(text, self.budget.max_accessibility_chars, "")),
             last_error: input.last_error.map(str::to_owned),
             image: self.current_image.clone(),
             keyframe: self.keyframe.clone(),
@@ -657,4 +669,45 @@ fn trim_regions(regions: &[Rect], cap: usize) -> Vec<Rect> {
         *last = merged;
     }
     kept
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a context for `accessibility`, everything else empty.
+    fn build(budget: ContextBudget, accessibility: Option<&str>) -> AgentContext {
+        let task = TaskDescription::new("goal");
+        ContextBuilder::new(budget).build(ContextInput {
+            task: &task,
+            step: 0,
+            max_steps: 10,
+            runtime: None,
+            windows: &[],
+            active_window: None,
+            apps: &[],
+            observation: None,
+            accessibility,
+            last_error: None,
+        })
+    }
+
+    /// A long outline is cut to `max_accessibility_chars`; an absent one is `None`.
+    #[test]
+    fn accessibility_is_truncated_to_the_budget_and_absent_when_unset() {
+        let budget = ContextBudget::default();
+        let outline = "a".repeat(budget.max_accessibility_chars + 500);
+        let context = build(budget, Some(&outline));
+        let kept = context.accessibility.expect("outline kept");
+        assert_eq!(kept.chars().count(), budget.max_accessibility_chars);
+
+        // A short outline is passed through unchanged.
+        let short = build(budget, Some("- root\n  - button \"OK\""));
+        assert_eq!(
+            short.accessibility.as_deref(),
+            Some("- root\n  - button \"OK\"")
+        );
+
+        assert_eq!(build(budget, None).accessibility, None);
+    }
 }

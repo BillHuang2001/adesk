@@ -34,14 +34,22 @@
 //! | `capture` | `capture_window` — one readback; caches the returned window metadata |
 //! | `observe` | `observe`, with `after_action` defaulting to `last_action_id` |
 //! | `wait` | `observe` with `include_image = false` (never a readback) |
+//! | `accessibility_tree` | `accessibility_tree` — caches the returned outline as context text (no readback) |
+//! | `find_accessible` | `find_accessible` — renders the matches into the same context slot |
+//! | `invoke_accessible_action` | `invoke_accessible_action`; the returned action id becomes `last_action_id` |
 //! | `click` / `type` / `keypress` / `scroll` | the matching seat call, then — when [`LoopConfig::observe_after_input`] — one `observe` carrying `after_action = last_action_id`, `until = quiet(quiet_ms)`, the loop's image policy and [`LoopConfig::observe_timeout_ms`] |
 //! | `finish` | none |
 //!
-//! `ping` is issued once before the first decision when
+//! The three accessibility decisions are benign no-ops when
+//! [`LoopConfig::include_accessibility`] is off: they make no runtime call and leave a note
+//! instead of failing the step. `ping` is issued once before the first decision when
 //! [`LoopConfig::validate_protocol_version`] is set, and a recoverable step failure adds one
-//! `list_windows` refresh. Nothing else calls the runtime, so a scripted client sees exactly
-//! this sequence. Events are *not* recorded here: the [`AgentClient`] seam returns temporal
-//! [`adesk_core::Observation`]s, not raw [`adesk_core::RuntimeEvent`]s, so the loop never
+//! `list_windows` refresh. When [`LoopConfig::include_accessibility`] is set, an `observe` —
+//! explicit or the automatic post-input observation — issues one extra `accessibility_tree`
+//! call for the observed window after it resolves. Nothing else calls the runtime, so a
+//! scripted client sees exactly this sequence. Events are *not* recorded here: the
+//! [`AgentClient`] seam returns temporal [`adesk_core::Observation`]s, not raw
+//! [`adesk_core::RuntimeEvent`]s, so the loop never
 //! invents event timestamps; `ContextBuilder::record_events` is for callers that own an
 //! event stream.
 //!
@@ -411,6 +419,7 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
             active_window: facts.active_window,
             apps: &facts.apps,
             observation: facts.observation.as_ref(),
+            accessibility: facts.accessibility.as_deref(),
             last_error: self.last_error.as_deref(),
         })
     }

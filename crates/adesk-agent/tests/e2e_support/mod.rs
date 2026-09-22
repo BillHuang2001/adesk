@@ -5,8 +5,10 @@
 //! compiled — and only reachable — from that suite.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
+use adesk_a11y::{node, AccessibilitySource, FixtureSource};
 use adesk_agent::{
     AgentDecision, AgentLoop, AgpClient, LoopConfig, MetricsReport, MockProvider, Scenario,
     ScenarioId, ScenarioReport, ScenarioRunner, StepRecord, TaskDescription,
@@ -31,6 +33,44 @@ pub const POPUP_DESTROY_DELAY: Duration = Duration::from_millis(400);
 
 /// Delay before the navigation test renames its window, while the scenario is observing.
 pub const TITLE_CHANGE_DELAY: Duration = Duration::from_millis(800);
+
+/// Title of the fixture window the text-first e2e tests read as an accessibility
+/// outline. The runtime hands it to the backend as the correlation title, so the
+/// mapped toplevel must carry it.
+pub const ACCESSIBILITY_WINDOW_TITLE: &str = "Preferences";
+
+/// The exact §5.11 outline [`accessibility_fixture`] renders for
+/// [`ACCESSIBILITY_WINDOW_TITLE`], with the protocol's default request options.
+///
+/// `docs/protocol.md` §5.11 fixes the outline grammar (pre-order ids, two spaces
+/// of indent per level), so the e2e assertion can pin the real rendered text
+/// rather than a substring.
+pub const ACCESSIBILITY_OUTLINE: &str = concat!(
+    r#"frame "Preferences" id=0"#,
+    "\n",
+    r#"  check_box "Dark Mode" value="on" actions=[toggle] id=1"#,
+    "\n",
+    r#"  push_button "Apply" actions=[click] id=2"#,
+);
+
+/// A deterministic accessibility backend serving [`ACCESSIBILITY_OUTLINE`].
+///
+/// [`adesk_a11y::FixtureSource`] needs no accessibility bus, toolkit or display,
+/// so the whole §5.11 path is exercised headless; the returned handle lets a test
+/// read back which window the runtime asked it to snapshot (`last_target`).
+pub fn accessibility_fixture() -> Arc<FixtureSource> {
+    Arc::new(FixtureSource::new(
+        node("frame", ACCESSIBILITY_WINDOW_TITLE)
+            .child(
+                node("check_box", "Dark Mode")
+                    .value("on")
+                    .action("toggle")
+                    .build(),
+            )
+            .child(node("push_button", "Apply").action("click").build())
+            .build(),
+    ))
+}
 
 /// Both `adesk_testkit::TestkitError` and `adesk_agent::Error` convert into this.
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -98,6 +138,24 @@ pub fn loop_config() -> LoopConfig {
 /// A pixman runtime that does not scope the process environment.
 pub async fn runtime() -> Result<TestRuntime, adesk_testkit::TestkitError> {
     TestRuntime::start_with(TestRuntimeConfig::new().with_apply_env(false)).await
+}
+
+/// A pixman runtime whose §5.11 backend is the injected deterministic `source`.
+///
+/// Forwarded to `ServerConfig::accessibility_source`, so every accessibility
+/// method of the running server answers from `source` — no accessibility bus,
+/// toolkit or display involved. Like [`runtime`], it does not scope the process
+/// environment, so it serializes with the other tests only through the runtime's
+/// own ports.
+pub async fn runtime_with_accessibility(
+    source: Arc<dyn AccessibilitySource>,
+) -> Result<TestRuntime, adesk_testkit::TestkitError> {
+    TestRuntime::start_with(
+        TestRuntimeConfig::new()
+            .with_accessibility_source(source)
+            .with_apply_env(false),
+    )
+    .await
 }
 
 /// A fresh AGP adapter (`AgpClient` is not `Clone`).

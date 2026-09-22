@@ -30,9 +30,10 @@ use adesk_core::{ActionId, AppId, AppInfo, Position, Rect, WindowId, WindowInfo}
 use async_trait::async_trait;
 
 use crate::client::{
-    AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
-    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WaitForEventsRequest, WaitOutcome,
-    WindowList,
+    AccessibilityOutcome, AccessibilityTreeRequest, AgentClient, CaptureOutcome, CaptureRequest,
+    ClickRequest, FindAccessibleOutcome, FindAccessibleRequest, InvokeAccessibleActionRequest,
+    LaunchOutcome, ObserveOutcome, ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome,
+    WaitForEventsRequest, WaitOutcome, WindowList,
 };
 use crate::decision::ObserveCondition;
 use crate::Result;
@@ -68,6 +69,12 @@ pub enum ClientMethod {
     TypeText,
     /// `wait_for_events`.
     WaitForEvents,
+    /// `accessibility_tree`.
+    AccessibilityTree,
+    /// `find_accessible`.
+    FindAccessible,
+    /// `invoke_accessible_action`.
+    InvokeAccessibleAction,
 }
 
 /// One recorded call.
@@ -107,6 +114,12 @@ pub enum ScriptedResponse {
     Type(TypeOutcome),
     /// Result of `wait_for_events`.
     WaitEvents(WaitOutcome),
+    /// Result of `accessibility_tree`.
+    AccessibilityTree(AccessibilityOutcome),
+    /// Result of `find_accessible`.
+    FindAccessible(FindAccessibleOutcome),
+    /// Action id returned by `invoke_accessible_action`.
+    AccessibleAction(ActionId),
     /// A runtime error, returned by whatever method is called next.
     Error(adesk_core::Error),
 }
@@ -223,6 +236,9 @@ fn response_name(response: &ScriptedResponse) -> &'static str {
         ScriptedResponse::Observe(_) => "Observe",
         ScriptedResponse::Type(_) => "Type",
         ScriptedResponse::WaitEvents(_) => "WaitEvents",
+        ScriptedResponse::AccessibilityTree(_) => "AccessibilityTree",
+        ScriptedResponse::FindAccessible(_) => "FindAccessible",
+        ScriptedResponse::AccessibleAction(_) => "AccessibleAction",
         ScriptedResponse::Error(_) => "Error",
     }
 }
@@ -310,6 +326,33 @@ fn wait_summary(request: &WaitForEventsRequest) -> String {
         request.max_events,
         request.since_seq,
     )
+}
+
+/// Summary of an `accessibility_tree` call.
+fn accessibility_summary(request: &AccessibilityTreeRequest) -> String {
+    format!(
+        "{} max_nodes={:?}",
+        window_summary(request.window_id),
+        request.max_nodes
+    )
+}
+
+/// Summary of a `find_accessible` call; the filters are AND-ed.
+fn find_accessible_summary(request: &FindAccessibleRequest) -> String {
+    format!(
+        "{} role={:?} name={:?} name_contains={:?} value_contains={:?} max_results={:?}",
+        window_summary(request.window_id),
+        request.role,
+        request.name,
+        request.name_contains,
+        request.value_contains,
+        request.max_results,
+    )
+}
+
+/// Summary of an `invoke_accessible_action` call.
+fn invoke_accessible_summary(request: &InvokeAccessibleActionRequest) -> String {
+    format!("node_id={} action={:?}", request.node_id, request.action)
 }
 
 #[async_trait]
@@ -407,6 +450,42 @@ impl AgentClient for ScriptedClient {
             WaitForEvents,
             wait_summary(request),
             WaitEvents
+        ))
+    }
+
+    async fn accessibility_tree(
+        &self,
+        request: &AccessibilityTreeRequest,
+    ) -> Result<AccessibilityOutcome> {
+        Ok(scripted!(
+            self,
+            AccessibilityTree,
+            accessibility_summary(request),
+            AccessibilityTree
+        ))
+    }
+
+    async fn find_accessible(
+        &self,
+        request: &FindAccessibleRequest,
+    ) -> Result<FindAccessibleOutcome> {
+        Ok(scripted!(
+            self,
+            FindAccessible,
+            find_accessible_summary(request),
+            FindAccessible
+        ))
+    }
+
+    async fn invoke_accessible_action(
+        &self,
+        request: &InvokeAccessibleActionRequest,
+    ) -> Result<ActionId> {
+        Ok(scripted!(
+            self,
+            InvokeAccessibleAction,
+            invoke_accessible_summary(request),
+            AccessibleAction
         ))
     }
 }

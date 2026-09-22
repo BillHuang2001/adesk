@@ -123,6 +123,7 @@ fn input<'a>(
         active_window: None,
         apps,
         observation,
+        accessibility: None,
         last_error: None,
     }
 }
@@ -385,6 +386,7 @@ fn built_context_respects_every_cap() {
         active_window: Some(WindowId(42)),
         apps: &apps,
         observation: Some(&observation),
+        accessibility: None,
         last_error: Some("unknown window 7"),
     });
 
@@ -474,6 +476,7 @@ fn built_context_respects_every_cap() {
         active_window: None,
         apps: &apps,
         observation: Some(&observation),
+        accessibility: None,
         last_error: None,
     });
     assert_eq!(builder.event_count(), 0);
@@ -529,6 +532,7 @@ fn context_is_deterministic_and_serializable() {
             active_window: Some(WindowId(2)),
             apps: &apps,
             observation: Some(&observation),
+            accessibility: None,
             last_error: None,
         })
     };

@@ -44,12 +44,19 @@ Runtime-native ops (never synthesized input): \
 {\"op\":\"launch_app\",\"app_id\":\"...\",\"args\":[]} | {\"op\":\"activate_window\",\"window_id\":N} | \
 {\"op\":\"close_window\",\"window_id\":N} | {\"op\":\"capture\",\"window_id\":N,\"region\":null,\"max_dimension\":null} | \
 {\"op\":\"observe\",\"window_id\":N|null,\"until\":{\"type\":\"quiet\",\"quiet_ms\":250},\"include_image\":true} | \
-{\"op\":\"wait\",\"window_id\":N|null,\"until\":{\"type\":\"change\"}}.\n\
+{\"op\":\"wait\",\"window_id\":N|null,\"until\":{\"type\":\"change\"}} | \
+{\"op\":\"accessibility_tree\",\"window_id\":N|null,\"max_nodes\":null} | \
+{\"op\":\"find_accessible\",\"window_id\":N|null,\"role\":null,\"name\":null,\"name_contains\":\"...\",\"value_contains\":null,\"max_results\":null} | \
+{\"op\":\"invoke_accessible_action\",\"node_id\":N,\"action\":null}.\n\
 Application input via the seat: \
 {\"op\":\"click\",\"window_id\":N,\"position\":{\"type\":\"normalized\",\"x\":0.5,\"y\":0.5},\"button\":\"left\",\"count\":1} | \
 {\"op\":\"type\",\"text\":\"...\"} | {\"op\":\"keypress\",\"keys\":[\"CTRL\",\"L\"]} | \
 {\"op\":\"scroll\",\"window_id\":N,\"position\":{\"type\":\"normalized\",\"x\":0.5,\"y\":0.5},\"dx\":0.0,\"dy\":-3.0}.\n\
 Finish with {\"op\":\"finish\",\"success\":true|false,\"summary\":\"...\"}. \
+Prefer accessibility_tree when a text-only model needs to see the UI: it reads a window as a \
+text outline instead of a screenshot. find_accessible locates elements in a window by role or \
+name substring and returns them as text (no image); invoke_accessible_action performs a named \
+action on an element by node id (the returned action id is recorded). \
 Coordinates are window-relative; prefer normalized positions. After an input action, observe \
 quiet before assuming the UI settled — quiet is evidence, not proof. Do not repeat an action that \
 failed; re-list windows/apps to refresh stale ids.";

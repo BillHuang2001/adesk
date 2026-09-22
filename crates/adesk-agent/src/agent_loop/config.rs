@@ -22,6 +22,8 @@ pub struct LoopConfig {
     ///
     /// [`supports_images`]: crate::provider::LlmProvider::supports_images
     pub include_image: bool,
+    /// Opt-in gate for the accessibility (text-first) capability (`false` = off).
+    pub include_accessibility: bool,
     /// Default downscale target for attached images.
     pub capture_max_dimension: Option<u32>,
     /// Consecutive failed steps tolerated before stopping.
@@ -45,6 +47,7 @@ impl Default for LoopConfig {
             quiet_ms: 250,
             observe_timeout_ms: 5_000,
             include_image: true,
+            include_accessibility: false,
             capture_max_dimension: Some(1024),
             max_consecutive_failures: 3,
             retries_per_step: 2,
