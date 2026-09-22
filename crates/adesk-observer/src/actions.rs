@@ -18,7 +18,7 @@ use adesk_core::{ActionId, Position, WindowId};
 
 /// The kind of agent action recorded in the registry.
 ///
-/// Mirrors the AGP action methods (`docs/protocol.md` §5.3/§5.5) plus the two
+/// Mirrors the AGP action methods (`docs/protocol.md` §5.3/§5.5/§5.11) plus the
 /// runtime-native operations, which are *not* synthesized input (design invariant 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionKind {
@@ -48,11 +48,13 @@ pub enum ActionKind {
     ActivateWindow,
     /// `close_window` — compositor state change, never synthetic input.
     CloseWindow,
+    /// `invoke_accessible_action` — accessibility actuation, never synthetic input.
+    InvokeAccessibleAction,
 }
 
 impl ActionKind {
     /// Every action kind, in AGP method order.
-    pub const ALL: [ActionKind; 13] = [
+    pub const ALL: [ActionKind; 14] = [
         ActionKind::PointerMove,
         ActionKind::Click,
         ActionKind::DoubleClick,
@@ -66,15 +68,21 @@ impl ActionKind {
         ActionKind::TypeText,
         ActionKind::ActivateWindow,
         ActionKind::CloseWindow,
+        ActionKind::InvokeAccessibleAction,
     ];
 
     /// `true` for actions delivered through the Wayland seat.
     ///
-    /// Runtime-native operations (`ActivateWindow`, `CloseWindow`) return `false`:
-    /// they change compositor state directly and must never update
-    /// `last_input_at` (design invariant 3).
+    /// Runtime-native operations (`ActivateWindow`, `CloseWindow`,
+    /// `InvokeAccessibleAction`) return `false`: they change runtime state directly
+    /// and must never update `last_input_at` (design invariant 3).
     pub fn is_input(self) -> bool {
-        !matches!(self, ActionKind::ActivateWindow | ActionKind::CloseWindow)
+        !matches!(
+            self,
+            ActionKind::ActivateWindow
+                | ActionKind::CloseWindow
+                | ActionKind::InvokeAccessibleAction
+        )
     }
 
     /// Stable snake_case name (AGP method name), for logs and the inspector.
@@ -93,6 +101,7 @@ impl ActionKind {
             ActionKind::TypeText => "type_text",
             ActionKind::ActivateWindow => "activate_window",
             ActionKind::CloseWindow => "close_window",
+            ActionKind::InvokeAccessibleAction => "invoke_accessible_action",
         }
     }
 }

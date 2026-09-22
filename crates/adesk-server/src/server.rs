@@ -6,11 +6,12 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::watch;
 
 use adesk_app_registry::{AppRegistry, Clock, Correlator, MonotonicClock, RegistryOptions};
+use adesk_a11y::AccessibilityService;
 use adesk_compositor::CompositorHandle;
 use adesk_notify::NotificationService;
 use adesk_observer::ObserverService;
 
-use crate::config::ServerConfig;
+use crate::config::{AccessibilityKind, ServerConfig};
 use crate::connection::Connection;
 use crate::context::ServerContext;
 use crate::error::{Result, ServerError};
@@ -74,14 +75,16 @@ impl Server {
         tracing::info!(socket = %listener.path().display(), "AGP socket bound");
 
         // 4. Shared context + event pump (observer, notification store/inbox,
-        //    fan-out, resync).
+        //    accessibility service, fan-out, resync).
         let observer = ObserverService::new();
         let notify = NotificationService::new();
+        let accessibility = accessibility_service(&config);
         let context = ServerContext::new(
             Arc::clone(&config),
             compositor.clone(),
             observer.clone(),
             notify,
+            accessibility,
             Arc::clone(&registry),
             Arc::clone(&correlator),
         );
@@ -111,6 +114,25 @@ impl Server {
             }),
         })
     }
+}
+
+/// Builds the runtime's accessibility service from the configuration
+/// (`docs/architecture.md` §12).
+///
+/// An injected source (tests and tools) wins over the selected mode. Otherwise
+/// `--accessibility` decides: `auto` connects lazily to the AT-SPI bus on first
+/// use and degrades to `not_supported` without one, `off` never touches D-Bus.
+fn accessibility_service(config: &ServerConfig) -> AccessibilityService {
+    let source = match config.accessibility_source.as_ref() {
+        Some(source) => Arc::clone(source),
+        None => match config.accessibility {
+            AccessibilityKind::Auto => adesk_a11y::auto_source(),
+            AccessibilityKind::Off => {
+                adesk_a11y::unavailable_source("disabled by --accessibility off")
+            }
+        },
+    };
+    AccessibilityService::new(source)
 }
 
 /// Accepts connections until shutdown, then runs the ordered teardown.
@@ -247,5 +269,38 @@ impl RunningServer {
     pub async fn shutdown(&self) -> Result<(), ServerError> {
         self.inner.shutdown.initiate();
         self.wait().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn config() -> ServerConfig {
+        ServerConfig::new(
+            "/tmp/adesk-test.sock",
+            adesk_compositor::CompositorConfig::default(),
+        )
+    }
+
+    #[test]
+    fn an_injected_source_wins_over_the_configured_mode() {
+        let source = adesk_a11y::FixtureSource::new(adesk_a11y::node("frame", "Test").build());
+        let config = config()
+            .with_accessibility(AccessibilityKind::Off)
+            .with_accessibility_source(Arc::new(source));
+        assert_eq!(accessibility_service(&config).backend(), "fixture");
+    }
+
+    #[test]
+    fn the_off_mode_selects_the_unavailable_backend() {
+        let config = config().with_accessibility(AccessibilityKind::Off);
+        assert_eq!(accessibility_service(&config).backend(), "off");
+    }
+
+    #[test]
+    fn the_auto_mode_selects_the_lazy_atspi_backend() {
+        let config = config();
+        assert_eq!(accessibility_service(&config).backend(), "atspi");
     }
 }

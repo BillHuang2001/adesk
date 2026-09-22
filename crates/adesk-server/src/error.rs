@@ -28,6 +28,17 @@ pub enum ServerError {
     /// (unknown notification, invalid post, internal).
     #[error("notify error: {0}")]
     Notify(#[from] adesk_notify::Error),
+    /// The §5.11 accessibility request failed: no backend is available, no
+    /// accessible subtree correlates with the window, the addressed element is
+    /// unknown, or the request itself is malformed.
+    ///
+    /// The classification lives in `adesk_a11y`: its `A11yError` →
+    /// `adesk_core::Error` mapping is applied at the crate boundary (see the
+    /// `From<adesk_a11y::A11yError>` impl below), so this variant carries the
+    /// already-coded umbrella error and never re-derives an AGP code here. The
+    /// §5.11 handlers reuse it for their "no candidate window" pre-flight failure.
+    #[error("accessibility error: {0}")]
+    A11y(adesk_core::Error),
     /// The inspector could not compose an inspection frame.
     #[error("inspector error: {0}")]
     Inspector(#[from] adesk_inspector::Error),
@@ -50,6 +61,18 @@ pub enum ServerError {
 /// The error type defaults to [`ServerError`], so `Result<T>` is the common
 /// spelling while the startup/bind paths can name `ServerError` explicitly.
 pub type Result<T, E = ServerError> = std::result::Result<T, E>;
+
+/// Promotes an accessibility failure into a [`ServerError`].
+///
+/// `adesk_a11y` owns the classification (`Unavailable`/`NotCorrelated` →
+/// `not_supported`, `UnknownNode` → `unknown_accessible`, `InvalidRequest` →
+/// `invalid_request`, `Backend` → `internal`); this impl reuses that mapping
+/// instead of restating it, so the §5.11 handlers can use `?` directly.
+impl From<adesk_a11y::A11yError> for ServerError {
+    fn from(error: adesk_a11y::A11yError) -> ServerError {
+        ServerError::A11y(error.into())
+    }
+}
 
 impl ServerError {
     /// The AGP error code (`docs/protocol.md` §6) this failure maps to.
@@ -81,6 +104,11 @@ impl ServerError {
                 adesk_notify::Error::InvalidRequest(_) => ErrorCode::InvalidRequest,
                 adesk_notify::Error::Internal(_) => ErrorCode::Internal,
             },
+            // `adesk_a11y` owns its own mapping onto `adesk_core::Error`, applied
+            // by the `From<adesk_a11y::A11yError>` impl and by the §5.11 handlers'
+            // "no candidate window" failure; the umbrella error already carries
+            // the right AGP code.
+            ServerError::A11y(error) => error.code,
             // `adesk_app_registry` owns its own mapping; delegate so every code
             // stays pinned in one place, and an `#[non_exhaustive]` addition
             // keeps the registry crate's mapping instead of degrading to
@@ -188,6 +216,29 @@ mod tests {
             ),
             (
                 ServerError::Notify(adesk_notify::Error::Internal("inbox poisoned".into())),
+                ErrorCode::Internal,
+            ),
+            // The §5.11 classification is delegated to `adesk_a11y`'s own mapping.
+            (
+                ServerError::from(adesk_a11y::A11yError::Unavailable("no session bus".into())),
+                ErrorCode::NotSupported,
+            ),
+            (
+                ServerError::from(adesk_a11y::A11yError::NotCorrelated(WindowId(7))),
+                ErrorCode::NotSupported,
+            ),
+            (
+                ServerError::from(adesk_a11y::A11yError::UnknownNode(
+                    adesk_core::AccessibleId(3),
+                )),
+                ErrorCode::UnknownAccessible,
+            ),
+            (
+                ServerError::from(adesk_a11y::A11yError::InvalidRequest("bad query".into())),
+                ErrorCode::InvalidRequest,
+            ),
+            (
+                ServerError::from(adesk_a11y::A11yError::Backend("walk timed out".into())),
                 ErrorCode::Internal,
             ),
             (
@@ -571,6 +622,13 @@ mod tests {
         let variants = vec![
             ServerError::Observer(adesk_observer::Error::Internal("boom".into())),
             ServerError::Notify(adesk_notify::Error::Internal("inbox poisoned".into())),
+            ServerError::from(adesk_a11y::A11yError::UnknownNode(
+                adesk_core::AccessibleId(3),
+            )),
+            ServerError::A11y(adesk_core::Error::new(
+                ErrorCode::UnknownWindow,
+                "no active window is available",
+            )),
             ServerError::Registry(adesk_app_registry::Error::NoExec {
                 app: AppId::from("org.example.dbus"),
             }),

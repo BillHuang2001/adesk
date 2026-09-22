@@ -3,9 +3,12 @@
 //! [`ServerConfig`] is the single input of [`crate::Server::start`]; `adesk-testkit`
 //! constructs it directly, the `adesk-server` binary builds it from CLI flags.
 
+use std::fmt;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use adesk_a11y::AccessibilitySource;
 use adesk_compositor::{CompositorConfig, RendererKind, XkbSettings};
 use adesk_core::Size;
 
@@ -14,7 +17,11 @@ use adesk_core::Size;
 /// `Default` resolves the socket path from the environment
 /// ([`default_socket_path`]) and uses the compositor defaults (1280x800,
 /// `RendererKind::Auto`, `us` keymap).
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented by hand because [`ServerConfig::accessibility_source`]
+/// is a trait object (the seam has no `Debug` bound); it prints the backend's
+/// short name instead.
+#[derive(Clone)]
 pub struct ServerConfig {
     /// Unix socket the AGP server listens on.
     pub socket_path: PathBuf,
@@ -24,6 +31,44 @@ pub struct ServerConfig {
     pub app_dirs: Option<Vec<PathBuf>>,
     /// Viewer (VAP v1) endpoint configuration.
     pub viewer: ViewerConfig,
+    /// Accessibility backend selection (`--accessibility`).
+    pub accessibility: AccessibilityKind,
+    /// Accessibility backend override for tests and tools; when set it replaces
+    /// the backend [`ServerConfig::accessibility`] would select.
+    ///
+    /// The whole runtime shares the one [`adesk_a11y::AccessibilityService`] built
+    /// from it, so an injected deterministic backend drives every §5.11 method.
+    pub accessibility_source: Option<Arc<dyn AccessibilitySource>>,
+}
+
+impl fmt::Debug for ServerConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ServerConfig")
+            .field("socket_path", &self.socket_path)
+            .field("compositor", &self.compositor)
+            .field("app_dirs", &self.app_dirs)
+            .field("viewer", &self.viewer)
+            .field("accessibility", &self.accessibility)
+            .field(
+                "accessibility_source",
+                &self.accessibility_source.as_ref().map(|source| source.name()),
+            )
+            .finish()
+    }
+}
+
+/// Accessibility backend selection (`--accessibility`).
+///
+/// Mirrors the renderer selection style: the crate's own `--renderer` option is a
+/// free choice, and this one decides whether the runtime may speak D-Bus at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AccessibilityKind {
+    /// Connect lazily to the AT-SPI bus on first use and degrade to
+    /// `not_supported` when there is none (the default).
+    #[default]
+    Auto,
+    /// Never touch D-Bus; every §5.11 method answers `not_supported`.
+    Off,
 }
 
 /// Viewer (VAP v1) endpoint configuration.
@@ -62,6 +107,8 @@ impl Default for ServerConfig {
             compositor: CompositorConfig::default(),
             app_dirs: None,
             viewer: ViewerConfig::default(),
+            accessibility: AccessibilityKind::default(),
+            accessibility_source: None,
         }
     }
 }
@@ -77,6 +124,8 @@ impl ServerConfig {
             compositor,
             app_dirs: None,
             viewer: ViewerConfig::default(),
+            accessibility: AccessibilityKind::default(),
+            accessibility_source: None,
         }
     }
 
@@ -138,6 +187,25 @@ impl ServerConfig {
     /// Disables the viewer endpoint entirely.
     pub fn without_viewer(mut self) -> ServerConfig {
         self.viewer.enabled = false;
+        self
+    }
+
+    /// Selects the accessibility backend (`Auto` / `Off`).
+    pub fn with_accessibility(mut self, accessibility: AccessibilityKind) -> ServerConfig {
+        self.accessibility = accessibility;
+        self
+    }
+
+    /// Overrides the accessibility backend for the whole runtime.
+    ///
+    /// The injected source replaces whatever [`ServerConfig::accessibility`]
+    /// selects, so tests and tools run the §5.11 surface against a deterministic
+    /// backend instead of a real AT-SPI bus.
+    pub fn with_accessibility_source(
+        mut self,
+        source: Arc<dyn AccessibilitySource>,
+    ) -> ServerConfig {
+        self.accessibility_source = Some(source);
         self
     }
 
@@ -259,6 +327,24 @@ pub fn parse_renderer(value: &str) -> std::result::Result<RendererKind, String> 
     }
 }
 
+/// Parses an `--accessibility` value: `auto` or `off` (case-insensitive).
+///
+/// `auto` connects lazily to the AT-SPI bus on first use and degrades to
+/// `not_supported` when there is none; `off` never touches D-Bus.
+///
+/// # Errors
+///
+/// Returns a human-readable message for any other value.
+pub fn parse_accessibility(value: &str) -> std::result::Result<AccessibilityKind, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Ok(AccessibilityKind::Auto),
+        "off" => Ok(AccessibilityKind::Off),
+        other => Err(format!(
+            "invalid accessibility mode `{other}`: expected `auto` or `off`"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -347,6 +433,53 @@ mod tests {
                 "`{error}` should list the accepted kinds"
             );
         }
+    }
+
+    #[test]
+    fn parse_accessibility_is_case_insensitive() {
+        assert_eq!(parse_accessibility("auto"), Ok(AccessibilityKind::Auto));
+        assert_eq!(parse_accessibility("AUTO"), Ok(AccessibilityKind::Auto));
+        assert_eq!(parse_accessibility(" off "), Ok(AccessibilityKind::Off));
+    }
+
+    #[test]
+    fn parse_accessibility_rejects_unknown_modes() {
+        for value in ["", "on", "yes", "atspi"] {
+            let error = parse_accessibility(value).expect_err(value);
+            assert!(
+                error.contains("auto") && error.contains("off"),
+                "`{error}` should list the accepted modes"
+            );
+        }
+    }
+
+    #[test]
+    fn accessibility_defaults_to_auto_and_can_be_overridden() {
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default());
+        assert_eq!(config.accessibility, AccessibilityKind::Auto);
+        assert!(config.accessibility_source.is_none());
+        assert_eq!(
+            config.with_accessibility(AccessibilityKind::Off).accessibility,
+            AccessibilityKind::Off
+        );
+    }
+
+    #[test]
+    fn an_injected_accessibility_source_replaces_the_selected_backend() {
+        let source = adesk_a11y::FixtureSource::new(adesk_a11y::node("frame", "Test").build());
+        let config = ServerConfig::new("/tmp/test.sock", CompositorConfig::default())
+            .with_accessibility(AccessibilityKind::Off)
+            .with_accessibility_source(Arc::new(source));
+        let injected = config
+            .accessibility_source
+            .as_ref()
+            .expect("the injected source is stored");
+        assert_eq!(injected.name(), "fixture");
+        // The trait object is not `Debug`, so `ServerConfig` prints its name.
+        assert!(
+            format!("{config:?}").contains("fixture"),
+            "the debug impl names the injected backend"
+        );
     }
 
     #[test]

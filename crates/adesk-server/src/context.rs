@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use adesk_app_registry::{AppRegistry, Correlator};
+use adesk_a11y::AccessibilityService;
 use adesk_compositor::CompositorHandle;
 use adesk_core::Point;
 use adesk_notify::NotificationService;
@@ -32,6 +33,9 @@ pub struct ServerContext {
     /// Notification store + event inbox (§5.9/§5.10); the store is mutated only
     /// by the §5.9 handlers, the inbox is fed by the event pump.
     pub notify: NotificationService,
+    /// Accessibility (text) view of a window's UI (§5.11); one runtime-scoped
+    /// service, driven only by the §5.11 handlers (never by the event pump).
+    pub accessibility: AccessibilityService,
     /// Application registry (shared by list/get/launch).
     pub registry: Arc<AppRegistry>,
     /// Launch → window correlator; shared with the registry's clock.
@@ -58,6 +62,7 @@ impl ServerContext {
         compositor: CompositorHandle,
         observer: ObserverService,
         notify: NotificationService,
+        accessibility: AccessibilityService,
         registry: Arc<AppRegistry>,
         correlator: Arc<Mutex<Correlator>>,
     ) -> ServerContext {
@@ -66,6 +71,7 @@ impl ServerContext {
             compositor,
             observer,
             notify,
+            accessibility,
             registry,
             correlator,
             subscriptions: SubscriptionRegistry::new(),

@@ -12,12 +12,15 @@
 //! - `activate_window` / `close_window` are runtime-native (never synthesized
 //!   input); all §5.5 methods are the only ones that touch the seat.
 //!
-//! `adesk_proto::Method` is a *total* enum over §5.1–§5.7, so an unknown method
+//! `adesk_proto::Method` is a *total* enum over §5.1–§5.11, so an unknown method
 //! name can only arise while decoding: `Method::from_parts` returns
 //! `ProtoError::UnknownMethod`, which [`crate::error`] maps to the
 //! `unknown_method` AGP code before a request ever reaches this router. The
 //! match in `route` therefore needs no catch-all arm.
 
+/// §5.11 accessibility methods (`accessibility_tree`, `find_accessible`,
+/// `invoke_accessible_action`).
+pub mod accessibility;
 /// §5.2 application methods (`list_apps`, `get_app`, `launch_app`).
 pub mod apps;
 /// §5.4 capture and observation methods (`capture_window`, `capture_region`,
@@ -95,7 +98,7 @@ impl Dispatcher {
 
 /// Routes one decoded request to its §5 group handler and encodes the result.
 ///
-/// One arm per `adesk_proto::Method` variant (34 methods, `docs/protocol.md` §5);
+/// One arm per `adesk_proto::Method` variant (37 methods, `docs/protocol.md` §5);
 /// the result is serialized by [`ResponseFrame::result`], whose `ProtoError`
 /// becomes a [`ServerError`] through `?`.
 async fn route(
@@ -252,6 +255,19 @@ async fn route(
         // §5.10 event waits
         Method::WaitForEvents(params) => {
             let result = events::wait_for_events(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        // §5.11 accessibility
+        Method::AccessibilityTree(params) => {
+            let result = accessibility::accessibility_tree(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        Method::FindAccessible(params) => {
+            let result = accessibility::find_accessible(&ctx, params).await?;
+            Ok(ResponseFrame::result(id, &result)?)
+        }
+        Method::InvokeAccessibleAction(params) => {
+            let result = accessibility::invoke_accessible_action(&ctx, params).await?;
             Ok(ResponseFrame::result(id, &result)?)
         }
     }

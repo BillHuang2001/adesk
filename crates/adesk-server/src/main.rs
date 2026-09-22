@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use adesk_compositor::XkbSettings;
-use adesk_server::config::{parse_renderer, parse_size, ServerConfig};
+use adesk_server::config::{parse_accessibility, parse_renderer, parse_size, ServerConfig};
 use adesk_server::Server;
 
 /// ADesk — AI-native headless Wayland runtime (AGP server).
@@ -25,6 +25,9 @@ struct Cli {
     /// Renderer: `auto`, `gl` or `pixman`.
     #[arg(long, env = "ADESK_RENDERER", value_name = "KIND")]
     renderer: Option<String>,
+    /// Accessibility backend: `auto` (connect lazily) or `off` (never touch D-Bus).
+    #[arg(long, env = "ADESK_ACCESSIBILITY", value_name = "MODE")]
+    accessibility: Option<String>,
     /// xkb layout list (e.g. `us`, `de,us`).
     #[arg(long, env = "ADESK_XKB_LAYOUT", value_name = "NAME")]
     xkb_layout: Option<String>,
@@ -104,6 +107,11 @@ fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
             .map_err(|message| anyhow::anyhow!("invalid --renderer: {message}"))?;
         config = config.with_renderer(kind);
     }
+    if let Some(accessibility) = &cli.accessibility {
+        let kind = parse_accessibility(accessibility)
+            .map_err(|message| anyhow::anyhow!("invalid --accessibility: {message}"))?;
+        config = config.with_accessibility(kind);
+    }
     if cli.xkb_layout.is_some()
         || cli.xkb_variant.is_some()
         || cli.xkb_model.is_some()
@@ -166,12 +174,14 @@ mod tests {
     use super::*;
     use adesk_compositor::RendererKind;
     use adesk_core::Size;
+    use adesk_server::config::AccessibilityKind;
 
     fn cli() -> Cli {
         Cli {
             socket: None,
             output: None,
             renderer: None,
+            accessibility: None,
             xkb_layout: None,
             xkb_variant: None,
             xkb_model: None,
@@ -226,6 +236,26 @@ mod tests {
         bad_renderer.renderer = Some("vulkan".to_owned());
         let error = build_config(&bad_renderer).unwrap_err().to_string();
         assert!(error.contains("--renderer"), "{error}");
+
+        let mut bad_accessibility = cli();
+        bad_accessibility.accessibility = Some("on".to_owned());
+        let error = build_config(&bad_accessibility).unwrap_err().to_string();
+        assert!(error.contains("--accessibility"), "{error}");
+    }
+
+    #[test]
+    fn accessibility_flag_selects_the_backend() {
+        let baseline = build_config(&cli()).unwrap();
+        assert_eq!(
+            baseline.accessibility,
+            AccessibilityKind::Auto,
+            "an unset flag keeps the `auto` default"
+        );
+
+        let mut cli = cli();
+        cli.accessibility = Some("off".to_owned());
+        let config = build_config(&cli).unwrap();
+        assert_eq!(config.accessibility, AccessibilityKind::Off);
     }
 
     #[test]

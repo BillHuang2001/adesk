@@ -170,6 +170,7 @@ dependencies = [
 name = "adesk-server"
 version = "0.1.0"
 dependencies = [
+ "adesk-a11y",
  "adesk-app-registry",
  "adesk-client",
  "adesk-compositor",
@@ -200,6 +201,7 @@ dependencies = [
 name = "adesk-testkit"
 version = "0.1.0"
 dependencies = [
+ "adesk-a11y",
  "adesk-app-registry",
  "adesk-client",
  "adesk-compositor",
