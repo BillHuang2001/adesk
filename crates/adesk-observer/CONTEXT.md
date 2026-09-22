@@ -105,7 +105,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - A window-scoped event for an unknown window (commit, title, activation, popup, focus) creates its `WindowTemporalState` on demand, so `window_state()`/`snapshot()` can contain a window the observer never saw a `WindowCreated` for; a later `resync` removes it if the snapshot does not cover it.
 ## Status
 Implementation-complete: every module body, wait loop, resync path and frozen spec body is implemented, and the crate contains no `todo!()`.
-Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets --no-deps -- -D warnings` clean; `cargo doc -p adesk-observer --no-deps --document-private-items` warning-free; `cargo test -p adesk-observer` → 102 passed, 0 failed, 0 ignored (62 lib unit + 39 integration specs + 1 doctest).
+Validation (`./scripts/dev.sh`): `cargo check -p adesk-observer --all-targets` warning-free; `cargo clippy -p adesk-observer --all-targets --no-deps -- -D warnings` clean; `cargo doc -p adesk-observer --no-deps --document-private-items` warning-free; `cargo test -p adesk-observer` → 104 passed, 0 failed, 0 ignored (64 lib unit + 39 integration specs + 1 doctest).
 Production `src/service.rs` is ~810 lines plus a cohesive inline test module (1556 lines total); `src/waiter.rs` is 952 lines.
 There are zero `#[allow(dead_code)]` attributes in `src/`; only `tests/common/mod.rs` keeps one (shared fixture module, each test binary uses a subset).
 ## Notes for Agents
