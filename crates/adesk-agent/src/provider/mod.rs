@@ -243,6 +243,7 @@ pub(crate) fn test_context(task: &str) -> AgentContext {
         recent_actions: Vec::new(),
         recent_events: Vec::new(),
         observation: None,
+        accessibility: None,
         last_error: None,
         image: None,
         keyframe: None,

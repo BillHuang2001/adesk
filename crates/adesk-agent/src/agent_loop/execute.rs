@@ -230,26 +230,20 @@ impl<C: AgentClient, P: LlmProvider> AgentLoop<C, P> {
                 // `client_call!` never sees them and records no failure. Every
                 // other error keeps the generic `ErrorClass` policy: retryable
                 // errors are retried, anything else fails the step.
-                let outcome = client_call!(
-                    self,
-                    step,
-                    kind,
-                    execution.attempts,
-                    async {
-                        match self.client.accessibility_tree(&request).await {
-                            Ok(outcome) => Ok(Some(outcome)),
-                            Err(error) if is_accessibility_unavailable(&error) => {
-                                warn!(
-                                    step,
-                                    error = %error,
-                                    "accessibility tree unavailable, continuing without it"
-                                );
-                                Ok(None)
-                            }
-                            Err(error) => Err(error),
+                let outcome = client_call!(self, step, kind, execution.attempts, async {
+                    match self.client.accessibility_tree(&request).await {
+                        Ok(outcome) => Ok(Some(outcome)),
+                        Err(error) if is_accessibility_unavailable(&error) => {
+                            warn!(
+                                step,
+                                error = %error,
+                                "accessibility tree unavailable, continuing without it"
+                            );
+                            Ok(None)
                         }
+                        Err(error) => Err(error),
                     }
-                )?;
+                })?;
                 match outcome {
                     Some(outcome) => {
                         let window = outcome.window_id;
