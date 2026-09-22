@@ -39,11 +39,13 @@ pub enum ActionKind {
     ActivateWindow,
     /// `close_window` (runtime-native).
     CloseWindow,
+    /// `invoke_accessible_action` (runtime-native accessibility actuation).
+    InvokeAccessibleAction,
 }
 
 impl ActionKind {
     /// Every kind, in protocol order (input methods, then runtime-native ones).
-    pub const ALL: [ActionKind; 13] = [
+    pub const ALL: [ActionKind; 14] = [
         ActionKind::PointerMove,
         ActionKind::Click,
         ActionKind::DoubleClick,
@@ -57,6 +59,7 @@ impl ActionKind {
         ActionKind::TypeText,
         ActionKind::ActivateWindow,
         ActionKind::CloseWindow,
+        ActionKind::InvokeAccessibleAction,
     ];
 
     /// AGP method name (`snake_case`), used verbatim as the overlay label.
@@ -75,6 +78,7 @@ impl ActionKind {
             ActionKind::TypeText => "type_text",
             ActionKind::ActivateWindow => "activate_window",
             ActionKind::CloseWindow => "close_window",
+            ActionKind::InvokeAccessibleAction => "invoke_accessible_action",
         }
     }
 }

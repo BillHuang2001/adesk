@@ -22,6 +22,7 @@ name = "adesk-test-app"
 path = "src/bin/adesk-test-app.rs"
 
 [dependencies]
+adesk-a11y.workspace = true
 adesk-app-registry.workspace = true
 adesk-client.workspace = true
 adesk-compositor.workspace = true

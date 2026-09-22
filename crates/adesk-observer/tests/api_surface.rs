@@ -63,13 +63,18 @@ fn observe_spec_builders_and_conditions() {
 
 #[test]
 fn action_kind_vocabulary_matches_agp() {
-    assert_eq!(ActionKind::ALL.len(), 13);
+    assert_eq!(ActionKind::ALL.len(), 14);
     assert_eq!(ActionKind::Click.as_str(), "click");
     assert_eq!(ActionKind::TypeText.as_str(), "type_text");
     assert_eq!(ActionKind::ActivateWindow.as_str(), "activate_window");
+    assert_eq!(
+        ActionKind::InvokeAccessibleAction.as_str(),
+        "invoke_accessible_action"
+    );
     assert!(ActionKind::Click.is_input());
     assert!(!ActionKind::ActivateWindow.is_input());
     assert!(!ActionKind::CloseWindow.is_input());
+    assert!(!ActionKind::InvokeAccessibleAction.is_input());
     assert!(ActionKind::ALL.iter().all(|kind| !kind.as_str().is_empty()));
 }
 

@@ -76,8 +76,8 @@ pub fn observer_condition(condition: ProtoCondition) -> ObserverCondition {
 /// `adesk_observer::ActionKind` → `adesk_inspector::ActionKind`.
 ///
 /// The two vocabularies are identical (11 input methods + `ActivateWindow` +
-/// `CloseWindow`); this mapping exists only because neither crate depends on
-/// the other.
+/// `CloseWindow` + `InvokeAccessibleAction`); this mapping exists only because
+/// neither crate depends on the other.
 pub fn inspector_action_kind(kind: ObserverActionKind) -> adesk_inspector::ActionKind {
     match kind {
         ObserverActionKind::PointerMove => adesk_inspector::ActionKind::PointerMove,
@@ -93,6 +93,9 @@ pub fn inspector_action_kind(kind: ObserverActionKind) -> adesk_inspector::Actio
         ObserverActionKind::TypeText => adesk_inspector::ActionKind::TypeText,
         ObserverActionKind::ActivateWindow => adesk_inspector::ActionKind::ActivateWindow,
         ObserverActionKind::CloseWindow => adesk_inspector::ActionKind::CloseWindow,
+        ObserverActionKind::InvokeAccessibleAction => {
+            adesk_inspector::ActionKind::InvokeAccessibleAction
+        }
     }
 }
 
@@ -367,7 +370,7 @@ mod tests {
 
     #[test]
     fn inspector_action_kind_maps_every_variant() {
-        assert_eq!(ObserverActionKind::ALL.len(), 13);
+        assert_eq!(ObserverActionKind::ALL.len(), 14);
         assert_eq!(
             ObserverActionKind::ALL.len(),
             InspectorActionKind::ALL.len()

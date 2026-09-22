@@ -161,7 +161,11 @@ fn public_signatures_are_stable() {
         .with_event_channel_capacity(64)
         .with_shutdown_timeout(Duration::from_secs(3))
         .with_socket_name("wayland-adesk-api")
-        .with_apply_env(false);
+        .with_apply_env(false)
+        .with_viewer(false)
+        .with_accessibility_source(std::sync::Arc::new(adesk_a11y::FixtureSource::new(
+            adesk_a11y::node("frame", "API").build(),
+        )));
     assert_eq!(config.output_size, Size::new(800, 600));
     assert_eq!(config.renderer, RendererKind::Pixman);
     assert_eq!(
@@ -175,4 +179,12 @@ fn public_signatures_are_stable() {
     assert_eq!(config.shutdown_timeout, Duration::from_secs(3));
     assert_eq!(config.socket_name.as_deref(), Some("wayland-adesk-api"));
     assert!(!config.apply_env);
+    assert!(!config.viewer);
+    assert_eq!(
+        config
+            .accessibility_source
+            .as_ref()
+            .map(|source| source.name()),
+        Some("fixture")
+    );
 }

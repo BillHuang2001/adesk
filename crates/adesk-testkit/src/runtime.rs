@@ -16,6 +16,8 @@
 //! ServerConfig::with_app_dirs(self, dirs: Vec<PathBuf>) -> ServerConfig   // dirs passed verbatim
 //!                                                                        // to RegistryOptions::with_search_dirs
 //! ServerConfig::without_viewer(self) -> ServerConfig                     // VAP endpoint opt-out
+//! ServerConfig::with_accessibility_source(self, Arc<dyn adesk_a11y::AccessibilitySource>) -> ServerConfig
+//!                                                                        // §5.11 backend injection
 //! Server::start(ServerConfig) -> impl Future<Output = Result<RunningServer, _>>   // server spawns the compositor
 //! RunningServer::socket_path(&self) -> &Path
 //! RunningServer::compositor(&self) -> &CompositorHandle
@@ -37,9 +39,12 @@
 //! If the landed server differs, adapt only [`TestRuntime::start_with`] and
 //! [`TestRuntime::shutdown`]; the rest of the harness is independent of it.
 
+use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use adesk_a11y::AccessibilitySource;
 use adesk_app_registry::AppRegistry;
 use adesk_client::{CaptureRequest, Client};
 use adesk_compositor::{CompositorConfig, CompositorHandle, RendererKind, RuntimeCommand};
@@ -76,7 +81,10 @@ pub fn expected_window_geometry(output_size: Size) -> Rect {
 /// Defaults are deterministic and isolated: `1280x800`, pixman, no app dirs beyond the
 /// env's own fixture dir, 4096-slot event broadcast, 5 s shutdown bound, process env
 /// scoped to the runtime, the env's private AGP socket and the VAP viewer enabled.
-#[derive(Debug, Clone)]
+///
+/// `Debug` is implemented by hand because [`TestRuntimeConfig::accessibility_source`] is
+/// a trait object (the seam has no `Debug` bound); it prints the backend's short name.
+#[derive(Clone)]
 pub struct TestRuntimeConfig {
     /// Virtual output size (default [`DEFAULT_OUTPUT_SIZE`]).
     pub output_size: Size,
@@ -114,6 +122,35 @@ pub struct TestRuntimeConfig {
     /// When `false`, [`TestRuntime::start_with`] calls `ServerConfig::without_viewer`, so the
     /// runtime binds no viewer socket.
     pub viewer: bool,
+    /// Accessibility backend override (default `None`, the server's `auto` selection).
+    ///
+    /// When set, [`TestRuntime::start_with`] forwards it to
+    /// `ServerConfig::accessibility_source`, so the whole runtime's §5.11 methods run
+    /// against this deterministic backend instead of a real AT-SPI bus.
+    pub accessibility_source: Option<Arc<dyn AccessibilitySource>>,
+}
+
+impl fmt::Debug for TestRuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TestRuntimeConfig")
+            .field("output_size", &self.output_size)
+            .field("renderer", &self.renderer)
+            .field("app_dirs", &self.app_dirs)
+            .field("event_channel_capacity", &self.event_channel_capacity)
+            .field("shutdown_timeout", &self.shutdown_timeout)
+            .field("socket_name", &self.socket_name)
+            .field("apply_env", &self.apply_env)
+            .field("agp_socket", &self.agp_socket)
+            .field("viewer", &self.viewer)
+            .field(
+                "accessibility_source",
+                &self
+                    .accessibility_source
+                    .as_ref()
+                    .map(|source| source.name()),
+            )
+            .finish()
+    }
 }
 
 impl Default for TestRuntimeConfig {
@@ -128,6 +165,7 @@ impl Default for TestRuntimeConfig {
             apply_env: true,
             agp_socket: None,
             viewer: true,
+            accessibility_source: None,
         }
     }
 }
@@ -201,6 +239,20 @@ impl TestRuntimeConfig {
     /// (`adesk_server::config::viewer_socket_sibling` is never created).
     pub fn with_viewer(mut self, enabled: bool) -> TestRuntimeConfig {
         self.viewer = enabled;
+        self
+    }
+
+    /// Overrides the runtime's accessibility backend (default `None`).
+    ///
+    /// Forwarded to `ServerConfig::accessibility_source`, so every §5.11 method
+    /// (`accessibility_tree`, `find_accessible`, `invoke_accessible_action`) runs
+    /// against `source` — a deterministic [`adesk_a11y::FixtureSource`], typically —
+    /// with no accessibility bus, toolkit or display required.
+    pub fn with_accessibility_source(
+        mut self,
+        source: Arc<dyn AccessibilitySource>,
+    ) -> TestRuntimeConfig {
+        self.accessibility_source = Some(source);
         self
     }
 }
@@ -296,6 +348,9 @@ impl TestRuntime {
         let mut server_config = ServerConfig::new(agp_socket, compositor).with_app_dirs(app_dirs);
         if !config.viewer {
             server_config = server_config.without_viewer();
+        }
+        if let Some(source) = config.accessibility_source.clone() {
+            server_config = server_config.with_accessibility_source(source);
         }
 
         let running = match Server::start(server_config).await {

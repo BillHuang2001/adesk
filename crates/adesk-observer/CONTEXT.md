@@ -17,7 +17,7 @@ Everything is re-exported flat at the crate root; `adesk_observer::<Name>`.
 - `Condition { Change, Quiet { quiet_ms }, Timeout }`.
 - Image parameters (`include_image`, `region`, `max_dimension`) are deliberately absent: the server renders after the wait resolves.
 ### Actions (`src/actions.rs`)
-- `ActionKind` (13 variants, `ALL`, `is_input()`, `as_str()` = AGP method name), `ActionRecord { id, kind, window_id, position, seq, ts_ms }`.
+- `ActionKind` (14 variants): the 11 AGP input methods plus the runtime-native `ActivateWindow`, `CloseWindow` and `InvokeAccessibleAction` (wire name `invoke_accessible_action`); `ALL: [ActionKind; 14]`, `as_str()` = AGP method name; `is_input()` is `false` for the three runtime-native kinds. `ActionRecord { id, kind, window_id, position, seq, ts_ms }`.
 - `ActionRegistry`: cloneable, thread-safe, ids monotonic from 1, `record`, `get`, `seq_of`, `contains`, `len`, `is_empty`, `last`, `records`.
 ### State (`src/state.rs`)
 - `WindowTemporalState { window_id, last_commit_seq, last_commit_at, last_damage, last_meaningful_change_at, last_input_at, quiet_since, commit_count, pending_observation, geometry, state_uncertain }`.

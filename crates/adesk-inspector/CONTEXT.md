@@ -30,8 +30,9 @@ public too.
   plus `new(frame)`, `builder(frame)`, `size()`; `InspectionInputBuilder` with `windows`, `active`,
   `cursor`, `cursor_at`, `actions`, `damage`, `commit`, `build`.
 - `ActionMarker { action_id: ActionId, kind: ActionKind, position: Option<Point>, age_ms: u64 }`.
-- `ActionKind` — 13 variants: the 11 AGP input methods plus `ActivateWindow`, `CloseWindow`;
-  `ALL`, `as_str()` (AGP method name, used as the label).
+- `ActionKind` — 14 variants: the 11 AGP input methods plus the runtime-native `ActivateWindow`,
+  `CloseWindow` and `InvokeAccessibleAction` (after `CloseWindow`); `ALL: [ActionKind; 14]`,
+  `as_str()` (AGP method name, used as the label). Mirrors `adesk_observer::ActionKind` 1:1.
 - `CommitInfo { commit_seq: u64, age_ms: u64 }`.
 - `OverlayStyle` (`Copy`): `font_scale`, `padding`, `text`, `plate`, `outline`, `fill`, `focus`,
   `cursor`, `action`, `timing`; `scale()`/`pad()` return clamped values (`1..=8`, `1..=16`).

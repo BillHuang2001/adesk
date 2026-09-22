@@ -31,6 +31,10 @@ adesk-observer.workspace = true
 # `NotificationService` lives in `ServerContext`, the §5.9 handlers mutate it and
 # publish the resulting events, and the event pump feeds its inbox.
 adesk-notify.workspace = true
+# Accessibility (text) subsystem (`docs/protocol.md` §5.11): one
+# `AccessibilityService` lives in `ServerContext` and the §5.11 handlers drive it;
+# it is read strictly on demand (no accessibility event, no event-pump coupling).
+adesk-a11y.workspace = true
 adesk-app-registry.workspace = true
 adesk-inspector.workspace = true
 adesk-render.workspace = true
