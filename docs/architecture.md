@@ -311,3 +311,24 @@ Seat and input:
 - `NotificationService` is runtime-scoped and cheap-clone (one `Arc<Inner>` per
   runtime, owned by `ServerContext`), mirroring `ObserverService`. Both are fed by
   the one pump task; neither spawns background tasks of its own.
+
+## 12. Accessibility (`adesk-a11y`)
+
+- The runtime's text view of a window's UI is one `AccessibilityService` in
+  `ServerContext`, cheap-clone (one `Arc<Inner>` per runtime), mirroring
+  `ObserverService` and `NotificationService` (`docs/accessibility.md`).
+- It is **not** on the compositor thread and owns no compositor state. It is D-Bus
+  I/O plus an element-handle → `AccessibleId` registry, driven only by the §5.11
+  request handlers; it spawns no background task, and the event pump and the observer
+  are untouched (there are no accessibility event kinds).
+- Window → accessible correlation happens in the server, from the window-model
+  snapshot (`QueryState`, §3) the server already holds — never in the compositor.
+  Failure to correlate is reported as `not_supported`, never guessed.
+- Backend selection is a runtime option (`--accessibility auto|off`,
+  `ADESK_ACCESSIBILITY`). `auto` (the default) connects lazily on first use and
+  degrades to `not_supported` when there is no accessibility bus; `off` never touches
+  D-Bus.
+- The `ServerBuilder` also accepts an injected source, so tests and tools supply a
+  deterministic fixture backend instead of a real bus.
+- The request path is bounded — `max_depth`, `max_nodes` and a backend call timeout —
+  so an unresponsive or hostile client application can never block the runtime.

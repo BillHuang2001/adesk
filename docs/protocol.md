@@ -104,6 +104,18 @@ Notification = {"id": u64, "source": string | null, "title": string, "body": str
                 "posted_seq": u64, "posted_ts_ms": u64,
                 "dismissed": bool, "closed_seq": u64 | null,
                 "close_reason": string | null, "timeout_ms": u64 | null}
+AccessibleState = "enabled" | "sensitive" | "showing" | "visible" | "focusable" | "focused"
+                | "checkable" | "checked" | "selected" | "selectable" | "expandable" | "expanded"
+                | "collapsed" | "editable" | "multiline" | "read_only" | "pressed" | "active"
+                | "busy" | "modal" | "defunct" | "invalid"
+AccessibleNode  = {"id": u64, "role": string, "name": string, "description": string | null,
+                   "value": string | null, "states": [AccessibleState], "bounds": Rect | null,
+                   "actions": [string], "children": [AccessibleNode]}
+AccessibleTree  = {"window_id": u64, "app_id": string | null, "app_name": string | null,
+                   "root": AccessibleNode, "node_count": u32, "truncated": bool}
+AccessibleMatch = {"id": u64, "role": string, "name": string, "value": string | null,
+                   "states": [AccessibleState], "bounds": Rect | null, "actions": [string],
+                   "path": [string]}
 ```
 
 `changed_regions` is the union of surface damage observed in the window since the
@@ -139,9 +151,19 @@ with an AGP error instead (`unknown_window` when the window vanished,
 `render_failed` for a renderer failure). A window that is tracked but whose surface
 currently holds no buffer renders as a clear frame, i.e. a normal non-null image.
 
+The accessibility types describe a window's toolkit accessibility tree (§5.11).
+`AccessibleNode.role` is the toolkit's role name normalized to lowercase snake_case,
+a free string rather than a closed vocabulary. `bounds` is WINDOW-RELATIVE pixels,
+relative to the window's own accessible frame (not to the whole application tree).
+`value` is the text/value content of a value-bearing role and `null` otherwise;
+`actions` are the action names the element exposes. `AccessibleMatch.path` is the
+ancestor names from the window root down to, but excluding, the matched node.
+`AccessibleTree.node_count` counts every node in the returned tree, the root included,
+and `truncated` reports that a depth or node bound stopped the walk.
+
 ## 5. Methods
 
-The seven tables below are the complete method set of this runtime: 29 methods, and
+The ten tables below are the complete method set of this runtime: 37 methods, and
 a request naming anything else is answered with `unknown_method` (§1, §6) and never
 dispatched. The set is fixed rather than negotiated — there is no capability
 handshake — but §7 still lets a later runtime add methods without bumping
@@ -419,6 +441,56 @@ subscription streams every matching event as it happens, while `wait_for_events`
 one request that answers once — which is what lets an agent stay entirely idle
 between wakeups.
 
+### 5.11 Accessibility (text view of the desktop)
+
+| Method | Params | Result |
+|---|---|---|
+| `accessibility_tree` | `{"window_id": u64?, "max_depth": u32 = 12, "max_nodes": u32 = 2000, "include_bounds": bool = true, "include_states": bool = true, "include_actions": bool = true, "include_text": bool = true}` | `{"tree": AccessibleTree, "text": string}` |
+| `find_accessible` | `{"window_id": u64?, "role": string?, "name": string?, "name_contains": string?, "value_contains": string?, "max_results": u32 = 50}` | `{"window_id": u64, "matches": [AccessibleMatch], "truncated": bool}` |
+| `invoke_accessible_action` | `{"node_id": u64, "action": string?}` | `{"action_id": u64, "node_id": u64, "action": string}` |
+
+These three methods are the runtime's text-only view of a window's UI: instead of
+pixels, the agent reads the window's toolkit accessibility tree (AT-SPI2 over D-Bus)
+as structured nodes and as a rendered outline (`docs/accessibility.md`). Observation
+is strictly on demand — there are no accessibility events and no accessibility
+`EventKind`.
+
+- `window_id` omitted resolves like an unscoped observation (§5.4): the runtime's
+  active window, else the keyboard-focus window; an unknown `window_id` fails with
+  `unknown_window`.
+- `max_depth` bounds recursion below the window root (`0` = the root alone);
+  `max_nodes` bounds the total node count. Hitting either sets
+  `AccessibleTree.truncated` and stops the walk — a partial tree is returned, never
+  an error.
+- The projection flags remove data from the returned nodes *and* from the rendered
+  text: with `include_states`/`include_bounds`/`include_actions` false the
+  corresponding field is an empty list (or `null`). `include_text = false` returns
+  `"text": ""`.
+- `text` is the rendered outline of the returned tree: one line per node,
+  `\n`-separated, two spaces of indent per level, the root at depth 0. Grammar:
+  `{role} "{name}"`, then ` value="{value}"` when the node has a value, then
+  ` states=[{s1},{s2}]` and ` actions=[{a1},{a2}]` when those lists are non-empty,
+  then ` bounds={x},{y},{w},{h}` when known, then ` id={id}`. Inside names and
+  values, `\`, `"`, newline and tab are escaped as `\\`, `\"`, `\n`, `\t`.
+- No accessibility backend is available, or no accessible subtree correlates with the
+  window: `not_supported` — never a guessed or empty tree.
+
+`find_accessible` filters the same tree. Its filters are AND-ed and an omitted filter
+matches everything: `role` is an exact lowercase role name, `name` is an exact match,
+and `name_contains`/`value_contains` are case-insensitive substrings of `name`/`value`
+(a node without a value never matches `value_contains`). Matches are returned in tree
+(pre-order) order, at most `max_results`; `truncated` reports that more matches
+existed. `max_results = 0` fails with `invalid_request`.
+
+`invoke_accessible_action` invokes the element's action through the toolkit's
+accessibility `Action` interface: it is runtime-native actuation, not synthesized
+input (`docs/architecture.md` §12). `action` omitted or `null` means the element's
+default (first) action, and the response's `action` is the name actually invoked. A
+node id the runtime does not know, or an element that has since disappeared, fails
+with `unknown_accessible`; an action name the element does not expose fails with
+`invalid_request`; with no accessibility backend it fails with `not_supported`. The
+returned `action_id` is an ordinary AGP action id, usable with `after_action` (§5.4).
+
 ## 6. Errors
 
 ```jsonc
@@ -426,8 +498,8 @@ between wakeups.
 ```
 
 Codes: `invalid_request`, `unknown_method`, `unknown_window`, `unknown_app`,
-`unknown_notification`, `launch_failed`, `capture_failed`, `render_failed`,
-`timeout`, `not_supported`, `busy`, `internal`, `shutting_down`,
+`unknown_notification`, `unknown_accessible`, `launch_failed`, `capture_failed`,
+`render_failed`, `timeout`, `not_supported`, `busy`, `internal`, `shutting_down`,
 `protocol_version_mismatch`.
 
 The server MUST answer every request with exactly one response frame and MUST NOT

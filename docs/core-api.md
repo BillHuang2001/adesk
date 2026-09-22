@@ -19,10 +19,11 @@ pub struct WindowId(pub u64);   // stable, monotonic, never reused
 pub struct ActionId(pub u64);   // one per agent input action
 pub struct LaunchId(pub u64);   // one per launch_app call
 pub struct NotificationId(pub u64); // one per post_notification call
+pub struct AccessibleId(pub u64);   // one per accessible element handle
 pub struct AppId(pub String);   // desktop-file id, e.g. "org.mozilla.firefox"
 ```
 
-The four numeric ids are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
+The five numeric ids are `Copy`/`Clone`, `Debug`, `PartialEq`, `Eq`, `Hash`, `Serialize`,
 `Deserialize` (transparent), with `Display` and `From`/`Into` for their inner type.
 `AppId` is `Clone` (not `Copy`), `Display`, `From<String>`, `From<&str>`, `AsRef<str>`,
 `as_str()`, transparent serde, `Ord`.
@@ -234,13 +235,63 @@ optional fields serialize as JSON `null` (no `skip_serializing_if`). `hints` is 
 notification subsystem that produces and stores these lives in `adesk-notify`
 (`docs/notifications.md`); core carries only the vocabulary.
 
+## Accessibility
+
+```rust
+pub enum AccessibleState {
+    Enabled, Sensitive, Showing, Visible, Focusable, Focused, Checkable, Checked,
+    Selected, Selectable, Expandable, Expanded, Collapsed, Editable, Multiline,
+    ReadOnly, Pressed, Active, Busy, Modal, Defunct, Invalid,
+}
+
+pub struct AccessibleNode {
+    pub id: AccessibleId,
+    pub role: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub value: Option<String>,
+    pub states: Vec<AccessibleState>,
+    pub bounds: Option<Rect>,            // window-relative to the window's accessible frame
+    pub actions: Vec<String>,
+    pub children: Vec<AccessibleNode>,
+}
+
+pub struct AccessibleTree {
+    pub window_id: WindowId,
+    pub app_id: Option<AppId>,
+    pub app_name: Option<String>,
+    pub root: AccessibleNode,
+    pub node_count: u32,                 // includes the root
+    pub truncated: bool,                 // a depth or node bound stopped the walk
+}
+
+pub struct AccessibleMatch {
+    pub id: AccessibleId,
+    pub role: String,
+    pub name: String,
+    pub value: Option<String>,
+    pub states: Vec<AccessibleState>,
+    pub bounds: Option<Rect>,
+    pub actions: Vec<String>,
+    pub path: Vec<String>,               // ancestor names, root down to (excluding) the match
+}
+```
+
+The field names and shapes are exactly the AGP accessibility types
+(`docs/protocol.md` §4); optional fields serialize as JSON `null` (no
+`skip_serializing_if`). `role` is the toolkit's own role name normalized to lowercase
+snake_case — a free string, not an enum, so the vocabulary stays lossless and forward
+compatible — while `states` is the runtime's closed state vocabulary. Every node id is
+a runtime-assigned `AccessibleId`; the AT-SPI and D-Bus handles behind them stay in
+`adesk-a11y` (`docs/accessibility.md`). Core carries only the value vocabulary.
+
 ## Errors
 
 ```rust
 pub enum ErrorCode {
     InvalidRequest, UnknownMethod, UnknownWindow, UnknownApp, UnknownNotification,
-    LaunchFailed, CaptureFailed, RenderFailed, Timeout, NotSupported, Busy, Internal,
-    ShuttingDown, ProtocolVersionMismatch,
+    UnknownAccessible, LaunchFailed, CaptureFailed, RenderFailed, Timeout, NotSupported,
+    Busy, Internal, ShuttingDown, ProtocolVersionMismatch,
 }
 impl ErrorCode { pub fn as_str(&self) -> &'static str; }   // snake_case wire names
 
@@ -250,6 +301,7 @@ impl Error {
     pub fn invalid_request(message: impl Into<String>) -> Error;
     pub fn unknown_window(id: WindowId) -> Error;
     pub fn unknown_app(id: &AppId) -> Error;
+    pub fn unknown_accessible(id: AccessibleId) -> Error;
     pub fn internal(message: impl Into<String>) -> Error;
     pub fn not_supported(message: impl Into<String>) -> Error;
     pub fn timeout(message: impl Into<String>) -> Error;
