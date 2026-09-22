@@ -84,5 +84,11 @@ gtk4 = "0.11"
 # conventional `adw` crate name so `use adw::prelude::*` works.
 adw = { package = "libadwaita", version = "0.9" }
 
+# --- accessibility (`adesk-a11y`) ---
+# AT-SPI2 client over D-Bus. `zbus` (pure Rust, no libdbus) is the transport; the
+# `tokio` feature drives it on the workspace's tokio runtime instead of zbus's own
+# async-io reactor. Only `adesk-a11y` depends on this.
+atspi = { version = "0.30", features = ["tokio"] }
+
 [profile.release]
 debug = 1
