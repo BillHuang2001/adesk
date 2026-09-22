@@ -2,10 +2,10 @@
 
 ## Intent
 
-`src/dispatch/` implements every AGP method of `docs/protocol.md` §5.1–§5.10: one handler per method, one response per request, no panic on a request path.
+`src/dispatch/` implements every AGP method of `docs/protocol.md` §5.1–§5.11: one handler per method, one response per request, no panic on a request path.
 `mod.rs` owns the router (`Dispatcher::dispatch`), the error→wire conversion (`error_response`) and the outbound-sink seam.
-Each group file owns one protocol section: `runtime.rs` §5.1, `apps.rs` §5.2, `windows.rs` §5.3, `capture.rs` §5.4, `input.rs` §5.5, `events.rs` §5.6 + §5.10, `inspect.rs` §5.7, `notify.rs` §5.9.
-Handlers are thin adapters: they translate proto params into sibling-crate calls (`adesk-compositor`, `adesk-observer`, `adesk-app-registry`, `adesk-inspector`, `adesk-notify`) and never re-implement sibling logic.
+Each group file owns one protocol section: `runtime.rs` §5.1, `apps.rs` §5.2, `windows.rs` §5.3, `capture.rs` §5.4, `input.rs` §5.5, `events.rs` §5.6 + §5.10, `inspect.rs` §5.7, `notify.rs` §5.9, `accessibility.rs` §5.11.
+Handlers are thin adapters: they translate proto params into sibling-crate calls (`adesk-compositor`, `adesk-observer`, `adesk-app-registry`, `adesk-inspector`, `adesk-notify`, `adesk-a11y`) and never re-implement sibling logic.
 
 ## API Surface
 
@@ -45,8 +45,9 @@ Shared internal helpers (not public API):
 | §5.6 `subscribe_events`, `unsubscribe_events` + §5.10 `wait_for_events` | `./events.rs` |
 | §5.7 `inspect_capture`, `inspect_subscribe` | `./inspect.rs` |
 | §5.9 `post_notification`, `list_notifications`, `close_notification`, `invoke_notification_action` | `./notify.rs` |
+| §5.11 `accessibility_tree`, `find_accessible`, `invoke_accessible_action` | `./accessibility.rs` |
 
-34 methods, 34 handlers.
+37 methods, 37 handlers.
 
 ## Constraints
 
@@ -59,6 +60,7 @@ Shared internal helpers (not public API):
 - Sequence numbers of server-synthesized events come from the compositor, never from local state: `launch_app` (§5.2 `AppLaunched`), `inspect.rs`'s `render_frame` (§5.7 `inspect_frame`) and every mutating §5.9 handler each call `windows::reserve_seq` (`RuntimeCommand::ReserveSeq`) — one global monotonic `seq` domain covering compositor- and server-emitted events (`docs/protocol.md` §1), gaps allowed, reuse not. A reserved number may go unused (spawn failure, a dropped or throttled inspect frame, a `close_notification` of an already-dismissed notification). No handler derives a `seq` from the `QueryState` watermark or from a server-private counter; the `inspect_frame` `ts_ms` stays the snapshot's compositor-clock value.
 - §5.9 handlers mutate the `adesk_notify::NotificationService` store and publish the matching `RuntimeEvent` on the compositor broadcast (the one event stream), so §5.6 subscribers and the §5.10 inbox observe it. The `seq` is reserved **before** the store mutation so the stored notification and its event share one `seq`/`ts_ms`; `ts_ms` is `ServerContext::now_ms()`. `close_notification` publishes `notification_closed` **only** when `CloseOutcome::newly_dismissed` is true (a no-op close publishes nothing, leaving a legal `seq` gap); `invoke_notification_action` never dismisses; `list_notifications` is a pure read. A publish send failure means "no subscribers" and is logged at `trace`, never turned into an error.
 - `wait_for_events` (§5.10) bridges the wire `kinds` filter to `adesk_notify::EventWaitSpec` through `crate::translate::proto_event_kind` (`surface_damage` → `surface_commit`; `quiet`/`inspect_frame` have no core emitter and are dropped) and reuses `crate::translate::event_record` (built on `EventPayload::from_runtime`/`to_data`) so a waited event is described exactly like a §5.6 fan-out frame. A timeout is a normal answer (`timed_out: true`, empty `events`), never an error.
+- The three §5.11 handlers share one window-resolution rule (`accessibility::resolve_window`): an explicit `window_id` must be a known window (else `unknown_window`), an omitted one falls back to the active window, else the keyboard-focus window, from the same `QueryState` snapshot, and a runtime with no candidate window fails `unknown_window` ("no active window is available"). `invoke_accessible_action` records `ActionKind::InvokeAccessibleAction` (no window, no position) **before** calling `adesk_a11y`, so the returned `action_id`'s `seq` anchors the invocation causally; a failed invocation leaves a harmless orphan record.
 - Observation methods await the observer first, render only afterwards and only when `include_image` is set; timeouts are observations with `timed_out: true`, never errors.
 - A per-request quiet threshold reaches the observer only when the condition is quiet: `wait_for_quiet` is the only method reading `params.quiet_ms` (proto default 250) into `QuietSpec::quiet_ms`; `observe` carries `quiet_ms` only inside `until: {"type":"quiet","quiet_ms":N}` (required there, no wire default); `wait_for_change` has no quiet field at all.
 - For a non-quiet condition (`change`/`timeout`) the `quiet` evidence flag is therefore computed against the observer's `DEFAULT_QUIET_MS` constant — 250 (`adesk_observer::DEFAULT_QUIET_MS`).
