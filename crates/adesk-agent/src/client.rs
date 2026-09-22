@@ -10,8 +10,8 @@
 //! adapter converts.
 
 use adesk_core::{
-    ActionId, AppId, AppInfo, Button, EventKind, LaunchId, Observation, Position, Rect,
-    RuntimeEvent, Size, WindowId, WindowInfo,
+    AccessibleId, AccessibleMatch, ActionId, AppId, AppInfo, Button, EventKind, LaunchId,
+    Observation, Position, Rect, RuntimeEvent, Size, WindowId, WindowInfo,
 };
 use adesk_proto::ImagePayload;
 use async_trait::async_trait;
@@ -242,6 +242,79 @@ pub struct WaitOutcome {
     pub seq: u64,
 }
 
+/// Parameters of an `accessibility_tree` request (`docs/protocol.md` §5.11).
+///
+/// Reads a window as structured text through the toolkit accessibility stack
+/// instead of pixels; an unset field is left at the protocol's §5.11 default.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessibilityTreeRequest {
+    /// Window to snapshot; `None` resolves to the active/focused window.
+    #[serde(default)]
+    pub window_id: Option<WindowId>,
+    /// Maximum total node count; `None` uses the protocol default.
+    #[serde(default)]
+    pub max_nodes: Option<u32>,
+}
+
+/// Result of `accessibility_tree`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AccessibilityOutcome {
+    /// Window the tree describes.
+    pub window_id: WindowId,
+    /// Number of nodes in the tree, counting every node including the root.
+    pub node_count: u32,
+    /// Whether a depth or node bound stopped the walk early.
+    pub truncated: bool,
+    /// Rendered outline of the returned tree.
+    pub text: String,
+}
+
+/// Parameters of a `find_accessible` request (`docs/protocol.md` §5.11).
+///
+/// The filters are AND-ed; an unset filter matches everything.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindAccessibleRequest {
+    /// Window to search; `None` resolves to the active/focused window.
+    #[serde(default)]
+    pub window_id: Option<WindowId>,
+    /// Exact lowercase role name to match.
+    #[serde(default)]
+    pub role: Option<String>,
+    /// Exact accessible name to match.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Case-insensitive substring of the accessible name.
+    #[serde(default)]
+    pub name_contains: Option<String>,
+    /// Case-insensitive substring of the node's value.
+    #[serde(default)]
+    pub value_contains: Option<String>,
+    /// Maximum number of matches to return.
+    #[serde(default)]
+    pub max_results: Option<u32>,
+}
+
+/// Result of `find_accessible`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FindAccessibleOutcome {
+    /// Window the search was scoped to.
+    pub window_id: WindowId,
+    /// Matching elements in tree (pre-order) order.
+    pub matches: Vec<AccessibleMatch>,
+    /// Whether more matches existed beyond `max_results`.
+    pub truncated: bool,
+}
+
+/// Parameters of an `invoke_accessible_action` request (`docs/protocol.md` §5.11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct InvokeAccessibleActionRequest {
+    /// Element whose action is invoked.
+    pub node_id: AccessibleId,
+    /// Action to invoke; `None` means the element's default action.
+    #[serde(default)]
+    pub action: Option<String>,
+}
+
 /// The AGP operations the agent needs, expressed in domain types.
 ///
 /// Implementations: [`crate::agp::AgpClient`] (real socket) and the
@@ -298,4 +371,28 @@ pub trait AgentClient: Send + Sync {
     /// primitive: [`crate::AgentLoop::run_watch`] uses it to sleep until a
     /// notification wakes it.
     async fn wait_for_events(&self, request: &WaitForEventsRequest) -> Result<WaitOutcome>;
+
+    /// `accessibility_tree` — read a window as structured text through the
+    /// toolkit accessibility stack instead of pixels (`docs/protocol.md` §5.11).
+    async fn accessibility_tree(
+        &self,
+        request: &AccessibilityTreeRequest,
+    ) -> Result<AccessibilityOutcome>;
+
+    /// `find_accessible` — search a window's accessibility tree for the
+    /// elements matching the AND-ed filters (`docs/protocol.md` §5.11).
+    async fn find_accessible(
+        &self,
+        request: &FindAccessibleRequest,
+    ) -> Result<FindAccessibleOutcome>;
+
+    /// `invoke_accessible_action` — actuate an accessible element through the
+    /// toolkit's accessibility action interface (`docs/protocol.md` §5.11).
+    ///
+    /// This is runtime-native actuation, never synthesized input (design
+    /// invariant 3); the returned [`ActionId`] is usable with `after_action`.
+    async fn invoke_accessible_action(
+        &self,
+        request: &InvokeAccessibleActionRequest,
+    ) -> Result<ActionId>;
 }

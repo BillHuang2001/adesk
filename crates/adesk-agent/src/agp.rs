@@ -54,9 +54,10 @@ use adesk_core::{
 use async_trait::async_trait;
 
 use crate::client::{
-    AgentClient, CaptureOutcome, CaptureRequest, ClickRequest, LaunchOutcome, ObserveOutcome,
-    ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome, WaitForEventsRequest, WaitOutcome,
-    WindowList,
+    AccessibilityOutcome, AccessibilityTreeRequest, AgentClient, CaptureOutcome, CaptureRequest,
+    ClickRequest, FindAccessibleOutcome, FindAccessibleRequest, InvokeAccessibleActionRequest,
+    LaunchOutcome, ObserveOutcome, ObserveRequest, RuntimeInfo, ScrollRequest, TypeOutcome,
+    WaitForEventsRequest, WaitOutcome, WindowList,
 };
 use crate::decision::ObserveCondition;
 use crate::Result;
@@ -170,6 +171,82 @@ impl AgentClient for AgpClient {
             commit_seq: result.commit_seq,
             changed_regions: result.changed_regions,
         })
+    }
+
+    async fn accessibility_tree(
+        &self,
+        request: &AccessibilityTreeRequest,
+    ) -> Result<AccessibilityOutcome> {
+        let mut sdk = adesk_client::AccessibilityTreeRequest::new();
+        if let Some(window_id) = request.window_id {
+            sdk = sdk.window(window_id);
+        }
+        if let Some(max_nodes) = request.max_nodes {
+            sdk = sdk.max_nodes(max_nodes);
+        }
+        sdk = sdk.include_text(true);
+        let result = self
+            .client
+            .accessibility_tree(sdk)
+            .await
+            .map_err(map_client_error)?;
+        Ok(AccessibilityOutcome {
+            window_id: result.tree.window_id,
+            node_count: result.tree.node_count,
+            truncated: result.tree.truncated,
+            text: result.text,
+        })
+    }
+
+    async fn find_accessible(
+        &self,
+        request: &FindAccessibleRequest,
+    ) -> Result<FindAccessibleOutcome> {
+        let mut sdk = adesk_client::FindAccessibleRequest::new();
+        if let Some(window_id) = request.window_id {
+            sdk = sdk.window(window_id);
+        }
+        if let Some(role) = &request.role {
+            sdk = sdk.role(role.clone());
+        }
+        if let Some(name) = &request.name {
+            sdk = sdk.name(name.clone());
+        }
+        if let Some(name_contains) = &request.name_contains {
+            sdk = sdk.name_contains(name_contains.clone());
+        }
+        if let Some(value_contains) = &request.value_contains {
+            sdk = sdk.value_contains(value_contains.clone());
+        }
+        if let Some(max_results) = request.max_results {
+            sdk = sdk.max_results(max_results);
+        }
+        let result = self
+            .client
+            .find_accessible(sdk)
+            .await
+            .map_err(map_client_error)?;
+        Ok(FindAccessibleOutcome {
+            window_id: result.window_id,
+            matches: result.matches,
+            truncated: result.truncated,
+        })
+    }
+
+    async fn invoke_accessible_action(
+        &self,
+        request: &InvokeAccessibleActionRequest,
+    ) -> Result<ActionId> {
+        let mut sdk = adesk_client::InvokeAccessibleActionRequest::new(request.node_id);
+        if let Some(action) = &request.action {
+            sdk = sdk.action(action.clone());
+        }
+        let result = self
+            .client
+            .invoke_accessible_action(sdk)
+            .await
+            .map_err(map_client_error)?;
+        Ok(result.action_id)
     }
 
     async fn observe(&self, request: &ObserveRequest) -> Result<ObserveOutcome> {
