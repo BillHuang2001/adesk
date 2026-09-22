@@ -98,3 +98,6 @@ anyhow.workspace = true
 # `image` decodes the PNG payloads the runtime returns in e2e assertions.
 adesk-testkit.workspace = true
 image.workspace = true
+# `adesk_a11y::FixtureSource` is the deterministic accessibility backend the e2e
+# text-first test injects into the runtime (no accessibility bus, toolkit or display).
+adesk-a11y.workspace = true

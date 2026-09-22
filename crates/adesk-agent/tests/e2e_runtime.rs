@@ -34,6 +34,8 @@
 //! | `determinism_identical_metrics` | the same script twice yields identical metrics apart from timing |
 //! | `capstone_launch_window_observe_input_capture` | launch → observe → click → capture on a real launched app, with its own pixels and the causal action id |
 //! | `watch_notification_wake_handle_then_idle` | a real §5.9 `post_notification` wakes a live watch, the standing job runs against the runtime, and the loop returns to idle |
+//! | `accessibility_outline_reaches_context_without_pixels` | with an injected §5.11 backend, the real outline text reaches the provider context with zero readbacks |
+//! | `accessibility_without_a_backend_degrades_non_fatally` | a runtime with no accessibility backend degrades benignly instead of ending the run |
 //!
 //! ## Suite layout
 //!
@@ -71,7 +73,7 @@ mod e2e_support;
 
 use adesk_agent::{
     estimate_visual_tokens, ActionKind, AgentClient, AgentDecision, AgentLoop, CaptureRequest,
-    ClickRequest, MockProvider, ObserveCondition, ObserveRequest, Scenario, ScenarioId,
+    ClickRequest, LoopConfig, MockProvider, ObserveCondition, ObserveRequest, Scenario, ScenarioId,
     ScriptEntry, StepStatus, StopReason, WatchConfig, WatchStopReason, PROTOCOL_VERSION,
 };
 use adesk_core::{AppId, Button, EventKind, Position, RuntimeEvent, WindowId};
@@ -873,6 +875,179 @@ async fn capstone_launch_window_observe_input_capture() -> TestResult {
     let listed = connect(&runtime).await?.get_window(window_id).await?;
     assert_eq!(listed.app_id, Some(app_id));
     assert_eq!(listed.geometry, runtime.tiled_rect());
+
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Text-first observation against a real runtime: with a deterministic
+/// accessibility backend injected (`adesk_a11y::FixtureSource`) and
+/// `include_accessibility` on, the agent reads the observed window's UI as the
+/// §5.11 outline text. The backend's rendered text reaches the provider context
+/// while the whole run captures not one pixel.
+#[tokio::test]
+async fn accessibility_outline_reaches_context_without_pixels() -> TestResult {
+    let fixture = accessibility_fixture();
+    let runtime = runtime_with_accessibility(fixture.clone()).await?;
+    let (_wayland, _window, id) =
+        map_window(&runtime, "org.example.prefs", ACCESSIBILITY_WINDOW_TITLE, 1).await?;
+
+    // The agent asks for the window as text; `include_image = false` and the
+    // text-first gate are both on, so the run reads no pixels at all.
+    let provider = Arc::new(MockProvider::scripted(vec![
+        AgentDecision::Observe {
+            window_id: Some(id),
+            after_action: None,
+            until: ObserveCondition::Quiet { quiet_ms: 250 },
+            timeout_ms: None,
+            include_image: Some(false),
+            max_dimension: None,
+            region: None,
+        },
+        finish(),
+    ]));
+    let config = LoopConfig {
+        include_image: false,
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let client = connect(&runtime).await?;
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent
+        .run(&task("read the preferences window as text"))
+        .await?;
+
+    assert!(outcome.success, "the text-first run failed: {outcome:?}");
+    assert_eq!(outcome.stop_reason, StopReason::Finished);
+    assert_eq!(
+        outcome.metrics.actions_by_kind.get(&ActionKind::Observe),
+        Some(&1),
+        "the run's one observation is the text-first one: {:?}",
+        outcome.metrics.actions_by_kind
+    );
+
+    // The whole point: the desktop was read as text, never as pixels.
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 0,
+        "no pixel readback happened"
+    );
+    assert_eq!(outcome.metrics.images_sent, 0, "no image was embedded");
+    assert_eq!(
+        outcome.metrics.visual_tokens, 0,
+        "no visual tokens were spent"
+    );
+
+    // The running server asked the injected backend for exactly the mapped window.
+    let target = fixture
+        .last_target()
+        .expect("the runtime snapshotted the injected backend");
+    assert_eq!(
+        target.window_id, id,
+        "the §5.11 tree was read for the observed window"
+    );
+    assert_eq!(
+        target.title.as_deref(),
+        Some(ACCESSIBILITY_WINDOW_TITLE),
+        "the runtime correlated the mapped toplevel, not a guessed one"
+    );
+
+    // The real rendered outline is the model's only view of the window.
+    let contexts = provider.contexts();
+    assert!(!contexts.is_empty(), "the provider was consulted");
+    assert!(
+        contexts
+            .iter()
+            .any(|context| context.accessibility.as_deref() == Some(ACCESSIBILITY_OUTLINE)),
+        "the backend's §5.11 outline must reach the provider context verbatim: {:?}",
+        contexts
+            .iter()
+            .map(|context| context.accessibility.as_deref())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.image.is_none() && context.keyframe.is_none()),
+        "no frame is ever attached to a text-first context"
+    );
+
+    runtime.shutdown().await?;
+    Ok(())
+}
+
+/// Degradation with no accessibility backend (the runtime default, `auto`): the
+/// text-first capability cannot be served, and the run survives it. No outline is
+/// invented, no step fails, and no pixel is pulled in its place.
+#[tokio::test]
+async fn accessibility_without_a_backend_degrades_non_fatally() -> TestResult {
+    let runtime = runtime().await?;
+    let (_wayland, _window, id) =
+        map_window(&runtime, "org.example.nobackend", "NoBackend", 1).await?;
+
+    let provider = Arc::new(MockProvider::scripted(vec![
+        AgentDecision::Observe {
+            window_id: Some(id),
+            after_action: None,
+            until: ObserveCondition::Quiet { quiet_ms: 250 },
+            timeout_ms: None,
+            include_image: Some(false),
+            max_dimension: None,
+            region: None,
+        },
+        finish(),
+    ]));
+    let config = LoopConfig {
+        include_image: false,
+        include_accessibility: true,
+        retry_backoff_ms: 0,
+        ..LoopConfig::default()
+    };
+    let client = connect(&runtime).await?;
+    let mut agent = AgentLoop::new(client, Arc::clone(&provider), config);
+    let outcome = agent
+        .run(&task("read a window the runtime cannot describe"))
+        .await?;
+
+    assert!(
+        outcome.success,
+        "a missing accessibility backend must not end the run: {outcome:?}"
+    );
+    assert_eq!(outcome.stop_reason, StopReason::Finished);
+    assert_eq!(
+        outcome.metrics.failures, 0,
+        "a benign degradation is not a step failure"
+    );
+    assert_eq!(
+        outcome.history[0].status,
+        StepStatus::Ok,
+        "the step carrying the degraded enrichment still succeeds"
+    );
+    assert_eq!(
+        outcome.metrics.gpu_readbacks, 0,
+        "no pixels were read back in place of the text"
+    );
+    assert_eq!(outcome.metrics.visual_tokens, 0);
+
+    // No outline was invented, and no frame was attached instead.
+    let contexts = provider.contexts();
+    assert!(!contexts.is_empty(), "the provider was consulted");
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.accessibility.as_deref().map_or(true, str::is_empty)),
+        "an unavailable backend leaves no outline: {:?}",
+        contexts
+            .iter()
+            .map(|context| context.accessibility.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        contexts
+            .iter()
+            .all(|context| context.image.is_none() && context.keyframe.is_none()),
+        "no frame is attached when accessibility degrades"
+    );
 
     runtime.shutdown().await?;
     Ok(())
