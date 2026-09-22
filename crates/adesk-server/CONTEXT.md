@@ -67,7 +67,7 @@ Startup (`Server::start`, `docs/architecture.md` §9):
 1. `adesk_compositor::spawn(CompositorConfig)` (sync, spawns the calloop thread) → `wait_ready()`.
 2. Build `AppRegistry` (`RegistryOptions` from `app_dirs`, one `Arc<dyn Clock>` shared with `Correlator`) and `scan()` (blocking → `spawn_blocking`).
 3. Bind the Unix socket (`prepare_socket_path` + `SocketListener::bind`).
-4. Spawn the event pump (observer + fan-out + `QueryState` resync).
+4. Build the shared `ServerContext` (including the `AccessibilityService` from `accessibility_service(&config)`: an injected source wins, else `auto` → `adesk_a11y::auto_source()`, `off` → `adesk_a11y::unavailable_source("disabled by --accessibility off")`) and spawn the event pump (observer + fan-out + `QueryState` resync).
 5. Bind the viewer (VAP v1) endpoint when it is enabled (`crate::viewer::start`: the Unix socket plus the opt-in TCP listener) and spawn its accept loops — before `Server::start` returns, so a returned `RunningServer` means VAP accepts connections too.
 6. Install SIGINT/SIGTERM handlers and spawn the AGP accept loop; return `RunningServer` once both listeners are bound.
 
@@ -123,6 +123,7 @@ Shutdown (`RunningServer::shutdown` / signal → `shutdown::run`), in order:
 | §5.5 input (11 methods) | `./src/dispatch/input.rs` |
 | §5.6 subscriptions (`subscribe_events`, `unsubscribe_events`) | `./src/dispatch/events.rs` |
 | §5.7 inspector (`inspect_capture`, `inspect_subscribe`) | `./src/dispatch/inspect.rs` |
+| §5.11 accessibility (`accessibility_tree`, `find_accessible`, `invoke_accessible_action`) | `./src/dispatch/accessibility.rs` |
 | CLI binary (`adesk-server`) | `./src/main.rs` |
 | Viewer (VAP v1) endpoint: transport binding, accept loops, `viewer::start` | `./src/viewer/mod.rs`, `./src/viewer/listener.rs` |
 | `ViewerBackend` impl: frames, desktop state, viewer input through the seat helpers, runtime-scoped screen recording | `./src/viewer/backend.rs` |

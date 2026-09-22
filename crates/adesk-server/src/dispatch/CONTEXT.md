@@ -24,6 +24,7 @@ Group handlers — all `pub async fn (ctx: &RequestContext<'_>, params: <Proto>P
 - `events::{subscribe_events, unsubscribe_events, wait_for_events}` (`wait_for_events` is §5.10).
 - `inspect::{inspect_capture, inspect_subscribe}`.
 - `notify::{post_notification, list_notifications, close_notification, invoke_notification_action}`.
+- `accessibility::{accessibility_tree, find_accessible, invoke_accessible_action}` (§5.11).
 
 Shared internal helpers (not public API):
 - `command.rs` (`pub(crate) mod`, `send_infallible`/`send_result`): the shared compositor-command seam every group uses — build a `RuntimeCommand` around a `oneshot` reply, send, await and classify. `send_infallible` is for the infallible reply shapes (`QueryState`, `ReserveSeq`), `send_result` for the `adesk_core::Result<T>` shapes (seat + window commands); a *dropped* reply is classified by a caller-supplied closure (the seat/state helpers report `shutting_down`, `activate_window`/`close_window`/`render_window` report `internal`), and a failure reply maps through `windows::command_error`.
