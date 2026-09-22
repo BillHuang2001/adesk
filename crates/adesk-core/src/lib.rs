@@ -35,6 +35,7 @@
 #![deny(missing_docs)]
 #![forbid(unsafe_code)]
 
+pub mod accessibility;
 pub mod app;
 pub mod error;
 pub mod event;
@@ -46,11 +47,12 @@ pub mod notification;
 pub mod position;
 pub mod window;
 
+pub use accessibility::{AccessibleMatch, AccessibleNode, AccessibleState, AccessibleTree};
 pub use app::AppInfo;
 pub use error::{Error, ErrorCode, Result};
 pub use event::{EventKind, Observation, RuntimeEvent};
 pub use geometry::{Point, Rect, Region, Size};
-pub use ids::{ActionId, AppId, LaunchId, NotificationId, WindowId};
+pub use ids::{AccessibleId, ActionId, AppId, LaunchId, NotificationId, WindowId};
 pub use image::{ImageBuffer, PixelFormat};
 pub use input::{Button, ButtonState, KeyState, OverlayKind};
 pub use notification::{

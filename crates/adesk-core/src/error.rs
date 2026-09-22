@@ -9,7 +9,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::ids::{AppId, WindowId};
+use crate::ids::{AccessibleId, AppId, WindowId};
 
 /// Machine-readable error codes.
 ///
@@ -28,6 +28,8 @@ pub enum ErrorCode {
     UnknownApp,
     /// The referenced notification id is not known.
     UnknownNotification,
+    /// The referenced accessibility element id is not known.
+    UnknownAccessible,
     /// The application could not be launched.
     LaunchFailed,
     /// A capture/render request could not produce pixels.
@@ -57,6 +59,7 @@ impl ErrorCode {
             ErrorCode::UnknownWindow => "unknown_window",
             ErrorCode::UnknownApp => "unknown_app",
             ErrorCode::UnknownNotification => "unknown_notification",
+            ErrorCode::UnknownAccessible => "unknown_accessible",
             ErrorCode::LaunchFailed => "launch_failed",
             ErrorCode::CaptureFailed => "capture_failed",
             ErrorCode::RenderFailed => "render_failed",
@@ -114,6 +117,13 @@ impl Error {
         Error::new(ErrorCode::UnknownApp, format!("unknown app {id}"))
     }
 
+    /// [`ErrorCode::UnknownAccessible`] for `id`.
+    pub fn unknown_accessible(id: AccessibleId) -> Error {
+        Error::new(
+            ErrorCode::UnknownAccessible,
+            format!("unknown accessible {id}"),
+        )
+    }
     /// [`ErrorCode::Internal`] with a description.
     pub fn internal(message: impl Into<String>) -> Error {
         Error::new(ErrorCode::Internal, message)
@@ -145,6 +155,7 @@ mod tests {
             (ErrorCode::UnknownWindow, "unknown_window"),
             (ErrorCode::UnknownApp, "unknown_app"),
             (ErrorCode::UnknownNotification, "unknown_notification"),
+            (ErrorCode::UnknownAccessible, "unknown_accessible"),
             (ErrorCode::LaunchFailed, "launch_failed"),
             (ErrorCode::CaptureFailed, "capture_failed"),
             (ErrorCode::RenderFailed, "render_failed"),
@@ -158,7 +169,7 @@ mod tests {
                 "protocol_version_mismatch",
             ),
         ];
-        assert_eq!(expected.len(), 14);
+        assert_eq!(expected.len(), 15);
         for (code, name) in expected {
             assert_eq!(code.as_str(), name);
             assert_eq!(code.to_string(), name);
@@ -199,6 +210,12 @@ mod tests {
         assert_eq!(err.message, "unknown app org.mozilla.firefox");
     }
 
+    #[test]
+    fn unknown_accessible_message_contains_id() {
+        let err = Error::unknown_accessible(AccessibleId(99));
+        assert_eq!(err.code, ErrorCode::UnknownAccessible);
+        assert_eq!(err.message, "unknown accessible 99");
+    }
     #[test]
     fn display_includes_code_and_message() {
         let err = Error::new(ErrorCode::Internal, "invariant broken");
