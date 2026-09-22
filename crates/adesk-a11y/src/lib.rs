@@ -23,16 +23,19 @@
 //!   `EventKind`, so the text view is read strictly on demand by the §5.11
 //!   request handlers and never pushed.
 //! - **One seam, several backends.** Everything the runtime needs from the
-//!   accessibility stack goes through [`AccessibilitySource`], so a test or a
-//!   tool can supply a deterministic in-memory tree instead of a real bus, and
-//!   the AT-SPI backend stays the only implementation that owns a connection.
+//!   accessibility stack goes through [`AccessibilitySource`]: the real AT-SPI
+//!   backend (the only implementation that owns a D-Bus connection) and
+//!   [`FixtureSource`], a deterministic in-memory tree for tests and tools.
 //! - **Pure logic stays pure.** [`normalize_role`], the `find_accessible` matcher
 //!   (crate-internal) and [`render_text`] are synchronous, D-Bus-free functions
 //!   over plain data, so the whole §5.11 surface can be asserted with no session
 //!   bus, no toolkit and no display.
+//! - **One service, one registry.** [`AccessibilityService`] is runtime-scoped and
+//!   cheap to clone: it assigns the `AccessibleId`s an agent sees and bounds every
+//!   backend call in time.
 //! - **Ids are the runtime's, never the toolkit's.** Backends hand back an opaque
-//!   [`ElementHandle`]; `adesk-server` maps handles to `AccessibleId`s through the
-//!   registry of the service, so an agent never sees an AT-SPI or D-Bus path.
+//!   [`ElementHandle`]; the service maps handles to `AccessibleId`s through its
+//!   registry, so an agent never sees an AT-SPI or D-Bus path.
 //!
 //! # Layout
 //!
@@ -42,24 +45,30 @@
 //! | `role` | [`normalize_role`] — the wire vocabulary of `AccessibleNode::role` |
 //! | `source` | [`AccessibilitySource`] and the backend snapshot data types |
 //! | `find` | the `find_accessible` matcher (crate-internal) |
+//! | `service` | [`AccessibilityService`] — the id registry, the §5.11 queries, the backend time bound |
+//! | `fixture` | [`FixtureSource`] — a deterministic in-memory backend |
 //! | `text` | [`render_text`] and [`TextOptions`] — the §5.11 outline |
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
 mod error;
-// The `find_accessible` matcher is crate-internal: the §5.11 service that calls
-// it lands with the backend milestone, so until then it has no in-crate caller
-// and `dead_code` would otherwise reject a module this crate ships deliberately.
-#[allow(dead_code)]
 mod find;
+mod fixture;
 mod role;
+mod service;
 mod source;
 mod text;
 
 pub use error::{A11yError, Result};
+pub use fixture::{node, FixtureSource, NodeBuilder};
 pub use role::normalize_role;
+pub use service::{
+    AccessibilityService, FindOutcome, FindQuery, TreeOptions, FIND_MAX_DEPTH, FIND_MAX_NODES,
+    MAX_TRACKED_ELEMENTS, SNAPSHOT_TIMEOUT,
+};
 pub use source::{
-    AccessibilitySource, ElementHandle, SourceNode, SourceOptions, SourceSnapshot, WindowTarget,
+    AccessibilitySource, ElementHandle, InvokeOutcome, SourceNode, SourceOptions, SourceSnapshot,
+    WindowTarget,
 };
 pub use text::{render_text, TextOptions};

@@ -148,6 +148,23 @@ pub struct SourceSnapshot {
     pub truncated: bool,
 }
 
+/// The outcome of invoking an element action on a backend.
+///
+/// A backend never names an `AccessibleId` — it does not know one: ids are
+/// assigned by the runtime's element registry (`crate::AccessibilityService`),
+/// which turns this outcome into the §5.11 answer (an action name, a
+/// `invalid_request`, or an `unknown_accessible`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvokeOutcome {
+    /// The action was invoked; carries the name actually invoked (the element's
+    /// default action when none was requested).
+    Invoked(String),
+    /// The element does not expose the requested action.
+    NoSuchAction,
+    /// The element no longer exists on the backend.
+    Gone,
+}
+
 /// A backend that can produce accessibility trees and invoke element actions.
 ///
 /// Implementations are shared across the runtime (`Arc<dyn AccessibilitySource>`)
@@ -156,9 +173,11 @@ pub struct SourceSnapshot {
 /// established lazily on first use.
 ///
 /// Every method is fallible rather than panicking: a missing bus is
-/// [`crate::A11yError::Unavailable`], a failed or timed-out call is
-/// [`crate::A11yError::Backend`], and an element that no longer resolves is
-/// [`crate::A11yError::UnknownNode`].
+/// [`crate::A11yError::Unavailable`], a failed call is [`crate::A11yError::Backend`],
+/// and [`crate::A11yError::NotCorrelated`] says no accessible subtree matches the
+/// window. Whether an element still resolves, and which actions it exposes, is
+/// reported as an [`InvokeOutcome`] rather than as an error, because only the
+/// registry knows the `AccessibleId` an answer has to name.
 #[async_trait]
 pub trait AccessibilitySource: Send + Sync + 'static {
     /// Short backend name for diagnostics (`"atspi"`, `"fixture"`).
@@ -177,14 +196,14 @@ pub trait AccessibilitySource: Send + Sync + 'static {
     /// is no accessibility bus.
     async fn snapshot(&self, target: &WindowTarget, opts: SourceOptions) -> Result<SourceSnapshot>;
 
-    /// Invoke `action` on `handle`, returning the name of the action actually
-    /// invoked.
+    /// Invoke `action` on `handle`.
     ///
     /// `action` of `None` means the element's default (first) action, whose name
-    /// is what comes back. A handle that no longer resolves fails with
-    /// [`crate::A11yError::UnknownNode`], and an action the element does not
-    /// expose with [`crate::A11yError::UnknownAction`].
-    async fn invoke(&self, handle: &ElementHandle, action: Option<&str>) -> Result<String>;
+    /// is what [`InvokeOutcome::Invoked`] carries. A handle that no longer
+    /// resolves is [`InvokeOutcome::Gone`], and an action the element does not
+    /// expose is [`InvokeOutcome::NoSuchAction`] — neither is an error, so the
+    /// service can report them against the runtime id the caller used.
+    async fn invoke(&self, handle: &ElementHandle, action: Option<&str>) -> Result<InvokeOutcome>;
 }
 
 #[cfg(test)]
@@ -236,18 +255,16 @@ mod tests {
             })
         }
 
-        async fn invoke(&self, handle: &ElementHandle, action: Option<&str>) -> Result<String> {
+        async fn invoke(
+            &self,
+            handle: &ElementHandle,
+            action: Option<&str>,
+        ) -> Result<InvokeOutcome> {
             match action {
-                Some("press") => Ok("press".into()),
-                Some(other) => Err(A11yError::UnknownAction {
-                    id: adesk_core::AccessibleId(1),
-                    action: other.into(),
-                }),
-                None => Ok(if handle.as_str() == "root" {
-                    "activate".into()
-                } else {
-                    "click".into()
-                }),
+                Some("press") => Ok(InvokeOutcome::Invoked("press".into())),
+                Some(_) => Ok(InvokeOutcome::NoSuchAction),
+                None if handle.as_str() == "root" => Ok(InvokeOutcome::Invoked("activate".into())),
+                None => Ok(InvokeOutcome::Invoked("click".into())),
             }
         }
     }
@@ -277,20 +294,22 @@ mod tests {
                 .invoke(&ElementHandle("root".into()), None)
                 .await
                 .unwrap(),
-            "activate"
+            InvokeOutcome::Invoked("activate".into())
         );
         assert_eq!(
             source
                 .invoke(&ElementHandle("child".into()), Some("press"))
                 .await
                 .unwrap(),
-            "press"
+            InvokeOutcome::Invoked("press".into())
         );
-        let err = source
-            .invoke(&ElementHandle("child".into()), Some("nope"))
-            .await
-            .unwrap_err();
-        assert!(matches!(err, A11yError::UnknownAction { .. }));
+        assert_eq!(
+            source
+                .invoke(&ElementHandle("child".into()), Some("nope"))
+                .await
+                .unwrap(),
+            InvokeOutcome::NoSuchAction
+        );
     }
 
     #[test]

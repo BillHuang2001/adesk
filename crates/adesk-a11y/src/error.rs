@@ -31,16 +31,8 @@ pub enum A11yError {
     #[error("unknown accessible node {0}")]
     UnknownNode(AccessibleId),
 
-    /// The element does not expose the requested action.
-    #[error("accessible node {id} exposes no action {action}")]
-    UnknownAction {
-        /// The element addressed.
-        id: AccessibleId,
-        /// The action name that was not found.
-        action: String,
-    },
-
-    /// The request was malformed (e.g. `max_results` of zero).
+    /// The request was malformed (e.g. `max_results` of zero), or it named an
+    /// action the addressed element does not expose (`invalid_request`).
     #[error("invalid accessibility request: {0}")]
     InvalidRequest(String),
 
@@ -60,9 +52,6 @@ impl From<A11yError> for CoreError {
                 "no accessible subtree correlates with window {window_id}"
             )),
             A11yError::UnknownNode(id) => CoreError::unknown_accessible(id),
-            A11yError::UnknownAction { id, action } => CoreError::invalid_request(format!(
-                "accessible node {id} exposes no action {action}"
-            )),
             A11yError::InvalidRequest(message) => CoreError::invalid_request(message),
             A11yError::Backend(message) => {
                 CoreError::internal(format!("accessibility backend error: {message}"))
@@ -101,24 +90,42 @@ mod tests {
     }
 
     #[test]
-    fn unknown_action_maps_to_invalid_request_and_names_both() {
-        let mapped: CoreError = A11yError::UnknownAction {
-            id: AccessibleId(7),
-            action: "press".into(),
-        }
-        .into();
-        assert_eq!(mapped.code, ErrorCode::InvalidRequest);
-        assert!(mapped.message.contains('7'));
-        assert!(mapped.message.contains("press"));
-    }
-
-    #[test]
     fn invalid_request_maps_to_invalid_request() {
         let mapped: CoreError = A11yError::InvalidRequest("max_results is zero".into()).into();
         assert_eq!(mapped.code, ErrorCode::InvalidRequest);
         assert_eq!(mapped.message, "max_results is zero");
     }
 
+    #[test]
+    fn every_variant_maps_to_the_error_code_the_spec_names() {
+        // The mapping is the crate boundary and must stay total: each variant has
+        // exactly one AGP code (`docs/protocol.md` §6).
+        let cases: [(A11yError, ErrorCode); 5] = [
+            (
+                A11yError::Unavailable("no bus".into()),
+                ErrorCode::NotSupported,
+            ),
+            (
+                A11yError::NotCorrelated(WindowId(1)),
+                ErrorCode::NotSupported,
+            ),
+            (
+                A11yError::UnknownNode(AccessibleId(2)),
+                ErrorCode::UnknownAccessible,
+            ),
+            (
+                A11yError::InvalidRequest("bad".into()),
+                ErrorCode::InvalidRequest,
+            ),
+            (A11yError::Backend("boom".into()), ErrorCode::Internal),
+        ];
+
+        for (error, code) in cases {
+            let mapped: CoreError = error.into();
+            assert_eq!(mapped.code, code);
+            assert!(!mapped.message.is_empty());
+        }
+    }
     #[test]
     fn backend_maps_to_internal_and_keeps_the_detail() {
         let mapped: CoreError = A11yError::Backend("walk timed out".into()).into();

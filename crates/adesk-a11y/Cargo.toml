@@ -26,3 +26,6 @@ atspi.workspace = true
 
 [dev-dependencies]
 serde_json.workspace = true
+# `start_paused` lets the backend-timeout tests advance the clock instead of
+# waiting five real seconds for a wedged backend.
+tokio = { workspace = true, features = ["test-util"] }
