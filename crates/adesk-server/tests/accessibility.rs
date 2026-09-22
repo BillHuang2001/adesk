@@ -929,18 +929,18 @@ fn an_unavailable_backend_answers_not_supported() {
         "find_accessible with no accessibility backend",
     );
 
-    // `invoke_accessible_action` resolves the node id against the runtime's
-    // element registry *before* it calls the backend, and with no backend no tree
-    // can ever be read, so the registry is necessarily empty and the id is
-    // unknown. The clause "with no accessibility backend it fails with
-    // `not_supported`" (§5.11) is therefore only reachable through the backend —
-    // this pins the observable contract for the fixture the objective names.
+    // `invoke_accessible_action` checks backend availability *before* it resolves
+    // the node id against the runtime's element registry, so with no backend it
+    // short-circuits to `not_supported` for any id — even one the runtime never
+    // handed out. That makes §5.11's clause "with no accessibility backend it
+    // fails with `not_supported`" reachable even though the registry is
+    // necessarily empty without a backend (it could never read a tree).
     assert_error_code(
         f.runtime.block_on_timeout(
             f.client
                 .invoke_accessible_action(InvokeAccessibleActionRequest::new(AccessibleId(0))),
         ),
-        ErrorCode::UnknownAccessible,
+        ErrorCode::NotSupported,
         "invoke_accessible_action with no accessibility backend",
     );
     assert!(

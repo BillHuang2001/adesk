@@ -260,11 +260,22 @@ impl AccessibilityService {
     /// Invoke an element action by its runtime handle.
     ///
     /// Returns the name of the action actually invoked (the element's default
-    /// action when `action` is `None`). An id the registry does not know, and one
+    /// action when `action` is `None`).
+    ///
+    /// Backend availability is checked **before** the id is resolved, so an
+    /// unavailable backend answers [`A11yError::Unavailable`] (`not_supported`,
+    /// `docs/protocol.md` §5.11) for *any* id — even one the runtime never handed
+    /// out. On an available backend, an id the registry does not know, and one
     /// whose element the backend reports gone, are both [`A11yError::UnknownNode`];
-    /// an action the element does not expose is [`A11yError::InvalidRequest`]
-    /// (`docs/protocol.md` §5.11).
+    /// an action the element does not expose is [`A11yError::InvalidRequest`].
     pub async fn invoke(&self, id: AccessibleId, action: Option<&str>) -> Result<String> {
+        if !self.inner.source.is_available().await {
+            return Err(A11yError::Unavailable(format!(
+                "backend {} is not available",
+                self.inner.source.name()
+            )));
+        }
+
         let handle = {
             let registry = self.registry();
             registry.handle_of(id).ok_or(A11yError::UnknownNode(id))?
@@ -1019,6 +1030,45 @@ mod tests {
 
         let err = service.invoke(root, Some("click")).await.unwrap_err();
         assert!(matches!(err, A11yError::UnknownNode(id) if id == root));
+    }
+
+    #[tokio::test]
+    async fn invoke_checks_backend_availability_before_resolving_the_id() {
+        // Unavailable backend + an id the registry never saw: the spec's
+        // `not_supported` (§5.11), never `unknown_accessible` — availability is
+        // checked before the id is resolved, so a backend that could never hand
+        // out an id still short-circuits to `Unavailable` for any id.
+        let offline = AccessibilityService::new(Arc::new(
+            FixtureSource::new(sample_tree()).with_availability(false),
+        ));
+        let err = offline
+            .invoke(AccessibleId(9_999), Some("click"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, A11yError::Unavailable(_)), "{err:?}");
+
+        // Available backend + an id the registry never saw: `unknown_accessible`.
+        let fixture = Arc::new(FixtureSource::new(sample_tree()));
+        let online = AccessibilityService::new(fixture.clone());
+        let err = online
+            .invoke(AccessibleId(9_999), Some("click"))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, A11yError::UnknownNode(id) if id == AccessibleId(9_999)));
+
+        // Available backend + a known id whose element does not expose the
+        // requested action: `invalid_request` (the backend is still asked).
+        let tree = online
+            .tree(&target(), TreeOptions::default())
+            .await
+            .unwrap();
+        let open = tree.root.children[0].children[0].id;
+        let err = online.invoke(open, Some("press")).await.unwrap_err();
+        assert!(matches!(err, A11yError::InvalidRequest(_)), "{err:?}");
+        assert!(
+            fixture.has_invocation("fixture/0/0", Some("press")),
+            "the available backend was asked about the non-exposed action"
+        );
     }
 
     #[tokio::test]
