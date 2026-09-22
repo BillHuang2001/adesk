@@ -90,6 +90,10 @@ adw = { package = "libadwaita", version = "0.9" }
 # `tokio` feature drives it on the workspace's tokio runtime instead of zbus's own
 # async-io reactor. Only `adesk-a11y` depends on this.
 atspi = { version = "0.30", features = ["tokio"] }
+# The D-Bus transport AT-SPI runs on (pure Rust, no libdbus). `atspi` pulls it in
+# transitively; it is declared here so `adesk-a11y`'s dev-dependencies can also
+# *serve* a mock AT-SPI2 provider in tests without a version of their own.
+zbus = "5"
 
 [profile.release]
 debug = 1
