@@ -23,8 +23,9 @@
 //!   `EventKind`, so the text view is read strictly on demand by the §5.11
 //!   request handlers and never pushed.
 //! - **One seam, several backends.** Everything the runtime needs from the
-//!   accessibility stack goes through [`AccessibilitySource`]: the real AT-SPI
-//!   backend (the only implementation that owns a D-Bus connection) and
+//!   accessibility stack goes through [`AccessibilitySource`]: the real
+//!   [`AtspiSource`] (the only implementation that owns a D-Bus connection, plus
+//!   its [`LazyAtspiSource`] `auto` and [`UnavailableSource`] `off` variants) and
 //!   [`FixtureSource`], a deterministic in-memory tree for tests and tools.
 //! - **Pure logic stays pure.** [`normalize_role`], the `find_accessible` matcher
 //!   (crate-internal) and [`render_text`] are synchronous, D-Bus-free functions
@@ -47,11 +48,13 @@
 //! | `find` | the `find_accessible` matcher (crate-internal) |
 //! | `service` | [`AccessibilityService`] — the id registry, the §5.11 queries, the backend time bound |
 //! | `fixture` | [`FixtureSource`] — a deterministic in-memory backend |
+//! | `atspi` | [`AtspiSource`] / [`LazyAtspiSource`] / [`UnavailableSource`] — the real AT-SPI2 backend over D-Bus, and its selection ([`auto_source`] / [`unavailable_source`]) |
 //! | `text` | [`render_text`] and [`TextOptions`] — the §5.11 outline |
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod atspi;
 mod error;
 mod find;
 mod fixture;
@@ -60,6 +63,7 @@ mod service;
 mod source;
 mod text;
 
+pub use atspi::{auto_source, unavailable_source, AtspiSource, LazyAtspiSource, UnavailableSource};
 pub use error::{A11yError, Result};
 pub use fixture::{node, FixtureSource, NodeBuilder};
 pub use role::normalize_role;

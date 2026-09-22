@@ -142,7 +142,11 @@ fn escape(raw: &str) -> String {
 /// catch-all arm keeps the function total for a variant a later `adesk-core` adds
 /// (the enum is `#[non_exhaustive]`), and the unit tests assert the mapping
 /// against `serde_json` for every variant known today.
-fn state_name(state: AccessibleState) -> &'static str {
+///
+/// The `atspi` mapping module sorts its output by this name rather than by the
+/// enum's declaration order, so the wire vocabulary stays the single source of the
+/// normal form.
+pub(crate) fn state_name(state: AccessibleState) -> &'static str {
     match state {
         AccessibleState::Enabled => "enabled",
         AccessibleState::Sensitive => "sensitive",
