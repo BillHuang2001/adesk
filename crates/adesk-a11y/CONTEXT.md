@@ -48,7 +48,7 @@ accessibility bus. `FixtureSource` remains the deterministic backend for tests a
 | `LazyAtspiSource` | `atspi` | The `auto` backend (`Clone`, `Default`): `new()`, connect on first use, cache the outcome (success *or* failure), `Unavailable` when it failed |
 | `UnavailableSource` | `atspi` | The `off` backend: `new(reason)`, `name() == "off"`, `is_available() == false`, every call `Unavailable(reason)` |
 | `auto_source()`, `unavailable_source(reason)` | `atspi` | The two selectors, as the `Arc<dyn AccessibilitySource>` the service consumes |
-| `AccessibilityService` | `service` | The runtime-scoped service (`Clone`, `Arc`-backed): `new`, `backend`, `is_available`, `tree`, `find`, `invoke`, `tracked_element_count` |
+| `AccessibilityService` | `service` | The runtime-scoped service (`Clone`, `Arc`-backed): `new`, `backend`, `is_available`, `tree`, `find`, `invoke` (probes availability before resolving the id), `tracked_element_count` |
 | `TreeOptions` | `service` | `accessibility_tree` options: `max_depth` (12), `max_nodes` (2000), `include_states`/`include_bounds`/`include_actions` (all `true`) |
 | `FindQuery` | `service` | `find_accessible` filters: `role`, `name`, `name_contains`, `value_contains`, `max_results` (50) |
 | `FindOutcome` | `service` | `find`'s result: `matches` (pre-order) + `truncated` |
@@ -109,6 +109,15 @@ This node has no child directories: every module of the crate lives here.
   `NoSuchAction`/`Gone` come back as `InvokeOutcome` and the *service* maps them to
   `invalid_request` (naming the node and action) or `unknown_accessible` (naming the node).
   That is why there is no `A11yError::UnknownAction` variant.
+- **`invoke` checks availability before resolving the id.** The service probes
+  `is_available()` first, so an unavailable backend answers `A11yError::Unavailable`
+  (`not_supported`) for *any* id — even one the registry never handed out. This is what makes
+  §5.11's "with no accessibility backend it fails with `not_supported`" reachable: without a
+  backend the registry is necessarily empty (no tree could ever be read), so a registry-first
+  order would answer `unknown_accessible` instead and the spec's clause would be dead. The
+  probe is the backend's own cheap check, so it is called directly rather than under the
+  service's `SNAPSHOT_TIMEOUT` bound (that bound is for walks/invocations that wait on a
+  client application).
 - **The service normalizes roles; the backend does not.** A backend reports the toolkit's own
   spelling, and the service rewrites every role with `normalize_role` before a tree, a match or
   the matcher ever sees it. Normalization is the single place that makes a `find_accessible
@@ -230,12 +239,15 @@ all inline, plus one doc test on `normalize_role`):
   bare node, every `include_*` projection, configurable/zero indent, escaping, and the
   `state_name` ↔ wire-name agreement.
 - `error` (7): the `adesk_core::Error` mapping (code + detail) for every variant.
-- `service` (21): id assignment stability across two `tree` calls and across `tree`→`find`;
+- `service` (22): id assignment stability across two `tree` calls and across `tree`→`find`;
   `node_count`/`app_name`/`app_id`/`window_id`; each `include_*` projection; the tree bounds
   handed to the backend; `find` paths, `max_results`/`truncated`, snapshot-truncation reporting
   and the `max_results = 0` rejection; role normalization; `invoke` success (named and default
   action), `UnknownNode` for an unknown id and for a vanished element, `InvalidRequest` for a
-  non-exposed action; the registry cap (exercised through the private `with_cap` seam rather
+  non-exposed action, and that `invoke` probes backend availability before resolving an id
+  (`invoke_checks_backend_availability_before_resolving_the_id` — `Unavailable` for an unseen id
+  on an unavailable backend, `UnknownNode`/`InvalidRequest` on an available one); the registry
+  cap (exercised through the private `with_cap` seam rather
   than by tracking 65 536 elements); `Clone` sharing one registry; and the two backend-timeout
   tests, which use `#[tokio::test(start_paused = true)]` (dev-dependency `tokio`/`test-util`)
   against stalling sources and assert `A11yError::Backend` without real time passing.
