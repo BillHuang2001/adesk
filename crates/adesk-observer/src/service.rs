@@ -731,6 +731,9 @@ impl ObserverService {
                     window_id: plan.window_id,
                     after_action: plan.after_action,
                     started_at: plan.started_at,
+                    // The same anchor the condition was evaluated against, so the
+                    // `quiet` evidence flag cannot disagree with it.
+                    anchor_ts: plan.anchor_ts,
                     now_ms,
                     watermark: state.watermark,
                     // A quiet condition carries its own threshold; the other
@@ -1455,6 +1458,58 @@ mod tests {
         assert_eq!(observation.commits, 1, "seeded from the journal");
         assert_eq!(observer.now_ms(), 130, "anchor(30) + quiet_ms(100)");
         assert_eq!(observation.elapsed_ms, 100);
+    }
+
+    /// A quiet wait whose `after_action` predates the wait start must report
+    /// `quiet: true` when it resolves on its condition.
+    ///
+    /// The quiet condition is anchored at the action's `ts_ms` (so it fires
+    /// `quiet_ms` after the *action*, which can be before `started_at + quiet_ms`;
+    /// the server records the action before it serves the wait, so `started_at` is
+    /// never earlier than the action). The `quiet` evidence flag must use that same
+    /// anchor, otherwise the wait resolves on its condition while reporting
+    /// `quiet: false, timed_out: false` — the self-contradictory observation the
+    /// full workspace suite exposed.
+    ///
+    /// Deterministic: the clock moves through an event (the crate's paused-time
+    /// seam), so `started_at` is exactly 10 ms after the action was recorded —
+    /// never a wall-clock race.
+    #[tokio::test(start_paused = true)]
+    async fn wait_for_quiet_reports_quiet_when_the_action_anchor_predates_the_start() {
+        let observer = ObserverService::new();
+        observer.handle_event(&created(1, 0, 7));
+        // The action is recorded at ts 0 …
+        let action = observer.record_action(ActionKind::Click, Some(WindowId(7)), None);
+        // … then a non-commit event moves the event clock to ts 10, so the wait
+        // starts strictly after the action (it is counted, but only commits re-arm
+        // the quiet anchor, so it leaves the anchor at the action's ts).
+        observer.handle_event(&title_changed(2, 10, 7));
+
+        let observation = observer
+            .wait_for_quiet(
+                QuietSpec::new()
+                    .window(WindowId(7))
+                    .quiet_ms(100)
+                    .timeout_ms(5_000)
+                    .after_action(action),
+            )
+            .await
+            .expect("known window");
+
+        assert!(
+            !observation.timed_out,
+            "the condition was met: {observation:?}"
+        );
+        assert!(
+            observation.quiet,
+            "the flag is measured from the action anchor, exactly like the condition: {observation:?}"
+        );
+        assert_eq!(observation.commits, 0, "the title change is not a commit");
+        assert_eq!(
+            observation.elapsed_ms, 90,
+            "action anchor(0) + quiet_ms(100), minus start(10)"
+        );
+        assert_eq!(observer.now_ms(), 100, "anchor(0) + quiet_ms(100)");
     }
 
     #[tokio::test(start_paused = true)]

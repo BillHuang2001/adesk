@@ -239,6 +239,11 @@ impl Accumulator {
     }
 
     /// Quiet anchor: the most recent counted commit, falling back to `anchor_ts`.
+    ///
+    /// `anchor_ts` is the plan's quiet-timer anchor (the `after_action` `ts_ms`
+    /// when set, otherwise the wait start). This is the same anchor
+    /// [`condition_met`] evaluates `Quiet { quiet_ms }` against, so the `quiet`
+    /// evidence flag cannot disagree with the condition it resolved on.
     pub(crate) fn quiet_anchor(&self, anchor_ts: u64) -> u64 {
         self.last_commit_ts.unwrap_or(anchor_ts)
     }
@@ -261,8 +266,10 @@ impl Accumulator {
             popups_disappeared: self.popups_disappeared.clone(),
             elapsed_ms: ctx.now_ms.saturating_sub(ctx.started_at),
             // Evidence, not a promise: has the filtered scope been quiet for the
-            // threshold at resolution time?
-            quiet: ctx.now_ms.saturating_sub(self.quiet_anchor(ctx.started_at))
+            // threshold at resolution time? Measured from the same anchor the
+            // condition used, so a condition-satisfied quiet wait (whose flag is
+            // read at a clock value ≥ the condition's) can never report `false`.
+            quiet: ctx.now_ms.saturating_sub(self.quiet_anchor(ctx.anchor_ts))
                 >= ctx.quiet_threshold_ms,
             timed_out: ctx.timed_out,
             last_commit_seq: match ctx.window_id {
@@ -299,6 +306,11 @@ pub(crate) struct ResolveContext<'a> {
     pub(crate) after_action: Option<ActionId>,
     /// Wait start (`elapsed_ms` origin).
     pub(crate) started_at: u64,
+    /// Quiet-timer anchor: the plan's `anchor_ts` (the `after_action` `ts_ms` when
+    /// set, otherwise the wait start). Feeds the `quiet` evidence flag so it uses
+    /// the same anchor as `condition_met`; `started_at` remains the `elapsed_ms`
+    /// origin and the non-action fallback anchor.
+    pub(crate) anchor_ts: u64,
     /// Clock at resolution.
     pub(crate) now_ms: u64,
     /// Global event watermark at resolution.
@@ -396,6 +408,10 @@ mod tests {
             window_id,
             after_action: Some(ActionId(3)),
             started_at,
+            // No `after_action` in these cases: the plan anchor is the wait start,
+            // so the quiet flag is measured from `started_at` (cases that need a
+            // distinct anchor set it on the returned context).
+            anchor_ts: started_at,
             now_ms,
             watermark: 42,
             quiet_threshold_ms: DEFAULT_QUIET_MS,
@@ -856,6 +872,32 @@ mod tests {
 
         ctx.now_ms = 99;
         assert!(!acc.resolve(&ctx).quiet);
+    }
+
+    #[test]
+    fn resolve_quiet_flag_uses_the_plan_anchor_not_the_wait_start() {
+        let mut acc = acc();
+
+        // The wait started at 10 but its plan anchor — the `after_action` `ts_ms` —
+        // is 0. The flag must be measured from the anchor, exactly like
+        // `condition_met` does, so a condition-satisfied quiet wait reports
+        // `quiet: true`; measuring from `started_at` (the pre-fix anchor) would
+        // have given 100 - 10 < 100 and reported `false`.
+        let mut anchored = resolve_ctx(Some(wid(7)), 10, 100, None);
+        anchored.anchor_ts = 0;
+        anchored.quiet_threshold_ms = 100;
+
+        assert!(
+            acc.resolve(&anchored).quiet,
+            "100 - 0 == the 100 ms threshold, measured from the plan anchor"
+        );
+
+        let mut from_start = anchored;
+        from_start.anchor_ts = from_start.started_at;
+        assert!(
+            !acc.resolve(&from_start).quiet,
+            "from the wait start it is only 90 ms of quiet"
+        );
     }
 
     // --------------------------------------------------------- condition_met
