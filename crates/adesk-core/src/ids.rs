@@ -66,6 +66,13 @@ numeric_id!(
     NotificationId
 );
 
+numeric_id!(
+    /// Identifies one element of an accessibility tree.
+    ///
+    /// A stable handle for the lifetime of the element, usable with the AGP
+    /// `invoke_accessible_action` method; scoped to the window that produced it.
+    AccessibleId
+);
 /// Identifies an application by its desktop-file id, e.g.
 /// `"org.mozilla.firefox"`.
 ///
@@ -136,6 +143,11 @@ mod tests {
         assert_eq!(notification.to_string(), "5");
         assert_eq!(u64::from(notification), 5);
         assert_eq!(NotificationId::from(5_u64), notification);
+
+        let accessible = AccessibleId(7);
+        assert_eq!(accessible.to_string(), "7");
+        assert_eq!(u64::from(accessible), 7);
+        assert_eq!(AccessibleId::from(7_u64), accessible);
     }
 
     #[test]
@@ -170,6 +182,11 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<WindowId>("17").unwrap(),
             WindowId(17)
+        );
+        assert_eq!(serde_json::to_string(&AccessibleId(7)).unwrap(), "7");
+        assert_eq!(
+            serde_json::from_str::<AccessibleId>("7").unwrap(),
+            AccessibleId(7)
         );
         assert_eq!(
             serde_json::to_string(&AppId::from("org.mozilla.firefox")).unwrap(),

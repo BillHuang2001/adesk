@@ -12,7 +12,7 @@ No I/O, no async, no Smithay, no tokio; dependencies are `serde` and `thiserror`
 Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the modules are `pub` as well.
 
 ### ids (`src/ids.rs`)
-- `WindowId(pub u64)`, `ActionId(pub u64)`, `LaunchId(pub u64)`, `NotificationId(pub u64)`: `Copy`, `Display`, `From<u64>`/`Into<u64>`, `#[serde(transparent)]`.
+- `WindowId(pub u64)`, `ActionId(pub u64)`, `LaunchId(pub u64)`, `NotificationId(pub u64)`, `AccessibleId(pub u64)`: `Copy`, `Display`, `From<u64>`/`Into<u64>`, `#[serde(transparent)]`.
 - `AppId(pub String)`: `Clone` (not `Copy` — it owns a string), `Display`, `From<String>`, `From<&str>`, `Into<String>`, `AsRef<str>`, `as_str()`, `#[serde(transparent)]`.
 - All ids: `Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize`.
 
@@ -55,9 +55,16 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `Notification { id, source, title, body, urgency, category, actions, hints, posted_seq, posted_ts_ms, dismissed, closed_seq, close_reason, timeout_ms }` — `Debug, Clone, PartialEq, Eq, Serialize, Deserialize`; `hints` is a `std::collections::BTreeMap<String, String>`.
 - Matches `docs/protocol.md` §4/§5.9; the store/inbox that owns notification lifecycle lives in `adesk-notify`, not here.
 
+### accessibility (`src/accessibility.rs`)
+- `AccessibleState` (22 variants, snake_case serde, `Copy`, `#[non_exhaustive]`): state flags reported for an accessible element — only the flags that are *set* appear in a node's `states`.
+- `AccessibleNode { id, role, name, description, value, states, bounds, actions, children }` — the recursive element tree; `role` is the toolkit's own lowercase snake_case role name kept as a string (never a lossy enum), `bounds` is window-relative pixels, `id` is the handle for `invoke_accessible_action`.
+- `AccessibleTree { window_id, app_id, app_name, root, node_count, truncated }` — a whole accessibility snapshot of one window; `node_count` includes the root, `truncated` flags an early-stopped walk.
+- `AccessibleMatch { id, role, name, value, states, bounds, actions, path }` — the flat projection of `AccessibleNode` (same fields minus `description`/`children`, plus `path`) returned by `find_accessible`; `path` is ancestor names from the window root to (excluding) the match.
+- Matches `docs/protocol.md` §5.11; the AT-SPI2 backend/service lives in `adesk-a11y`, the wire methods in `adesk-proto`, dispatch in `adesk-server` — this module is value types only.
+
 ### error (`src/error.rs`)
-- `ErrorCode` (14 variants) + `as_str() -> &'static str` (AGP wire names) + `Display`; snake_case serde. Includes `UnknownNotification` (`"unknown_notification"`, AGP §6).
-- `Error { code, message }` + `new`, `invalid_request`, `unknown_window`, `unknown_app`, `internal`, `not_supported`, `timeout`; implements `thiserror::Error`, `Display` renders `"<code>: <message>"`.
+- `ErrorCode` (15 variants) + `as_str() -> &'static str` (AGP wire names) + `Display`; snake_case serde. Includes `UnknownNotification` (`"unknown_notification"`, AGP §6) and `UnknownAccessible` (`"unknown_accessible"`).
+- `Error { code, message }` + `new`, `invalid_request`, `unknown_window`, `unknown_app`, `unknown_accessible`, `internal`, `not_supported`, `timeout`; implements `thiserror::Error`, `Display` renders `"<code>: <message>"`.
 - `pub type Result<T> = std::result::Result<T, Error>`.
 
 ## Constraints
@@ -73,7 +80,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 
 | Area | Owner |
 |---|---|
-| Identifiers (`WindowId`, `ActionId`, `LaunchId`, `AppId`) | `./src/ids.rs` |
+| Identifiers (`WindowId`, `ActionId`, `LaunchId`, `NotificationId`, `AccessibleId`, `AppId`) | `./src/ids.rs` |
 | Geometry, `Point`, `Size`, `Rect`, `Region` | `./src/geometry.rs` |
 | `Position` and its resolution/clamping rules | `./src/position.rs` |
 | Input enums, `OverlayKind` | `./src/input.rs` |
@@ -82,6 +89,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 | `PixelFormat`, `ImageBuffer` | `./src/image.rs` |
 | `EventKind`, `RuntimeEvent`, `Observation` | `./src/event.rs` |
 | `Notification`, `NotificationUrgency`, `NotificationAction`, `NotificationCloseReason` | `./src/notification.rs` |
+| `AccessibleId`, `AccessibleState`, `AccessibleNode`, `AccessibleTree`, `AccessibleMatch` | `./src/accessibility.rs` |
 | `ErrorCode`, `Error`, `Result` | `./src/error.rs` |
 | Wire-format / serde contract tests | `./tests/serde_wire.rs` |
 
@@ -96,7 +104,7 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `Position::resolve` maps normalized values with `round(n * (dim - 1))` so `0.0`/`1.0` are the first/last pixel, clamps pixels into the window, maps `NaN` to `0.0` (infinities saturate), and resolves empty windows to their origin.
 - `ImageBuffer::new_rgba` is infallible and fills opaque black (alpha 255); `from_rgba` accepts only tightly packed data (`stride == width * 4`) and rejects length mismatch or stride > `u32::MAX` with `InvalidRequest`.
 - `ImageBuffer` data is row-major top-down, RGBA8 with straight (non-premultiplied) alpha; `stride` is a **public field**, not an accessor, and is only guaranteed `>= width * 4` (rows may be padded), so readers must not assume `stride == width * 4`.
-- `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says the ids are `Copy`, which is impossible for a `String` payload — the four numeric ids are `Copy`.
+- `AppId` is `Clone` but not `Copy`: `docs/core-api.md` says the ids are `Copy`, which is impossible for a `String` payload — the five numeric ids are `Copy`.
 - `Observation` lives in `event.rs` (the task's module layout has no observation module); it is the temporal summary of the event vocabulary.
 - `Observation.quiet` is an evidence flag, not proof the condition was met: it reports whether the wait's scope had been quiet for the applicable threshold at resolution time — the condition's `quiet_ms` for a quiet wait, otherwise `adesk-observer`'s `DEFAULT_QUIET_MS` constant (250 ms) — so a timed-out `change` wait can legitimately carry `quiet: true`.
 - `Observation.timed_out` reports that the wait expired before its condition was met, except `Condition::Timeout`, which reaches its horizon by design and therefore reports `false`; both flags are plain always-serialized `bool`s whose semantics belong to `adesk-observer` (core carries no wait logic).
@@ -108,16 +116,21 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `Notification`, `NotificationAction`, `NotificationUrgency` and `NotificationCloseReason` carry the §5.9 wire shapes verbatim; `Notification` is a `RuntimeEvent::Notification` payload, so it must stay in core rather than in `adesk-notify`.
 - The three notification `EventKind`s and `RuntimeEvent` variants are window-less: `window_id()` returns `None` for them exactly like `AppLaunched`.
 - `ErrorCode::UnknownNotification` (`"unknown_notification"`) is the AGP §6 code a §5.9 handler returns for an unknown `notification_id`.
+- `AccessibleId` reuses the `numeric_id!` macro, so it is transparent over `u64` like the other numeric ids; it is a stable handle scoped to the window that produced it and is independent of both the event `seq` and the `NotificationId` domain.
+- `AccessibleState` is `#[non_exhaustive]` and `AccessibleNode.role` is a plain lowercase snake_case `String` (never a role enum): an unknown state flag or toolkit role must never be silently dropped, so consumers must treat an unrecognized `role`/state as opaque rather than exhaustive.
+- `AccessibleNode`/`AccessibleTree`/`AccessibleMatch` carry the §5.11 wire shapes verbatim with no serde container attributes (field names are already the wire names); `Option` fields serialize as JSON `null` (no `skip_serializing_if`). Every field, including the recursive `children`, is always serialized.
+- `AccessibleTree`/`AccessibleMatch` are value types only; the walk, node-count/truncation bounds, role normalization and id assignment belong to `adesk-a11y`, so core carries no traversal logic.
+- Accessibility introduces no `RuntimeEvent`/`EventKind` variant: reads are pull-only (the §5.11 tree/find requests) and actions use `invoke_accessible_action`; a11y events are explicitly out of scope.
 
 ## Test Strategy
 
-- Inline `#[cfg(test)]` unit tests per module (76 tests): rect edge/intersect/union cases, region coalesce/clip/bounds/simplified, `Position::resolve` clamping incl. NaN, infinities, empty and 1x1 windows, `from_rgba` validation and `pixel` bounds, `ErrorCode::as_str`, `RuntimeEvent` accessors for every variant, and the notification defaults/urgency/close-reason wire names and round-trip.
+- Inline `#[cfg(test)]` unit tests per module (85 tests): rect edge/intersect/union cases, region coalesce/clip/bounds/simplified, `Position::resolve` clamping incl. NaN, infinities, empty and 1x1 windows, `from_rgba` validation and `pixel` bounds, `ErrorCode::as_str`, `RuntimeEvent` accessors for every variant, the notification defaults/urgency/close-reason wire names and round-trip, and the accessibility state wire names, node/tree/match round-trips and golden JSON shapes (incl. explicit `null`s).
 - `./tests/serde_wire.rs` (14 tests) pins exact AGP JSON for `Position`, `Rect`, `Region`, `WindowInfo`, `AppInfo`, `Observation`, `Notification`, `RuntimeEvent` variants (incl. the three notification variants), `Error`, ids, and the enum wire names the inline modules do not assert (`Button::Middle`/`Side`, all eight `OverlayKind` names).
 - The inline module tests are the authoritative spec; the integration file keeps only assertions not already covered inline, so the redundant `ErrorCode` / `Error` / `EventKind` / `WindowState` / `ButtonState` / `KeyState` / `PixelFormat` copies are gone.
 - Fixture duplication: `tests/serde_wire.rs::sample_window_info` is field-for-field identical to `src/window.rs::tests::info()`; `sample_app_info` mirrors `src/app.rs::tests::info()` except `categories`/`try_exec`.
 - The `rect(x,y,w,h)` helper in `src/geometry.rs::tests` duplicates the public `Rect::new` const constructor (same signature).
 - One doctest in `lib.rs` documents `Position::resolve`.
-- Total: 91 tests (76 inline + 14 integration + 1 doctest). Run with `bash scripts/dev.sh cargo test -p adesk-core` (the wrapper script is not executable in worktrees — invoke it through `bash`; bare `cargo` cannot link outside the dev shell).
+- Total: 100 tests (85 inline + 14 integration + 1 doctest). Run with `bash scripts/dev.sh cargo test -p adesk-core` (the wrapper script is not executable in worktrees — invoke it through `bash`; bare `cargo` cannot link outside the dev shell).
 - No test needs a display, GPU, network or installed application.
 
 ## Notes for Agents
@@ -127,10 +140,10 @@ Every item is re-exported flat at the crate root (`adesk_core::<Name>`); the mod
 - `docs/protocol.md` §5.6 defines an `EventKind` filter set with 11 values (`surface_damage`, `quiet` extra) and §5.9 adds the three notification kinds; `adesk_core::EventKind` has the 12 core-api values — `adesk-proto` must define its own subscription-filter enum.
 - `docs/protocol.md` §4 `AppInfo` example omits `no_display`/`try_exec`; `adesk_core::AppInfo` includes and serializes them (additive, allowed by §7).
 - `Observation` carries no `image` field; `adesk-proto` attaches it (`ObserveResult { observation, image }`).
-- `Observation`, `WindowInfo` and `AppInfo` carry no serde container attributes at all (field names are already the wire names); `Option` fields serialize as JSON `null` (no `skip_serializing_if`), so an e2e test must expect explicit nulls for `window_id`, `after_action`, `focus_changed`, `app_id`, `title`, `pid`.
+- `Observation`, `WindowInfo`, `AppInfo` and the §5.11 accessibility types carry no serde container attributes at all (field names are already the wire names); `Option` fields serialize as JSON `null` (no `skip_serializing_if`), so an e2e test must expect explicit nulls for `window_id`, `after_action`, `focus_changed`, `app_id`, `title`, `pid`, `description`, `value`, `bounds`.
 - `Observation.changed_regions` is `Vec<Rect>` (already simplified by the observer), not `Region`; only `RuntimeEvent::SurfaceCommit.damage` is a `Region` (serializes as a bare `[Rect]` array).
 - There is no `PopupInfo` type: `WindowInfo.popup_count: u32` is the only popup surface; popup ids appear only in `RuntimeEvent::PopupAppeared/PopupDisappeared` and `Observation.popups_appeared/disappeared`.
-- Items with no caller anywhere in the workspace: `Region::coalesce`/`Region::default` are reached only through `simplified()`, and `Error::{unknown_app, not_supported, timeout}` have no call site outside this crate (their own unit tests only). All of them are specified in `docs/core-api.md`, so removing one is a spec change, not a pure deletion.
+- Items with no caller anywhere in the workspace: `Region::coalesce`/`Region::default` are reached only through `simplified()`, and `Error::{unknown_app, unknown_accessible, not_supported, timeout}` have no call site outside this crate (their own unit tests only). All of them are specified in `docs/core-api.md`, so removing one is a spec change, not a pure deletion.
 - Tight-packing validation (`width * 4` stride, `width * height * 4` byte count, overflow/stride>u32 checks) is re-implemented in `adesk-proto::ImagePayload::from_rgba8` (`src/image.rs`), `adesk-client`'s `decode_rgba8` (`src/image.rs`) and `adesk-viewer/src/capture.rs`; `ImageBuffer::from_rgba` is the canonical check for tightly packed rows.
 - This crate has no image codec at all: no PNG encode/decode, no pixel diff/equality or alpha-blend/overlay-compositing helper, and no frame/inspection-frame type. PNG (via the `image` crate), crop, downscale and readback→`ImageBuffer` live in `adesk-render`; base64 payloads live in `adesk-proto`; overlay *compositing* lives in `adesk-inspector` (core only defines the `OverlayKind` enum).
 - `adesk-core` depends on `serde` + `thiserror` only (dev: `serde_json`); it does **not** depend on `image`, `png` or `base64` even though those are declared in the root `[workspace.dependencies]` for other crates.
