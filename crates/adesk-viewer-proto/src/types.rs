@@ -3,7 +3,7 @@
 //! These are the payloads of the VAP messages in [`crate::message`]; the message
 //! enums add the `"type"` discriminator around them.
 
-use adesk_core::{OverlayKind, Size, WindowId, WindowInfo};
+use adesk_core::{ActionId, AppId, LaunchId, OverlayKind, Size, WindowId, WindowInfo};
 use adesk_proto::{ImagePayload, RendererKind};
 use serde::{Deserialize, Serialize};
 
@@ -244,4 +244,42 @@ impl Default for RecordingStatus {
     fn default() -> RecordingStatus {
         RecordingStatus::idle()
     }
+}
+
+/// One launchable application, as reported by an `apps` message
+/// (`docs/viewer.md` §4).
+///
+/// A projection of the runtime's XDG registry entry: the desktop-file id, its
+/// display name, an optional icon name and its raw `Categories` entries.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppEntry {
+    /// Desktop-file id, e.g. `"org.mozilla.firefox"`.
+    pub id: AppId,
+    /// Localized display name from the desktop entry.
+    pub name: String,
+    /// Icon name, when the desktop entry declares one; omitted from the wire
+    /// form when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub icon: Option<String>,
+    /// Raw `Categories` entries.
+    pub categories: Vec<String>,
+}
+
+/// The outcome of a `launch_app` request, carried by a `launch_result` message
+/// (`docs/viewer.md` §4).
+///
+/// The `action_id`/`window_id` fields are optional and are omitted from the
+/// wire form when absent (e.g. before the launched window has been correlated).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LaunchOutcome {
+    /// The application that was launched.
+    pub app_id: AppId,
+    /// The runtime's launch id for this launch (the AGP launch correlation id).
+    pub launch_id: LaunchId,
+    /// The AGP action id the runtime recorded, once it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action_id: Option<ActionId>,
+    /// The window the launch produced, once it has been correlated.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window_id: Option<WindowId>,
 }
