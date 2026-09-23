@@ -32,7 +32,7 @@ Errors (`src/error.rs`): `ViewerProtoError { Malformed, Unknown { message_type }
 ## Constraints
 - `docs/viewer.md` is normative: never invent a message, field or default; additive changes only (§7).
 - Pure serialization: no tokio, no async, no I/O, no Smithay in this crate.
-- Reuse the shared vocabulary from `adesk-core` (`WindowId`, `ActionId`, `Size`, `Button`, `ButtonState`, `OverlayKind`, `ErrorCode`, `WindowInfo`) and `adesk-proto` (`ImagePayload`, `KeySpec`, `RendererKind`); depend on them, never fork them.
+- Reuse the shared vocabulary from `adesk-core` (`WindowId`, `ActionId`, `LaunchId`, `AppId`, `Size`, `Button`, `ButtonState`, `OverlayKind`, `ErrorCode`, `WindowInfo`) and `adesk-proto` (`ImagePayload`, `KeySpec`, `RendererKind`); depend on them, never fork them.
 - `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; every public item documented.
 - Dependencies come only from root `[workspace.dependencies]` (`adesk-core`, `adesk-proto`, `serde`, `serde_json`, `thiserror`); never add inline versions.
 - Decoding must ignore unknown fields (forward compatibility) and never panic; malformed input returns `ViewerProtoError`.
