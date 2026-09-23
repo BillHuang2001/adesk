@@ -156,6 +156,10 @@ fn build_cursor_overlay(
 ) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_can_target(false);
+    // Fill the whole overlay, so the draw function always sees the current size
+    // of the displayed picture and the glyph can be placed anywhere in it.
+    area.set_halign(gtk::Align::Fill);
+    area.set_valign(gtk::Align::Fill);
     area.set_hexpand(true);
     area.set_vexpand(true);
 
