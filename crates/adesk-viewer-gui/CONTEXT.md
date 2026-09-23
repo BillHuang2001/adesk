@@ -410,14 +410,14 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   accessor), so that race is absorbed by the optimistic prune + state reconcile
   rather than shown as a notice. Failures the client does report (a write/transport
   failure) are surfaced in the notice line and the row is restored.
-- **VAP capability boundary (why there is no app *menu* and no "close all").** The
-  GUI's only runtime channel is VAP, and VAP's client vocabulary is `request_frame`,
-  `request_state`, `set_control`, `pointer_move`, `pointer_button`, `scroll`, `key`,
-  `text`, `activate_window`, `close_window`, `list_apps`, `launch_app`,
-  `start_recording`, `stop_recording`, `request_recording`, `bye`
-  (`docs/viewer.md` §4). There is no VAP message to raise a window, resize/move a
-  window, or close several at once, and `DesktopState` carries windows only (no app
-  list) — so the launcher fetches apps on demand rather than showing a live app menu.
+- **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
+  client vocabulary is `request_frame`, `request_state`, `set_control`,
+  `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
+  `close_window`, `list_apps`, `launch_app`, `start_recording`, `stop_recording`,
+  `request_recording`, `bye` (`docs/viewer.md` §4). There is no VAP message to
+  raise, move or resize a window, and `DesktopState` carries windows only (no app
+  list) — so the launcher fetches the app list on demand rather than showing a live
+  app menu, and there is no "close all".
 - No menus, toolbar entries or `gio` keyboard accelerators exist beyond the
   release action: the header bar holds **Open app**, **Release control**, the help
   menu button and the Record/Stop toggle, the bottom bar is the window task bar
