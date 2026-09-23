@@ -10,9 +10,10 @@
       systems = [ "x86_64-linux" "aarch64-linux" ];
       forAllSystems = f: nixpkgs.lib.genAttrs systems (system: f (import nixpkgs { inherit system; }));
 
-      # Native libraries the runtime links against (or dlopen's at runtime).
-      # Shared by the package and the dev shell; keep in sync with the
-      # "Running in a container" section of README.md.
+      # Native libraries the runtime links against (or dlopen's at runtime),
+      # plus the `dbus` tooling package (see below). Shared by the package and
+      # the dev shell; keep in sync with the "Running in a container" section
+      # of README.md.
       adeskLibraries = pkgs: with pkgs; [
         libxkbcommon     # keyboard keymap handling (smithay hard dependency)
         xkeyboard-config # XKB data files used by libxkbcommon at runtime
@@ -26,14 +27,20 @@
         libinput
         systemd          # libudev
         seatd            # libseat + seatd daemon
-        dbus             # reserved for future AT-SPI integration
+        dbus             # tooling only: provides dbus-daemon for a private session bus
+                         # (the adesk-a11y AT-SPI2 client uses the pure-Rust atspi/zbus
+                         # crates and never links libdbus; the accessibility integration
+                         # test starts a private bus, and a real AT-SPI session can too)
       ];
 
       # Native libraries only the GTK4/libadwaita viewer front-end
       # (`adesk-viewer-gui`) needs. Kept separate from `adeskLibraries` so the
-      # headless runtime/server binaries never gain a GTK dependency, while the
-      # package and the dev shell both still get them. `gtk4`/`libadwaita`
-      # propagate their own pkg-config deps (pango, cairo, gdk-pixbuf, ...).
+      # headless viewer/server/machine/agent binaries never gain a GTK
+      # dependency. The package includes `adesk-viewer-gui` (the workspace root
+      # is a virtual manifest, so `cargo build` builds every member) and thus
+      # needs these on PKG_CONFIG_PATH; the dev shell needs them to build and
+      # test the workspace. `gtk4`/`libadwaita` propagate their own pkg-config
+      # deps (pango, cairo, gdk-pixbuf, ...).
       adeskGuiLibraries = pkgs: with pkgs; [
         gtk4
         libadwaita
@@ -41,8 +48,8 @@
     in
     {
       # `nix build .#adesk` (or `.#default`) builds every ADesk binary —
-      # adesk-server, adesk-viewer, adesk-machine and adesk-agent — from the
-      # workspace's pinned Cargo.lock.
+      # adesk-server, adesk-viewer, adesk-viewer-gui, adesk-machine and
+      # adesk-agent — from the workspace's pinned Cargo.lock.
       packages = forAllSystems (pkgs:
         let
           adesk = pkgs.rustPlatform.buildRustPackage {
@@ -55,26 +62,27 @@
             cargoLock.lockFile = ./Cargo.lock;
 
             nativeBuildInputs = with pkgs; [ pkg-config cmake ];
-            # The `pkg-config` setup hook exports PKG_CONFIG_PATH for every
-            # `buildInputs` package, which is what lets wayland-sys and
-            # xkbcommon's build scripts find the libraries below; the Nix
-            # linker wrapper records them in the binaries' RUNPATH (several are
-            # also dlopen'd at runtime).
-            buildInputs = adeskLibraries pkgs;
+            # Wayland-sys/xkbcommon build scripts find the libraries below via
+            # the `pkg-config` setup hook's PKG_CONFIG_PATH; the Nix linker
+            # wrapper records them in the binaries' RUNPATH (several are also
+            # dlopen'd at runtime). `adeskGuiLibraries` is required because the
+            # workspace root is a virtual manifest, so building the package
+            # builds `adesk-viewer-gui` too.
+            buildInputs = (adeskLibraries pkgs) ++ (adeskGuiLibraries pkgs);
 
             # The test suites start a real compositor and need a runtime
             # environment (XDG_RUNTIME_DIR, xkb data, sockets). Building the
             # package must not require one; run them via ./scripts/dev.sh.
             doCheck = false;
 
-            # Ship the four user-facing binaries only; `adesk-testkit`'s
+            # Ship the five user-facing binaries only; `adesk-testkit`'s
             # dev-only fixture binary is not part of the runtime.
             postInstall = ''
               rm -f $out/bin/adesk-test-app
             '';
 
             meta = with pkgs.lib; {
-              description = "AI-native headless Wayland runtime (AGP server, viewer, machine and agent)";
+              description = "AI-native headless Wayland runtime (AGP server, viewer + GTK front-end, machine and agent)";
               homepage = "https://example.invalid/adesk";
               license = with licenses; [ mit asl20 ];
               platforms = platforms.linux;
