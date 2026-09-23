@@ -257,6 +257,13 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 ## Known Issues
 
+- A client that streams DMA-BUF buffers (e.g. a GTK4/OpenGL app) whose import the backend rejects
+  (`Dmabuf::map_plane` mmap returns `EPERM`) is handled cleanly — the protocol handler logs
+  `dmabuf import failed` and answers `notifier.failed()`, and the render-time element walk drops the
+  element — so no crate code panics or dereferences a bad pointer on that path. A SIGSEGV seen
+  alongside those repeated failures therefore originates in the unsafe dependency/backend layer
+  (Smithay's pixman `import_dmabuf` handing a raw mmap pointer + client stride to libpixman, or the
+  EGL/Mesa import path on GL), not in this crate. See the triage note in `src/CONTEXT.md`.
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
