@@ -100,7 +100,9 @@ impl XkbSettings {
 ///
 /// `Default` is the documented runtime default: `1280x800` virtual output,
 /// renderer `Auto`, US keyboard, automatically named Wayland socket, event
-/// broadcast capacity 4096 (`docs/architecture.md` §1).
+/// broadcast capacity 4096, and the `zwp_linux_dmabuf_v1` global enabled
+/// (`docs/architecture.md` §1). The dmabuf switch can be turned off to start the
+/// compositor in an SHM-only mode (see [`CompositorConfig::without_dmabuf`]).
 #[derive(Debug, Clone)]
 pub struct CompositorConfig {
     /// Size of the single virtual output; windows are tiled to fill it.
@@ -109,6 +111,13 @@ pub struct CompositorConfig {
     pub renderer: RendererKind,
     /// xkb keymap settings for the virtual keyboard.
     pub xkb: XkbSettings,
+    /// Whether the compositor creates the `zwp_linux_dmabuf_v1` global.
+    ///
+    /// When `false` no dmabuf global is advertised, so only `wl_shm` clients can
+    /// attach buffers (an SHM-only fallback). This is an operator escape hatch for
+    /// a crashing client or graphics driver that streams DMA-BUF buffers: the
+    /// renderer is still created normally, only the global is skipped.
+    pub dmabuf: bool,
     /// Explicit Wayland socket name (e.g. `"wayland-7"`).
     ///
     /// `None` binds the next free `wayland-N` name.
@@ -126,6 +135,7 @@ impl Default for CompositorConfig {
             output_size: Size { w: 1280, h: 800 },
             renderer: RendererKind::default(),
             xkb: XkbSettings::default(),
+            dmabuf: true,
             socket_name: None,
             event_channel_capacity: 4096,
         }
@@ -153,6 +163,25 @@ impl CompositorConfig {
     /// Set the xkb keymap settings.
     pub fn with_xkb(mut self, xkb: XkbSettings) -> Self {
         self.xkb = xkb;
+        self
+    }
+
+    /// Enable or disable the `zwp_linux_dmabuf_v1` global.
+    ///
+    /// When `enabled` is `false` the compositor creates no dmabuf global, so only
+    /// `wl_shm` clients can attach buffers — an SHM-only fallback useful when a
+    /// client or graphics driver crashes while streaming DMA-BUF buffers. The
+    /// renderer itself is still created normally; only the global is skipped.
+    pub fn with_dmabuf(mut self, enabled: bool) -> Self {
+        self.dmabuf = enabled;
+        self
+    }
+
+    /// Disable the `zwp_linux_dmabuf_v1` global (SHM-only mode).
+    ///
+    /// Convenience for [`CompositorConfig::with_dmabuf`]`(false)`.
+    pub fn without_dmabuf(mut self) -> Self {
+        self.dmabuf = false;
         self
     }
 
@@ -195,6 +224,7 @@ mod tests {
         assert_eq!(config.renderer, RendererKind::Auto);
         assert_eq!(config.xkb.layout, "us");
         assert_eq!(config.xkb.rules, "evdev");
+        assert!(config.dmabuf);
         assert!(config.socket_name.is_none());
         assert_eq!(config.event_channel_capacity, 4096);
     }
@@ -244,6 +274,23 @@ mod tests {
         assert_eq!(
             config.physical_size(),
             smithay::utils::Size::from((800, 600))
+        );
+    }
+
+    #[test]
+    fn dmabuf_switch_toggles_the_global_flag() {
+        // The switch defaults on.
+        assert!(CompositorConfig::new().dmabuf);
+        assert!(CompositorConfig::new().with_dmabuf(true).dmabuf);
+        // Both disabling paths clear it.
+        assert!(!CompositorConfig::new().with_dmabuf(false).dmabuf);
+        assert!(!CompositorConfig::new().without_dmabuf().dmabuf);
+        // Re-enabling after a disable brings it back.
+        assert!(
+            CompositorConfig::new()
+                .without_dmabuf()
+                .with_dmabuf(true)
+                .dmabuf
         );
     }
 }
