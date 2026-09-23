@@ -53,8 +53,12 @@ Nothing is exported here directly; `lib.rs` re-exports the public surface
   is indexed only up to the fixed 2 element names (`level_modifier_names`).
 - `protocols/dmabuf.rs` handles a failed renderer import by design and without
   panicking: `notify` logs a WARN and calls `notifier.failed()` on `Err`, and consumes
-  the `ImportNotifier` exactly once. A DMA-BUF import failure (e.g. Smithay's
-  `Dmabuf::map_plane` mmap returning EPERM) cannot panic in this crate.
+  the `ImportNotifier` exactly once. Before the renderer sees a buffer, `validate_dmabuf`
+  rejects a malformed descriptor (zero/degenerate size, zero stride, `offset` outside the
+  plane fd, a plane too short for one row, and — for a linear/implicit **single-plane**
+  buffer only — a whole buffer that does not fit) and logs the full descriptor; see the
+  crate root CONTEXT.md for the triage. `CompositorConfig::dmabuf == false` creates no
+  `zwp_linux_dmabuf_v1` global at all.
 - `protocols/shm.rs` `buffer_destroyed` only sweeps the concrete backend's texture
   cache and logs a failed sweep; it sends nothing and never panics.
 
