@@ -42,7 +42,7 @@ Errors (`src/error.rs`): `ViewerProtoError { Malformed, Unknown { message_type }
 |---|---|
 | Crate root, version helpers, re-exports | `./src/lib.rs` |
 | `ClientMessage` / `ServerMessage` enums, tag dispatch | `./src/message.rs` |
-| Handshake/frame/state/cursor/control types | `./src/types.rs` |
+| Handshake/frame/state/cursor/control/recording/app-management types | `./src/types.rs` |
 | Codec (`encode_*`/`decode_*`) | `./src/codec.rs` |
 | `ViewerProtoError`, AGP error-code mapping | `./src/error.rs` |
 | Golden-JSON + round-trip tests | `./tests/wire.rs` |
