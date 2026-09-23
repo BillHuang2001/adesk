@@ -110,6 +110,7 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 | Per-connection session state machine (handshake, select loop, pacing, message dispatch) | `./src/session.rs` |
 | `ViewerServer` façade + `ViewerServerConfig`/`PeerInfo` | `./src/server.rs` |
 | `ViewerClient`, `ViewerTarget`, `ConnectOptions` | `./src/client.rs` |
+| Reply FIFOs for reply-only requests (`ReplyFifo`, `Pending`, `await_reply`) | `./src/reply.rs` |
 | Viewer-socket resolution contract (`resolve_socket_path`, sibling derivation) | `./src/socket.rs` |
 | Frame → PNG capture helpers | `./src/capture.rs` |
 | Input-script grammar + parser | `./src/script.rs` |
