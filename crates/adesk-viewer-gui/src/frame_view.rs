@@ -1,11 +1,22 @@
-//! The desktop frame view: a `gtk::Picture` that renders streamed frames and
-//! turns local pointer/key activity into normalized input commands.
+//! The desktop frame view: a `gtk::Picture` that renders streamed frames, an
+//! overlay that draws the remote pointer, and the input controllers that turn
+//! local pointer/key activity into normalized input commands.
 //!
 //! This is the human's seat in the same seat the agent drives: every pointer,
 //! button, scroll and key event is translated into an [`InputCommand`] and sent
 //! through the bridge — there is no special human code path. Pixel positions are
 //! converted to VAP's normalized `0.0..=1.0` output fractions with the pure
 //! [`crate::mapping`] helpers, never sent as pixels.
+//!
+//! Three decisions are deliberately kept out of this file and unit-tested in
+//! display-free modules:
+//! - where the remote pointer is drawn ([`crate::cursor`]);
+//! - whether a button event is forwarded at all ([`crate::pointer`]);
+//! - whether a keystroke is forwarded, passed to the toolkit or handed to the
+//!   viewer's escape hatch ([`crate::keystroke`]).
+//!
+//! What is left here is widget glue: attaching controllers, setting the frame's
+//! texture and drawing the pointer glyph.
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -16,53 +27,97 @@ use gtk4 as gtk;
 
 use adesk_core::{Button, ButtonState};
 use adesk_proto::KeySpec;
-use adesk_viewer_proto::KeyAction;
+use adesk_viewer_proto::{CursorState, KeyAction};
 
 use crate::bridge::{InputCommand, InputHandle};
+use crate::cursor;
 use crate::image::DecodedImage;
-use crate::keystroke::{KeyRoute, KeyRouter, Modifiers};
+use crate::keystroke::{Delivery as KeyDelivery, KeyRoute, KeyRouter, Modifiers};
 use crate::mapping;
+use crate::pointer::{Delivery as PointerDelivery, PointerState};
 
-/// The frame view: a `gtk::Picture` plus its input controllers.
+/// The frame view: the desktop picture, the remote-pointer overlay and the
+/// input controllers.
 pub(crate) struct FrameView {
+    /// The overlay that stacks the pointer on top of the picture.
+    overlay: gtk::Overlay,
     /// The paintable widget that shows the desktop.
     picture: gtk::Picture,
+    /// The overlay child that draws the remote pointer.
+    cursor_area: gtk::DrawingArea,
     /// The dimensions of the currently displayed image (`(0, 0)` before the
     /// first frame), used for the letterbox coordinate mapping.
     dimensions: Rc<Cell<(u32, u32)>>,
+    /// The most recent remote cursor state (hidden until the first frame).
+    cursor: Rc<RefCell<CursorState>>,
+    /// Whether the frame view currently holds keyboard focus.
+    focused: Rc<Cell<bool>>,
 }
 
 impl FrameView {
-    /// Builds the picture and attaches every input controller for `input`.
-    pub(crate) fn new(input: InputHandle) -> FrameView {
+    /// Builds the picture, the pointer overlay and every input controller for
+    /// `input`.
+    ///
+    /// `on_focus_change` is called with the frame view's keyboard-focus state
+    /// whenever it changes (and once for the state it starts in), so the window
+    /// layer can show the "click here to take control" hint.
+    pub(crate) fn new(input: InputHandle, on_focus_change: impl Fn(bool) + 'static) -> FrameView {
         let picture = gtk::Picture::new();
         picture.set_content_fit(gtk::ContentFit::Contain);
         picture.set_can_shrink(true);
         picture.set_hexpand(true);
         picture.set_vexpand(true);
         picture.set_focusable(true);
+        // The picture is the pointer target of the frame view; the pointer
+        // overlay stacked on top of it explicitly is not.
+        picture.set_can_target(true);
 
         let dimensions: Rc<Cell<(u32, u32)>> = Rc::new(Cell::new((0, 0)));
+        let cursor: Rc<RefCell<CursorState>> = Rc::new(RefCell::new(CursorState::hidden()));
         let last_point: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
+        let pointer: Rc<RefCell<PointerState>> = Rc::new(RefCell::new(PointerState::new()));
+        let focused: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+
+        let cursor_area = build_cursor_overlay(&dimensions, &cursor);
+
+        let overlay = gtk::Overlay::new();
+        overlay.set_child(Some(&picture));
+        overlay.add_overlay(&cursor_area);
 
         attach_motion(&picture, &dimensions, &last_point, &input);
-        attach_clicks(&picture, &dimensions, &input);
+        attach_clicks(&picture, &dimensions, &pointer, &input);
         attach_scroll(&picture, &dimensions, &last_point, &input);
-        attach_keys(&picture, &input);
+        attach_keys(&picture, &focused, &input);
+        attach_focus(&picture, &focused, on_focus_change);
 
         FrameView {
+            overlay,
             picture,
+            cursor_area,
             dimensions,
+            cursor,
+            focused,
         }
     }
 
-    /// The paintable widget to place in the window layout.
-    pub(crate) fn widget(&self) -> gtk::Picture {
-        self.picture.clone()
+    /// The widget to place in the window layout.
+    pub(crate) fn widget(&self) -> gtk::Overlay {
+        self.overlay.clone()
     }
 
-    /// Displays `image`, taking ownership of its RGBA8 buffer (no copy).
-    pub(crate) fn set_frame(&self, image: DecodedImage) {
+    /// Gives the desktop the keyboard (clicks do this as well).
+    pub(crate) fn focus(&self) {
+        self.picture.grab_focus();
+    }
+
+    /// Whether the frame view currently holds keyboard focus.
+    pub(crate) fn is_focused(&self) -> bool {
+        self.focused.get()
+    }
+
+    /// Displays `image` (taking ownership of its RGBA8 buffer, no copy) together
+    /// with the `cursor` position the runtime reported for that frame.
+    pub(crate) fn set_frame(&self, image: DecodedImage, cursor: CursorState) {
         let DecodedImage {
             width,
             height,
@@ -77,7 +132,77 @@ impl FrameView {
         );
         self.picture.set_paintable(Some(&texture));
         self.dimensions.set((width, height));
+
+        // Repaint the overlay only when the pointer actually moved (or appeared
+        // or vanished): the position is resolved against the widget's current
+        // size inside the draw function, so a resize needs no bookkeeping here.
+        let moved = *self.cursor.borrow() != cursor;
+        *self.cursor.borrow_mut() = cursor;
+        if moved {
+            self.cursor_area.queue_draw();
+        }
     }
+}
+
+/// Builds the overlay child that draws the remote pointer.
+///
+/// It spans the whole frame view (so it always knows the widget's current size),
+/// is never a pointer target, and resolves the frame's normalized cursor
+/// position with the pure [`crate::cursor`] math against the same displayed-image
+/// rectangle the click mapping uses.
+fn build_cursor_overlay(
+    dimensions: &Rc<Cell<(u32, u32)>>,
+    cursor: &Rc<RefCell<CursorState>>,
+) -> gtk::DrawingArea {
+    let area = gtk::DrawingArea::new();
+    area.set_can_target(false);
+    area.set_hexpand(true);
+    area.set_vexpand(true);
+
+    let draw_dimensions = dimensions.clone();
+    let draw_cursor = cursor.clone();
+    area.set_draw_func(move |_, context, width, height| {
+        let widget = (f64::from(width), f64::from(height));
+        let Some(display) = mapping::letterbox(widget, draw_dimensions.get()) else {
+            return;
+        };
+        if let Some((x, y)) = cursor::overlay_position(&display, &draw_cursor.borrow()) {
+            draw_pointer(context, x, y);
+        }
+    });
+
+    area
+}
+
+/// The drawn pointer's height in widget pixels.
+const POINTER_HEIGHT: f64 = 16.0;
+
+/// The drawn pointer's width in widget pixels.
+const POINTER_WIDTH: f64 = 11.0;
+
+/// Draws a small arrow pointer with its tip at the widget point `(x, y)`.
+///
+/// Cairo records a drawing failure in the context's status rather than failing
+/// the call; there is nothing a viewer can do about a refused paint, so the
+/// status is deliberately ignored (this is the one place where that is true).
+fn draw_pointer(context: &gtk::cairo::Context, x: f64, y: f64) {
+    let (w, h) = (POINTER_WIDTH, POINTER_HEIGHT);
+
+    context.move_to(x, y);
+    context.line_to(x, y + h);
+    context.line_to(x + 0.30 * w, y + 0.72 * h);
+    context.line_to(x + 0.55 * w, y + 0.98 * h);
+    context.line_to(x + 0.78 * w, y + 0.88 * h);
+    context.line_to(x + 0.55 * w, y + 0.62 * h);
+    context.line_to(x + w, y + 0.60 * h);
+    context.close_path();
+
+    // A dark fill with a light outline stays visible on any desktop content.
+    context.set_source_rgba(0.0, 0.0, 0.0, 0.80);
+    let _ = context.fill_preserve();
+    context.set_line_width(1.5);
+    context.set_source_rgba(1.0, 1.0, 1.0, 0.95);
+    let _ = context.stroke();
 }
 
 /// The displayed image rectangle inside `picture`, in widget pixels.
@@ -103,7 +228,7 @@ fn normalize(
 }
 
 /// Like [`normalize`], but returns `None` when `point` falls outside the image
-/// (a click in the letterbox/pillarbox bars is ignored rather than clamped).
+/// (a click in the letterbox/pillarbox bars has no desktop target).
 fn normalize_click(
     picture: &gtk::Picture,
     dimensions: (u32, u32),
@@ -158,6 +283,24 @@ fn forward(route: KeyRoute, action: KeyAction, input: &InputHandle) {
     }
 }
 
+/// Forwards one keystroke decision and reports whether GTK may still handle the
+/// keystroke.
+///
+/// A forwarded keystroke stops the event so the toolkit cannot act on it a
+/// second time (focus traversal on `Tab`, activation on `Space`/`Return`, a
+/// window shortcut chord); the escape hatch's chord is left to propagate to the
+/// app-level accelerator, and anything that is not forwarded is left to the
+/// widget that has focus.
+fn deliver_key(delivery: KeyDelivery, action: KeyAction, input: &InputHandle) -> glib::Propagation {
+    match delivery {
+        KeyDelivery::Forward(route) => {
+            forward(route, action, input);
+            glib::Propagation::Stop
+        }
+        KeyDelivery::Escape | KeyDelivery::Pass => glib::Propagation::Proceed,
+    }
+}
+
 /// Attaches the pointer-motion controller (`Move`).
 fn attach_motion(
     picture: &gtk::Picture,
@@ -182,7 +325,12 @@ fn attach_motion(
 }
 
 /// Attaches one click controller per mouse button (`Button`).
-fn attach_clicks(picture: &gtk::Picture, dimensions: &Rc<Cell<(u32, u32)>>, input: &InputHandle) {
+fn attach_clicks(
+    picture: &gtk::Picture,
+    dimensions: &Rc<Cell<(u32, u32)>>,
+    pointer: &Rc<RefCell<PointerState>>,
+    input: &InputHandle,
+) {
     for gdk_button in [1u32, 2, 3, 8, 9] {
         let Some(button) = button_for(gdk_button) else {
             continue;
@@ -192,37 +340,51 @@ fn attach_clicks(picture: &gtk::Picture, dimensions: &Rc<Cell<(u32, u32)>>, inpu
 
         let press_weak = picture.downgrade();
         let press_dimensions = dimensions.clone();
+        let press_pointer = pointer.clone();
         let press_input = input.clone();
         click.connect_pressed(move |_, _, x, y| {
             let Some(picture) = press_weak.upgrade() else {
                 return;
             };
-            // Focus the view so subsequent key events reach the controllers.
+            // Taking control must not swallow the click: the view grabs focus
+            // and the press is still delivered, so the very first click on an
+            // unfocused desktop reaches the remote app.
             picture.grab_focus();
-            if let Some((nx, ny)) = normalize(&picture, press_dimensions.get(), (x, y)) {
-                press_input.send(InputCommand::Button {
-                    button,
-                    state: ButtonState::Pressed,
-                    x: nx,
-                    y: ny,
-                });
+
+            let dimensions = press_dimensions.get();
+            let inside = normalize_click(&picture, dimensions, (x, y)).is_some();
+            if press_pointer.borrow_mut().press(button, inside) == PointerDelivery::Forward {
+                if let Some((nx, ny)) = normalize(&picture, dimensions, (x, y)) {
+                    press_input.send(InputCommand::Button {
+                        button,
+                        state: ButtonState::Pressed,
+                        x: nx,
+                        y: ny,
+                    });
+                }
             }
         });
 
         let release_weak = picture.downgrade();
         let release_dimensions = dimensions.clone();
+        let release_pointer = pointer.clone();
         let release_input = input.clone();
         click.connect_released(move |_, _, x, y| {
             let Some(picture) = release_weak.upgrade() else {
                 return;
             };
-            if let Some((nx, ny)) = normalize_click(&picture, release_dimensions.get(), (x, y)) {
-                release_input.send(InputCommand::Button {
-                    button,
-                    state: ButtonState::Released,
-                    x: nx,
-                    y: ny,
-                });
+            // A forwarded press is always matched by a release — the position is
+            // clamped, so a drag that ends in a letterbox bar still lifts the
+            // button instead of leaving the remote pointer stuck down.
+            if release_pointer.borrow_mut().release(button) == PointerDelivery::Forward {
+                if let Some((nx, ny)) = normalize(&picture, release_dimensions.get(), (x, y)) {
+                    release_input.send(InputCommand::Button {
+                        button,
+                        state: ButtonState::Released,
+                        x: nx,
+                        y: ny,
+                    });
+                }
             }
         });
 
@@ -260,31 +422,39 @@ fn attach_scroll(
 }
 
 /// Attaches the key controller (`Key`/`Text`) and the input-method commit path.
-fn attach_keys(picture: &gtk::Picture, input: &InputHandle) {
+///
+/// Keystrokes the viewer forwards stop propagating (see [`deliver_key`]), and the
+/// escape chord is left to the app-level release action.
+fn attach_keys(picture: &gtk::Picture, focused: &Rc<Cell<bool>>, input: &InputHandle) {
     let controller = gtk::EventControllerKey::new();
     let router: Rc<RefCell<KeyRouter>> = Rc::new(RefCell::new(KeyRouter::new()));
 
     let press_router = router.clone();
+    let press_focused = focused.clone();
     let press_input = input.clone();
     controller.connect_key_pressed(move |_, key, _, state| {
-        let route = press_router.borrow_mut().press(
+        let delivery = press_router.borrow_mut().press(
             key.name().as_deref(),
             key.to_unicode(),
             modifiers(state),
+            press_focused.get(),
         );
-        forward(route, KeyAction::Pressed, &press_input);
-        glib::Propagation::Proceed
+        deliver_key(delivery, KeyAction::Pressed, &press_input)
     });
 
     let release_router = router.clone();
+    let release_focused = focused.clone();
     let release_input = input.clone();
     controller.connect_key_released(move |_, key, _, state| {
-        let route = release_router.borrow_mut().release(
+        let delivery = release_router.borrow_mut().release(
             key.name().as_deref(),
             key.to_unicode(),
             modifiers(state),
+            release_focused.get(),
         );
-        forward(route, KeyAction::Released, &release_input);
+        // Releases cannot be stopped in GTK; the decision only picks whether the
+        // keystroke is forwarded at all.
+        let _ = deliver_key(delivery, KeyAction::Released, &release_input);
     });
 
     // Input-method text arrives on `commit`. A single-character commit duplicates
@@ -300,6 +470,32 @@ fn attach_keys(picture: &gtk::Picture, input: &InputHandle) {
             }
         });
     }
+
+    picture.add_controller(controller);
+}
+
+/// Attaches the focus controller that reports keyboard control to the routing
+/// gate and to the window layer (the focus hint).
+fn attach_focus(
+    picture: &gtk::Picture,
+    focused: &Rc<Cell<bool>>,
+    on_focus_change: impl Fn(bool) + 'static,
+) {
+    let controller = gtk::EventControllerFocus::new();
+    let on_focus_change: Rc<dyn Fn(bool)> = Rc::new(on_focus_change);
+
+    let enter_focused = focused.clone();
+    let enter = on_focus_change.clone();
+    controller.connect_enter(move |_| {
+        enter_focused.set(true);
+        enter(true);
+    });
+
+    let leave_focused = focused.clone();
+    controller.connect_leave(move |_| {
+        leave_focused.set(false);
+        on_focus_change(false);
+    });
 
     picture.add_controller(controller);
 }

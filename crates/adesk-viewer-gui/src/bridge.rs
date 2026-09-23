@@ -25,7 +25,7 @@ use adesk_core::{Button, ButtonState, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer::{RecordRequest, ViewerClient, ViewerError, ViewerTarget};
 use adesk_viewer_proto::{
-    ControlOwner, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
+    ControlOwner, CursorState, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
 };
 
 use crate::address::{connect_failure, unexpected_close};
@@ -107,6 +107,9 @@ pub(crate) enum UiEvent {
         ts_ms: u64,
         /// The decoded desktop image.
         image: DecodedImage,
+        /// The remote pointer's position and visibility at render time
+        /// (normalized `0.0..=1.0` output fractions).
+        cursor: CursorState,
         /// The window the frame targets, when one is active.
         active_window_id: Option<WindowId>,
     },
@@ -331,6 +334,9 @@ async fn session(
 }
 
 /// Decodes `frame` and forwards it, turning a decode failure into a notice.
+///
+/// The frame's remote cursor rides along, so the GTK layer can draw the pointer
+/// on top of the pixels it just painted.
 fn emit_frame(frame: &ViewerFrame, events: &UnboundedSender<UiEvent>) {
     match decode(&frame.image) {
         Ok(image) => {
@@ -338,6 +344,7 @@ fn emit_frame(frame: &ViewerFrame, events: &UnboundedSender<UiEvent>) {
                 seq: frame.seq,
                 ts_ms: frame.ts_ms,
                 image,
+                cursor: frame.cursor.clone(),
                 active_window_id: frame.active_window_id,
             });
         }
@@ -448,15 +455,13 @@ mod tests {
     use super::*;
 
     use adesk_proto::ImagePayload;
-    use adesk_viewer_proto::CursorState;
-
-    /// A frame fixture carrying `image`.
+    /// A frame fixture carrying `image` and a visible remote cursor.
     fn frame(image: ImagePayload) -> ViewerFrame {
         ViewerFrame {
             seq: 7,
             ts_ms: 123,
             image,
-            cursor: CursorState::hidden(),
+            cursor: CursorState::at(0.25, 0.75),
             active_window_id: Some(WindowId(3)),
         }
     }
@@ -473,6 +478,7 @@ mod tests {
                 seq,
                 ts_ms,
                 image,
+                cursor,
                 active_window_id,
             } => {
                 assert_eq!(seq, 7);
@@ -481,7 +487,25 @@ mod tests {
                 assert_eq!(image.height, 1);
                 assert_eq!(image.rgba8, vec![1, 2, 3, 255]);
                 assert_eq!(active_window_id, Some(WindowId(3)));
+                // The remote pointer travels with the pixels, so the GUI can
+                // draw it over the frame it just decoded.
+                assert_eq!(cursor, CursorState::at(0.25, 0.75));
             }
+            other => panic!("expected a frame event, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_hidden_cursor_is_still_reported() {
+        let (events, mut receiver) = unbounded_channel();
+        let payload = ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0).unwrap();
+        let mut frame = frame(payload);
+        frame.cursor = CursorState::hidden();
+
+        emit_frame(&frame, &events);
+
+        match receiver.try_recv().unwrap() {
+            UiEvent::Frame { cursor, .. } => assert!(!cursor.visible),
             other => panic!("expected a frame event, got {other:?}"),
         }
     }
