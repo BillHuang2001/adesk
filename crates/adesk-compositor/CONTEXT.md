@@ -207,7 +207,7 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 80 tests pass):
+Unit tests (colocated `#[cfg(test)]`; 99 tests pass):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, reserved seqs increase without emitting, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
