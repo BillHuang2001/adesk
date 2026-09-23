@@ -70,7 +70,7 @@ Design invariants:
 | `crates/adesk-testkit/` | Dev-only test harness: in-process runtime, Wayland test client, fixtures, image assertions. |
 | `crates/adesk-viewer-proto/` | Viewer Attachment Protocol (VAP) v1: viewer↔runtime wire messages, codec. No I/O. |
 | `crates/adesk-viewer/` | Viewer: desktop-streaming server session + async client SDK + headless `adesk-viewer` binary. |
-| `crates/adesk-viewer-gui/` | GTK4/libadwaita desktop viewer front-end: frame view, window task bar, human input over VAP. The only GTK crate. |
+| `crates/adesk-viewer-gui/` | GTK4/libadwaita desktop viewer front-end: frame view, remote cursor, app launcher, window task bar, human input over VAP. The only GTK crate. |
 | `crates/adesk-machine/` | AI Machine runtime: rootless-container backend seam, machine lifecycle manager, host control plane. |
 | `crates/adesk-recorder/` | Screen recording: rendered desktop frames → encoded video file. Pure-Rust Motion-JPEG/AVI software backend (works with no GPU/display/external tool) + optional GPU-accelerated H.264 backend (external `ffmpeg` with a hardware encoder). No compositor/protocol/async coupling — `adesk-server` drives it. |
 | `crates/adesk-a11y/` | Accessibility subsystem: AT-SPI2 client over D-Bus (no compositor/protocol coupling), window↔accessible correlation, an element-handle → `AccessibleId` registry, and the text renderer. |
@@ -87,8 +87,16 @@ observes the desktop and provides limited human input over a purpose-built proto
 (VAP, `adesk-viewer-proto` / `adesk-viewer`). ADesk's viewer endpoint lives in
 `adesk-server` (`src/viewer/`) and reuses the same seat/input path as agent input; the
 `adesk-viewer` binary is a headless VAP client (frames → PNG, scripted input), while
-`adesk-viewer-gui` is the interactive GTK4/libadwaita front-end (a desktop window, a
-window task bar, and human pointer/key/text routed through the same VAP seat path).
+`adesk-viewer-gui` is the interactive GTK4/libadwaita front-end (a desktop window with a
+drawn remote cursor plus focus/help affordances, a window task bar, and human
+pointer/key/text routed through the same VAP seat path).
+
+VAP also carries application and window management, so a remote human can operate the
+desktop rather than just watch it: `list_apps` → `apps`, `launch_app` → `launch_result`,
+`close_window`, alongside the runtime-native `activate_window`. The server implements
+these by calling the same AGP dispatch functions the agent's calls use
+(`dispatch/apps.rs`, `dispatch/windows.rs`), so a viewer gains no authority beyond the
+pointer/keyboard control it already holds; `control` ownership stays advisory.
 
 Screen recording rides the same VAP connection: the runtime can start/stop a recording
 of the desktop and write it to a video file, driven by `adesk-recorder` — a pure-Rust
@@ -151,6 +159,7 @@ is the design record and `docs/architecture.md` §12 the subsystem contract.
 
 - **Protocol:** `docs/protocol.md` is normative. `adesk-proto` implements it exactly;
   server and client must not invent methods or fields outside it.
+- **Viewer protocol:** `docs/viewer.md` is normative for VAP (v1, additive evolution).
 - **System architecture & data flow:** `docs/architecture.md` (threading, channels,
   render pipeline, observation semantics, renderer selection).
 - **Errors:** every crate exposes a `thiserror` enum and `pub type Result<T>`.
@@ -220,13 +229,23 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
   `crates/adesk-compositor/CONTEXT.md`.
 - GTK4/libadwaita (for `adesk-viewer-gui`) come only from the dev shell / package
   (`flake.nix` `adeskGuiLibraries`); outside it the GUI crate cannot build or link.
-- The GUI binary needs a real display to *run*, so its widget glue is untested;
-  only its GTK-free modules (CLI, letterbox mapping, task-bar model, keystroke
-  routing, image decode) have display-free unit tests. The VAP connection is
+- The GUI binary needs a real display to *run*, so its widget glue (window/popover
+  assembly, controllers, overlays, task-bar buttons, `gio::Action` wiring) is untested;
+  every decision behind it lives in display-free unit-tested modules (CLI, socket
+  addressing, letterbox mapping, cursor placement, pointer pairing, keystroke routing,
+  help/status text, task-bar model, app-list filtering + launch state, window-close
+  reconciliation, image decode). The VAP connection is
   one-shot — a dropped connection shows a banner but does not auto-reconnect.
 - The server does not push `state` except in reply to `request_state` (the spec's
   advisory per-change push is not implemented), so a viewer refreshes the window
-  list by pulling `request_state` rather than via a server push stream.
+  list by pulling `request_state` rather than via a server push stream (the GUI pulls
+  after each action and on a short timer).
+- A viewer's `launch_result` reports the launched app id only — `window_id`/`action_id`
+  are absent because the reply precedes launch→window correlation — so the viewer
+  discovers the new window through the next `state` refresh. `close_window` on an
+  already-gone window answers `unknown_window` on the VAP error path; the GUI hides the
+  row optimistically and reconciles it against the next `state` refresh, and does not
+  surface that asynchronous error as a notice.
 - The AGP socket and the VAP viewer socket are distinct endpoints (`docs/viewer.md` §1.1):
   a VAP client pointed at `adesk.sock` is closed as an undecodable frame — the server logs
   a WARN hint naming the viewer socket, both viewer clients resolve the sibling default and
@@ -251,19 +270,20 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 
 ## Status
 The original 12 GUI-runtime crates are implementation-complete and independently audited: zero executable `todo!()`/`unimplemented!()` in the workspace, no crate-level `allow` attributes (only `forbid(unsafe_code)` + `deny(missing_docs)`), no behavioural test skips, and all 37 `docs/protocol.md` methods handled exactly once in the server dispatcher with no handler outside the spec.
-Four new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec, incl. the recording messages; 43 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary, incl. `--record`; 120 tests), `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 84 tests) and `adesk-recorder` (software MJPEG/AVI encoder + muxer, optional `ffmpeg` hardware-H.264 backend, `Recorder`/`RecordingSession`; 33 tests).
+Four new crates implement the assistant runtime: `adesk-viewer-proto` (VAP v1 wire types + codec, incl. the recording and the app/window-management messages; 50 tests), `adesk-viewer` (viewer server session + client SDK + headless `adesk-viewer` binary, incl. `--record`; 155 tests), `adesk-machine` (rootless-container backend seam, machine manager, host control plane + `adesk-machine` CLI; 84 tests) and `adesk-recorder` (software MJPEG/AVI encoder + muxer, optional `ffmpeg` hardware-H.264 backend, `Recorder`/`RecordingSession`; 33 tests).
 `adesk-a11y` adds the runtime's accessibility (text) view: the AT-SPI2 client (the workspace's only D-Bus speaker), window→accessible correlation, the element-handle → `AccessibleId` registry and the outline renderer behind the three §5.11 methods, backed by a deterministic fixture source that `adesk-testkit` injects and a lazy `auto`/`off` backend selection. Its suite is 106 unit + 1 integration (the mock AT-SPI2 provider suite) + 1 doc test, and `invoke_accessible_action` answers `not_supported` for any id when there is no backend because availability is probed before the id is resolved.
-`adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; it also backs the recording messages with an fps-paced capture loop (`--recordings-dir` / `ADESK_RECORDINGS_DIR` default). Its suite is 272 passed / 0 failed.
+`adesk-server` now also serves the VAP viewer endpoint on a second listener (a Unix socket by default at the AGP socket's sibling path, opt-in `--viewer-tcp`, `--no-viewer` to disable) and applies viewer input through the same §5.5 seat path; it also backs the recording messages with an fps-paced capture loop (`--recordings-dir` / `ADESK_RECORDINGS_DIR` default) and the app/window-management messages by delegating to the AGP dispatch functions. Its suite is 283 passed / 0 failed.
 `cargo check --workspace --all-targets` is green, `cargo clippy --workspace --all-targets --no-deps -- -D warnings` is clean, `cargo fmt --all --check` is clean, and `cargo doc --workspace --no-deps --document-private-items` emits zero warnings.
-`cargo test --workspace --no-fail-fast` = 1713 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
+`cargo test --workspace --no-fail-fast` = 1848 passed, 0 failed, 5 ignored; the 5 ignored are doc-code fences only.
 The on-demand capture path reuses a size-keyed pool of offscreen render targets (`adesk_render::TargetPool`, owned per backend by the compositor's `HeadlessRenderer`), so repeated captures of a given size no longer re-allocate a fresh ~4 MiB target each time.
 Feature-gated suites are green as well: `cargo test -p adesk-agent --features test-support,e2e` = 146 passed.
 `adesk-testkit` declares no Cargo features (so `--all-features` is a no-op); its suite runs 77 passed / 3 ignored doc-fences, unchanged under `ADESK_TEST_GL=1`, which is the only environment gate.
 Capstone evidence: `crates/adesk-agent/tests/e2e_runtime.rs` (14 tests) and `adesk-testkit`'s E2E suites drive a real runtime end to end — discover app → `launch_app` by desktop-file id → tiled toplevel → observation → click/type/scroll → native commit/damage events → `wait_for_quiet` → selective capture — with no screenshot loop.
 Launch→window correlation is asserted in the capstone itself; clipboard publication ordering, output composition (active-only), popup pixel proofs and the single global `seq` domain each have dedicated integration proofs.
-An interactive human front-end exists: `adesk-viewer-gui` is a GTK4/libadwaita app (the workspace's only GTK crate) that connects over VAP, renders the streamed desktop frames, routes pointer/key/scroll/text through the same seat path the agent uses, and adds a window task bar whose clicks switch windows through the runtime-native VAP `activate_window` message (added end to end in `adesk-viewer-proto` / `adesk-viewer` / `adesk-server`, `docs/viewer.md` §4/§5). The headless `adesk-viewer` binary remains for frames→PNG, scripted input and `--record <FILE>`.
+An interactive human front-end exists: `adesk-viewer-gui` is a GTK4/libadwaita app (the workspace's only GTK crate) that connects over VAP, renders the streamed desktop frames with a drawn remote cursor, routes pointer/key/scroll/text through the same seat path the agent uses, and makes the desktop operable — a bottom task bar switches windows through the runtime-native VAP `activate_window` message and closes them with `close_window`, an **Open app** launcher searches the runtime's installed apps (`list_apps`) and starts one (`launch_app`), and a header popover names the endpoint actually dialled, the active window and the control state, with a Release-control action (`Ctrl+Alt+Escape`) handing the keyboard back to the local desktop. All of this was added end to end in `adesk-viewer-proto` / `adesk-viewer` / `adesk-server` and is specified in `docs/viewer.md` §3–§5. The headless `adesk-viewer` binary remains for frames→PNG, scripted input and `--record <FILE>`; the GUI suite is 129 passed, all display-free.
 The GUI header also carries a record toggle driving the VAP recording messages.
 Screen recording is proven end to end: `docs/viewer.md` is the normative recording spec, and `adesk-recorder`'s round-trip tests decode their own MJPEG output, while `adesk-viewer`/`adesk-server` tests exercise start → frames → stop across the wire and the on-disk file, with the encoder/path (`.avi` software, `.mp4` GPU) chosen to match the backend actually used.
+App and window management over VAP is proven end to end in `crates/adesk-server/tests/viewer.rs`: list apps with a filter → launch a fixture app → observe the new window in `state` → close a window, plus the unknown-window VAP `error` path.
 Inspector debug overlays (`inspect_capture` / `inspect_subscribe`) remain AGP-only: the VAP viewer streams plain desktop frames (overlays are negotiated on the wire but not composited into v1 frames), so overlay inspection still requires an AGP client (`crates/adesk-server/src/dispatch/inspect.rs`).
 Explicitly outside v1 scope (objective step 9): XWayland, drag-and-drop, richer clipboard support, multi-window visibility, and a reactive accessibility event stream (accessibility is exposed only as the on-demand §5.11 text view).
 `adesk-testkit` now provides a fixture exec-path override (`TestAppSpec::with_exec`), so a downstream crate can point a fixture at its own program and reuse `TestAppSpec::desktop_entry`;
@@ -281,12 +301,13 @@ downstream crates still ship their own fixture binary because testkit's `adesk-t
 | Offscreen rendering, damage, readback, images | `crates/adesk-render/` |
 | Smithay compositor, protocols, seat, input injection | `crates/adesk-compositor/` |
 | Human inspection, debug overlays | `crates/adesk-inspector/` |
-| Runtime binary, socket server, AGP dispatch | `crates/adesk-server/` |
+| Runtime binary, socket server, AGP dispatch, VAP viewer endpoint | `crates/adesk-server/` |
 | Agent client SDK | `crates/adesk-client/` |
 | Multimodal agent prototype, metrics | `crates/adesk-agent/` |
 | Test harness, Wayland test client, fixtures | `crates/adesk-testkit/` |
 | Viewer wire protocol (VAP) messages + codec | `crates/adesk-viewer-proto/` |
 | Viewer server session, client SDK, headless viewer binary | `crates/adesk-viewer/` |
+| GTK4 viewer front-end: frame view, cursor, app launcher, task bar | `crates/adesk-viewer-gui/` |
 | Screen recording (frame encoding, AVI/MP4 muxing, GPU ffmpeg backend) | `crates/adesk-recorder/` |
 | Accessibility tree (AT-SPI2), text rendering, element handles | `crates/adesk-a11y/` |
 | AI Machine runtime, container backend, host control plane | `crates/adesk-machine/` |
