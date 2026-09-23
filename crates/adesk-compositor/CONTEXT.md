@@ -70,6 +70,7 @@ Code rules:
 
 | Area | Owner |
 |---|---|
+| Module index, source-layout facts, DMA-BUF crash triage (own `CONTEXT.md`) | `src/` |
 | Public command vocabulary (§3) | `src/command.rs` |
 | Config, renderer selection, xkb settings | `src/config.rs` |
 | Error enum + `ErrorCode` mapping | `src/error.rs` |
