@@ -61,6 +61,12 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 - `ConnectOptions` (`#[non_exhaustive]`): `target`, `max_frame_len`, `connect_timeout`, `handshake_timeout`, `client_name`, `overlays`, `min_interval_ms`, `verify_version` (default `true`); `new` + `with_*` builders.
 - `DEFAULT_CONNECT_TIMEOUT` / `DEFAULT_HANDSHAKE_TIMEOUT` (5 s each), `DEFAULT_MAX_FRAME_LEN` (re-exported from `transport`).
 
+### Reply FIFOs (`src/reply.rs`)
+- `pub(crate) ReplyFifo<T>` — the client's per-reply-kind FIFO of pending requests: `new()`, `register() -> Pending<T>` (back of the queue, with its unique token), `resolve(value) -> bool` (oldest waiter; `false` when none is pending), `remove(token)`, `clear()` (drops every waiter, so no request parks forever after the connection ends) and `await_reply(pending, &mut errors) -> Result<T>`.
+- `pub(crate) Pending<T>` — one registration: its `token` (so the awaiting side can remove its own entry) and the private reply receiver.
+- `Inner` owns one `ReplyFifo` per reply kind (`state_replies`, `recording_replies`, `apps_replies`, `launch_replies`); `ViewerClient::reply_round_trip(fifo, message)` is the one request path (`request_state`, `recording_round_trip`, `list_apps`, `launch_app`), and the dispatcher's `state`/`recording`/`apps`/`launch_result` arms call `resolve`.
+- Internal to the crate (not re-exported): it exists so the FIFO/align-on-error logic is written once instead of once per reply kind.
+
 ### Frame capture helpers (`src/capture.rs`)
 - `save_frame_png(&ImagePayload, &Path) -> Result<()>` — decode an `ImagePayload` and write a PNG (used by the binary and tests).
 - `write_rgba8(&ImageBuffer, &Path) -> Result<()>`.
