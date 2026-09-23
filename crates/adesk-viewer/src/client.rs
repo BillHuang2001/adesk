@@ -13,29 +13,29 @@
 //! [`adesk_viewer_proto`] messages; the crate speaks only that wire vocabulary
 //! (`docs/viewer.md` §8). Message bodies and pixel payloads are never logged.
 
-use std::collections::VecDeque;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode, OverlayKind, WindowId};
+use adesk_core::{ActionId, AppId, Button, ButtonState, ErrorCode, OverlayKind, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
-    check_version, decode_server, encode_client, ClientMessage, ControlOwner, DesktopState,
-    KeyAction, RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello,
-    DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
+    check_version, decode_server, encode_client, AppEntry, ClientMessage, ControlOwner,
+    DesktopState, KeyAction, LaunchOutcome, RecordingStatus, ServerHello, ServerMessage,
+    ViewerFrame, ViewerHello, DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, PROTOCOL_VERSION,
 };
 use futures::stream::{self, Stream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader, ReadHalf, WriteHalf};
 use tokio::net::{TcpStream, UnixStream};
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::broadcast;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
 use crate::backend::RecordRequest;
 use crate::error::{Result, ViewerError};
+use crate::reply::ReplyFifo;
 use crate::transport::{read_line, read_line_into, write_line};
 
 pub use crate::transport::DEFAULT_MAX_FRAME_LEN;
@@ -289,9 +289,10 @@ impl ViewerClient {
             frames: Mutex::new(Some(broadcast::channel(FRAME_CHANNEL_CAPACITY).0)),
             input_acks: Mutex::new(Some(broadcast::channel(INPUT_ACK_CHANNEL_CAPACITY).0)),
             errors: Mutex::new(Some(broadcast::channel(ERROR_CHANNEL_CAPACITY).0)),
-            state_waiters: Mutex::new(VecDeque::new()),
-            recording_waiters: Mutex::new(VecDeque::new()),
-            next_waiter_token: AtomicU64::new(1),
+            state_replies: ReplyFifo::new(),
+            recording_replies: ReplyFifo::new(),
+            apps_replies: ReplyFifo::new(),
+            launch_replies: ReplyFifo::new(),
             next_recording_id: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         });
@@ -389,36 +390,11 @@ impl ViewerClient {
     /// arrives, [`ViewerError::Backend`] if the server answers with an `error`,
     /// and [`ViewerError::Io`] if the request cannot be written.
     pub async fn request_state(&self) -> Result<DesktopState> {
-        if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(ViewerError::Closed);
-        }
-        let mut errors = self.subscribe_errors()?;
-        let (token, mut receiver) = self.inner.register_state_waiter();
-        if let Err(error) = self.send(ClientMessage::RequestState { id: None }).await {
-            // The request was never written: drop the registration so it cannot
-            // swallow the next `state` reply.
-            self.inner.remove_state_waiter(token);
-            return Err(error);
-        }
-        loop {
-            tokio::select! {
-                state = &mut receiver => return state.map_err(|_| ViewerError::Closed),
-                error = errors.recv() => match error {
-                    Ok((code, message)) => {
-                        // A VAP `error` answers this request through the shared
-                        // error stream, not the waiter: consume the registration
-                        // so the FIFO stays aligned for the next request.
-                        self.inner.remove_state_waiter(token);
-                        return Err(ViewerError::Backend { code, message });
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        self.inner.remove_state_waiter(token);
-                        return Err(ViewerError::Closed);
-                    }
-                },
-            }
-        }
+        self.reply_round_trip(
+            &self.inner.state_replies,
+            ClientMessage::RequestState { id: None },
+        )
+        .await
     }
 
     /// Starts a screen recording and returns its initial status
@@ -484,38 +460,8 @@ impl ViewerClient {
     /// is written and the oldest pending waiter is resolved. `recording` and
     /// `state` replies have their own FIFOs, so one can never resolve the other.
     async fn recording_round_trip(&self, message: ClientMessage) -> Result<RecordingStatus> {
-        if self.inner.closed.load(Ordering::SeqCst) {
-            return Err(ViewerError::Closed);
-        }
-        let mut errors = self.subscribe_errors()?;
-        let (token, mut receiver) = self.inner.register_recording_waiter();
-        if let Err(error) = self.send(message).await {
-            // The request was never written: drop the registration so it cannot
-            // swallow the next `recording` reply.
-            self.inner.remove_recording_waiter(token);
-            return Err(error);
-        }
-        loop {
-            tokio::select! {
-                status = &mut receiver => return status.map_err(|_| ViewerError::Closed),
-                error = errors.recv() => match error {
-                    Ok((code, message)) => {
-                        // A VAP `error` (e.g. `not_supported` for an unavailable
-                        // encoder, `invalid_request` for a conflicting
-                        // transition) answers this request through the shared
-                        // error stream, not the waiter: consume the registration
-                        // so the FIFO stays aligned for the next request.
-                        self.inner.remove_recording_waiter(token);
-                        return Err(ViewerError::Backend { code, message });
-                    }
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => {
-                        self.inner.remove_recording_waiter(token);
-                        return Err(ViewerError::Closed);
-                    }
-                },
-            }
-        }
+        self.reply_round_trip(&self.inner.recording_replies, message)
+            .await
     }
 
     /// Moves the pointer to the normalized output position `(x, y)`
@@ -590,6 +536,65 @@ impl ViewerClient {
     /// Returns [`ViewerError::Io`] if the message cannot be written.
     pub async fn activate_window(&self, window_id: WindowId) -> Result<()> {
         self.send(ClientMessage::ActivateWindow { window_id }).await
+    }
+
+    /// Closes `window_id` (`docs/viewer.md` §4, §5).
+    ///
+    /// Window management is runtime-native, like
+    /// [`activate_window`](ViewerClient::activate_window): the server closes the
+    /// window directly instead of synthesizing input. Fire-and-forget — the
+    /// server's acknowledgement (an `input_ack` carrying the recorded AGP
+    /// [`ActionId`], when the runtime records one) arrives on
+    /// [`ViewerClient::input_ack`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewerError::Io`] if the message cannot be written.
+    pub async fn close_window(&self, window_id: WindowId) -> Result<()> {
+        self.send(ClientMessage::CloseWindow { window_id }).await
+    }
+
+    /// Lists the applications the runtime can launch, optionally narrowed by
+    /// `query` (`docs/viewer.md` §4, §5).
+    ///
+    /// The reply FIFO registration is made *before* the request is written, so the
+    /// `apps` reply cannot be missed; a request answered by a VAP `error`
+    /// (`not_supported` from a runtime without an app registry) still leaves the
+    /// FIFO aligned for the next request.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewerError::Closed`] if the connection ends before the reply
+    /// arrives, [`ViewerError::Backend`] if the server answers with an `error`,
+    /// and [`ViewerError::Io`] if the request cannot be written.
+    pub async fn list_apps(&self, query: Option<String>) -> Result<Vec<AppEntry>> {
+        self.reply_round_trip(
+            &self.inner.apps_replies,
+            ClientMessage::ListApps { id: None, query },
+        )
+        .await
+    }
+
+    /// Launches the application `app_id` and returns the runtime's launch outcome
+    /// (`docs/viewer.md` §4, §5).
+    ///
+    /// The reply (`launch_result`) carries the launch id and the window the
+    /// runtime correlated with it, when it already has one. As
+    /// [`list_apps`](ViewerClient::list_apps), the registration is made before the
+    /// request is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ViewerError::Closed`] if the connection ends before the reply
+    /// arrives, [`ViewerError::Backend`] if the server answers with an `error`
+    /// (e.g. `unknown_app` for an id the runtime does not know), and
+    /// [`ViewerError::Io`] if the request cannot be written.
+    pub async fn launch_app(&self, app_id: AppId) -> Result<LaunchOutcome> {
+        self.reply_round_trip(
+            &self.inner.launch_replies,
+            ClientMessage::LaunchApp { id: None, app_id },
+        )
+        .await
     }
 
     /// Announces that `owner` owns input (`docs/viewer.md` §4, §5).
@@ -682,6 +687,32 @@ impl ViewerClient {
         write_message(&self.inner, &message).await
     }
 
+    /// Sends one reply-only request and awaits its reply (or a server `error`),
+    /// resolving it through `replies`.
+    ///
+    /// The reply-FIFO registration is made *before* the request is written and is
+    /// dropped again if the write fails or the request is answered by a VAP
+    /// `error`, so a registration can never outlive its request and swallow the
+    /// next reply.
+    async fn reply_round_trip<T>(
+        &self,
+        replies: &ReplyFifo<T>,
+        message: ClientMessage,
+    ) -> Result<T> {
+        if self.inner.closed.load(Ordering::SeqCst) {
+            return Err(ViewerError::Closed);
+        }
+        let mut errors = self.subscribe_errors()?;
+        let pending = replies.register();
+        if let Err(error) = self.send(message).await {
+            // The request was never written: drop the registration so it cannot
+            // swallow the next reply.
+            replies.remove(pending.token);
+            return Err(error);
+        }
+        replies.await_reply(pending, &mut errors).await
+    }
+
     /// Subscribes to the frame channel, or fails once the connection is gone.
     fn subscribe_frames(&self) -> Result<broadcast::Receiver<ViewerFrame>> {
         lock(&self.inner.frames)
@@ -719,20 +750,6 @@ trait Transport: AsyncRead + AsyncWrite + Unpin + Send {}
 
 impl<T> Transport for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
 
-/// One registration in a reply FIFO: the sender the dispatcher resolves on the
-/// matching reply, plus a token that identifies the entry.
-///
-/// The token lets the awaiting side remove *its own* entry when a request is
-/// answered by a VAP `error` instead of the expected reply. Without it the stale
-/// entry would stay at the head of the FIFO and swallow the next reply, so a
-/// second request on the same connection would never resolve.
-struct Waiter<T> {
-    /// Unique registration token, matched by the awaiting side.
-    token: u64,
-    /// The sender the dispatcher resolves when the matching reply arrives.
-    sender: oneshot::Sender<T>,
-}
-
 /// Shared client state: the write half plus every fan-out channel and waiter the
 /// dispatcher serves.
 struct Inner {
@@ -750,16 +767,16 @@ struct Inner {
     input_acks: Mutex<Option<broadcast::Sender<InputAck>>>,
     /// Drop-sender fan-out of server error messages; `None` once shut down.
     errors: Mutex<Option<broadcast::Sender<(ErrorCode, String)>>>,
-    /// Pending `request_state` waiters, resolved oldest-first.
-    state_waiters: Mutex<VecDeque<Waiter<DesktopState>>>,
+    /// Pending `request_state` replies, resolved oldest-first.
+    state_replies: ReplyFifo<DesktopState>,
     /// Pending recording replies, resolved oldest-first. Recording is reply-only
     /// (there is no unsolicited `recording` push in v1), so it gets its own FIFO
     /// — a `recording` message can never be mistaken for a `state` reply.
-    recording_waiters: Mutex<VecDeque<Waiter<RecordingStatus>>>,
-    /// Source of the unique tokens that identify a reply-FIFO registration so the
-    /// awaiting side can remove its own entry when a request is answered by a VAP
-    /// `error` instead of the expected reply.
-    next_waiter_token: AtomicU64,
+    recording_replies: ReplyFifo<RecordingStatus>,
+    /// Pending `list_apps` replies, resolved oldest-first.
+    apps_replies: ReplyFifo<Vec<AppEntry>>,
+    /// Pending `launch_app` replies, resolved oldest-first.
+    launch_replies: ReplyFifo<LaunchOutcome>,
     /// Monotonic client id stamped on each recording request, echoed by the reply.
     next_recording_id: AtomicU64,
     /// Set once the connection is gone, for a cheap `request_state` early-out.
@@ -774,49 +791,15 @@ impl Inner {
         lock(&self.frames).take();
         lock(&self.input_acks).take();
         lock(&self.errors).take();
-        lock(&self.state_waiters).clear();
-        lock(&self.recording_waiters).clear();
+        self.state_replies.clear();
+        self.recording_replies.clear();
+        self.apps_replies.clear();
+        self.launch_replies.clear();
     }
 
     /// The next recording request id (starting at `1`).
     fn next_recording_id(&self) -> u64 {
         self.next_recording_id.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Allocates a fresh, unique reply-FIFO registration token.
-    fn next_waiter_token(&self) -> u64 {
-        self.next_waiter_token.fetch_add(1, Ordering::SeqCst)
-    }
-
-    /// Registers a `request_state` waiter, returning its token and receiver.
-    fn register_state_waiter(&self) -> (u64, oneshot::Receiver<DesktopState>) {
-        let token = self.next_waiter_token();
-        let (sender, receiver) = oneshot::channel();
-        lock(&self.state_waiters).push_back(Waiter { token, sender });
-        (token, receiver)
-    }
-
-    /// Registers a recording waiter, returning its token and receiver.
-    fn register_recording_waiter(&self) -> (u64, oneshot::Receiver<RecordingStatus>) {
-        let token = self.next_waiter_token();
-        let (sender, receiver) = oneshot::channel();
-        lock(&self.recording_waiters).push_back(Waiter { token, sender });
-        (token, receiver)
-    }
-
-    /// Removes a still-pending `request_state` waiter by its token.
-    ///
-    /// A no-op once the dispatcher has already resolved (and popped) the entry,
-    /// or once the connection shut the FIFO down.
-    fn remove_state_waiter(&self, token: u64) {
-        lock(&self.state_waiters).retain(|waiter| waiter.token != token);
-    }
-
-    /// Removes a still-pending recording waiter by its token.
-    ///
-    /// The recording counterpart of [`Inner::remove_state_waiter`].
-    fn remove_recording_waiter(&self, token: u64) {
-        lock(&self.recording_waiters).retain(|waiter| waiter.token != token);
     }
 }
 
@@ -901,17 +884,23 @@ async fn dispatch(inner: Arc<Inner>, mut reader: BufReader<ReadHalf<Box<dyn Tran
                 }
             }
             ServerMessage::State(state) => {
-                if let Some(waiter) = lock(&inner.state_waiters).pop_front() {
-                    let _ = waiter.sender.send(state);
-                } else {
+                if !inner.state_replies.resolve(state) {
                     tracing::trace!("ignoring an unsolicited desktop state message");
                 }
             }
             ServerMessage::Recording { id, status } => {
-                if let Some(waiter) = lock(&inner.recording_waiters).pop_front() {
-                    let _ = waiter.sender.send(status);
-                } else {
+                if !inner.recording_replies.resolve(status) {
                     tracing::trace!(?id, "ignoring an unsolicited recording status message");
+                }
+            }
+            ServerMessage::Apps { id, apps } => {
+                if !inner.apps_replies.resolve(apps) {
+                    tracing::trace!(?id, "ignoring an unsolicited apps reply");
+                }
+            }
+            ServerMessage::LaunchResult { id, result } => {
+                if !inner.launch_replies.resolve(result) {
+                    tracing::trace!(?id, "ignoring an unsolicited launch result");
                 }
             }
             ServerMessage::Error { code, message, .. } => {

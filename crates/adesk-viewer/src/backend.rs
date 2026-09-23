@@ -10,19 +10,19 @@
 //!
 //! Coordinates the backend receives are **normalized output-relative fractions**
 //! (`0.0..=1.0`), never pixels: the runtime resolves positions through its window
-//! model and targets its active window for the pointer/key/text variants. The one
-//! exception is [`ViewerInput::ActivateWindow`], which names a window explicitly
-//! and is a runtime-native window-management action, never synthesized input
-//! (`docs/viewer.md` §4, §5).
+//! model and targets its active window for the pointer/key/text variants. The
+//! exceptions are [`ViewerInput::ActivateWindow`] and [`ViewerInput::CloseWindow`],
+//! which name a window explicitly and are runtime-native window-management actions,
+//! never synthesized input (`docs/viewer.md` §4, §5).
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode, WindowId};
+use adesk_core::{ActionId, AppId, Button, ButtonState, ErrorCode, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer_proto::{
-    ControlOwner, DesktopState, KeyAction, RecordingEncoder, RecordingStatus, ServerHello,
-    ViewerFrame, DEFAULT_RECORD_FPS,
+    AppEntry, ControlOwner, DesktopState, KeyAction, LaunchOutcome, RecordingEncoder,
+    RecordingStatus, ServerHello, ViewerFrame, DEFAULT_RECORD_FPS,
 };
 use tokio::sync::Notify;
 
@@ -122,6 +122,38 @@ pub trait ViewerBackend: Send + Sync + 'static {
     async fn recording_status(&self) -> Result<RecordingStatus> {
         Ok(RecordingStatus::idle())
     }
+
+    /// Lists the applications the runtime can launch, optionally narrowed by
+    /// `query` (`docs/viewer.md` §4, §5).
+    ///
+    /// `query` is the viewer's filter — a case-insensitive match over an entry's
+    /// id and name — and the runtime decides what matching means; `None` asks for
+    /// the whole registry. The default refuses with [`ErrorCode::NotSupported`]
+    /// (reported on the wire as a VAP `error`), so a runtime that has not
+    /// implemented application control yet keeps the trait object usable.
+    async fn list_apps(&self, query: Option<String>) -> Result<Vec<AppEntry>> {
+        let _ = query;
+        Err(ViewerError::backend(
+            ErrorCode::NotSupported,
+            "application listing is not supported by this backend",
+        ))
+    }
+
+    /// Launches an application by its desktop-file id and reports the resulting
+    /// launch (`docs/viewer.md` §4, §5).
+    ///
+    /// The runtime resolves `app_id` in its XDG registry, starts the process and
+    /// correlates the launched window, reporting the AGP action and window it
+    /// recorded — both optional, because a launch whose window has not appeared
+    /// yet reports `None`. The default refuses with [`ErrorCode::NotSupported`],
+    /// mirroring [`ViewerBackend::list_apps`].
+    async fn launch_app(&self, app_id: AppId) -> Result<LaunchOutcome> {
+        let _ = app_id;
+        Err(ViewerError::backend(
+            ErrorCode::NotSupported,
+            "application launch is not supported by this backend",
+        ))
+    }
 }
 
 /// A request to start a screen recording, assembled from a `start_recording`
@@ -186,8 +218,9 @@ impl Default for RecordRequest {
 /// session and never reach the backend, so the trait stays stable if the protocol
 /// grows non-action messages. All coordinates are normalized output fractions and
 /// the pointer/key/text variants target the runtime's *active* window;
-/// [`ViewerInput::ActivateWindow`] is the runtime-native window switch (§5) — a
-/// compositor state change, not synthesized input.
+/// [`ViewerInput::ActivateWindow`] and [`ViewerInput::CloseWindow`] are the
+/// runtime-native window-management actions (§5) — compositor state changes, not
+/// synthesized input.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ViewerInput {
     /// Move the pointer to a normalized output position (`pointer_move`).
@@ -239,6 +272,15 @@ pub enum ViewerInput {
     /// (`docs/viewer.md` §5).
     ActivateWindow {
         /// The window to make active and visible.
+        window_id: WindowId,
+    },
+    /// Close a window (`close_window`).
+    ///
+    /// Runtime-native, like [`ViewerInput::ActivateWindow`]: the backend asks the
+    /// compositor to close the window directly and never synthesizes input
+    /// (`docs/viewer.md` §5).
+    CloseWindow {
+        /// The window to close.
         window_id: WindowId,
     },
 }
@@ -416,6 +458,17 @@ mod tests {
         assert_ne!(
             activate,
             ViewerInput::ActivateWindow {
+                window_id: WindowId(18)
+            }
+        );
+
+        let close = ViewerInput::CloseWindow {
+            window_id: WindowId(17),
+        };
+        assert_eq!(close.clone(), close);
+        assert_ne!(
+            close,
+            ViewerInput::CloseWindow {
                 window_id: WindowId(18)
             }
         );

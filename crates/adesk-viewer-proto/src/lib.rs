@@ -9,8 +9,8 @@
 //!   their `"type"` discriminator (§2–§4). An unrecognised `"type"` decodes to the
 //!   `Unknown` variant so a peer stays forward-compatible (§1).
 //! - [`ViewerHello`], [`ServerHello`], [`ViewerFrame`], [`DesktopState`],
-//!   [`CursorState`], [`ControlOwner`], [`KeyAction`], [`RecordingEncoder`] and
-//!   [`RecordingStatus`] are the payload types.
+//!   [`CursorState`], [`ControlOwner`], [`KeyAction`], [`RecordingEncoder`],
+//!   [`RecordingStatus`], [`AppEntry`] and [`LaunchOutcome`] are the payload types.
 //! - [`encode_client`]/[`encode_server`] and [`decode_client`]/[`decode_server`]
 //!   are the NDJSON codec (§1); framing (the terminator, the line cap) belongs to
 //!   the transport.
@@ -40,8 +40,8 @@ pub use codec::{decode_client, decode_server, encode_client, encode_server};
 pub use error::{Result, ViewerProtoError};
 pub use message::{ClientMessage, ServerMessage};
 pub use types::{
-    ControlOwner, CursorState, DesktopState, KeyAction, RecordingEncoder, RecordingStatus,
-    ServerHello, ViewerFrame, ViewerHello,
+    AppEntry, ControlOwner, CursorState, DesktopState, KeyAction, LaunchOutcome, RecordingEncoder,
+    RecordingStatus, ServerHello, ViewerFrame, ViewerHello,
 };
 
 /// VAP protocol version implemented by this crate (`docs/viewer.md` §2, §7).

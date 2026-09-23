@@ -5,15 +5,15 @@
 //! decoded into the `Unknown` variant rather than being an error, so a peer stays
 //! forward-compatible (§1, §7); see [`crate::codec`] for the text entry points.
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode, WindowId};
+use adesk_core::{ActionId, AppId, Button, ButtonState, ErrorCode, WindowId};
 use adesk_proto::KeySpec;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Value};
 
 use crate::types::{
-    ControlOwner, DesktopState, KeyAction, RecordingEncoder, RecordingStatus, ServerHello,
-    ViewerFrame, ViewerHello,
+    AppEntry, ControlOwner, DesktopState, KeyAction, LaunchOutcome, RecordingEncoder,
+    RecordingStatus, ServerHello, ViewerFrame, ViewerHello,
 };
 use crate::{Result, ViewerProtoError, DEFAULT_RECORD_FPS};
 
@@ -115,6 +115,30 @@ pub enum ClientMessage {
         /// Optional client id, echoed by the matching reply.
         id: Option<u64>,
     },
+    /// List the applications the runtime can launch; the server answers with an
+    /// `apps` message. `id` is echoed.
+    ListApps {
+        /// Optional client id, echoed by the matching reply.
+        id: Option<u64>,
+        /// Optional case-insensitive filter over the entries' id/name.
+        query: Option<String>,
+    },
+    /// Launch an application by desktop-file id; the server answers with a
+    /// `launch_result` message. `id` is echoed.
+    LaunchApp {
+        /// Optional client id, echoed by the matching reply.
+        id: Option<u64>,
+        /// The desktop-file id of the application to launch.
+        app_id: AppId,
+    },
+    /// Close the window with this id (`close_window`).
+    ///
+    /// A runtime-native window-management action, not synthesized input
+    /// (`docs/viewer.md` §4, §5).
+    CloseWindow {
+        /// The window to close (an AGP `WindowId`).
+        window_id: WindowId,
+    },
     /// A message whose `"type"` this build does not recognise (forward
     /// compatibility, §1). The original JSON object is preserved verbatim.
     Unknown {
@@ -164,6 +188,22 @@ pub enum ServerMessage {
         /// The reported recording status.
         status: RecordingStatus,
     },
+    /// The launchable applications, answering `list_apps` (`docs/viewer.md` §4).
+    /// `id` echoes the request when it carried one.
+    Apps {
+        /// The client id being answered, when the request carried one.
+        id: Option<u64>,
+        /// The matching registry entries.
+        apps: Vec<AppEntry>,
+    },
+    /// The outcome of a `launch_app` request (`docs/viewer.md` §4). `id` echoes
+    /// the request when it carried one.
+    LaunchResult {
+        /// The client id being answered, when the request carried one.
+        id: Option<u64>,
+        /// The launch outcome, flattened into the message object.
+        result: LaunchOutcome,
+    },
     /// The server is ending the connection.
     Bye {
         /// Why the connection is ending.
@@ -199,6 +239,9 @@ impl ClientMessage {
             ClientMessage::StartRecording { .. } => "start_recording",
             ClientMessage::StopRecording { .. } => "stop_recording",
             ClientMessage::RequestRecording { .. } => "request_recording",
+            ClientMessage::ListApps { .. } => "list_apps",
+            ClientMessage::LaunchApp { .. } => "launch_app",
+            ClientMessage::CloseWindow { .. } => "close_window",
             ClientMessage::Unknown { message_type, .. } => message_type,
         }
     }
@@ -293,6 +336,26 @@ impl ClientMessage {
             "request_recording" => {
                 let fields: IdFields = decode(value)?;
                 Ok(ClientMessage::RequestRecording { id: fields.id })
+            }
+            "list_apps" => {
+                let fields: ListAppsFields = decode(value)?;
+                Ok(ClientMessage::ListApps {
+                    id: fields.id,
+                    query: fields.query,
+                })
+            }
+            "launch_app" => {
+                let fields: LaunchAppFields = decode(value)?;
+                Ok(ClientMessage::LaunchApp {
+                    id: fields.id,
+                    app_id: fields.app_id,
+                })
+            }
+            "close_window" => {
+                let fields: WindowIdFields = decode(value)?;
+                Ok(ClientMessage::CloseWindow {
+                    window_id: fields.window_id,
+                })
             }
             other => Ok(ClientMessage::Unknown {
                 message_type: other.to_owned(),
@@ -396,6 +459,25 @@ impl ClientMessage {
                 insert_optional_id(&mut map, *id);
                 Value::Object(map)
             }
+            ClientMessage::ListApps { id, query } => {
+                let mut map = tagged_empty("list_apps");
+                insert_optional_id(&mut map, *id);
+                if let Some(query) = query {
+                    map.insert("query".to_owned(), Value::String(query.clone()));
+                }
+                Value::Object(map)
+            }
+            ClientMessage::LaunchApp { id, app_id } => {
+                let mut map = tagged_empty("launch_app");
+                insert_optional_id(&mut map, *id);
+                map.insert("app_id".to_owned(), field(app_id));
+                Value::Object(map)
+            }
+            ClientMessage::CloseWindow { window_id } => {
+                let mut map = tagged_empty("close_window");
+                map.insert("window_id".to_owned(), field(window_id));
+                Value::Object(map)
+            }
             ClientMessage::Unknown { value, .. } => value.clone(),
         }
     }
@@ -414,6 +496,8 @@ impl ServerMessage {
             ServerMessage::InputAck { .. } => "input_ack",
             ServerMessage::Error { .. } => "error",
             ServerMessage::Recording { .. } => "recording",
+            ServerMessage::Apps { .. } => "apps",
+            ServerMessage::LaunchResult { .. } => "launch_result",
             ServerMessage::Bye { .. } => "bye",
             ServerMessage::Unknown { message_type, .. } => message_type,
         }
@@ -467,6 +551,20 @@ impl ServerMessage {
                     status: fields.status,
                 })
             }
+            "apps" => {
+                let fields: AppsFields = decode(value)?;
+                Ok(ServerMessage::Apps {
+                    id: fields.id,
+                    apps: fields.apps,
+                })
+            }
+            "launch_result" => {
+                let fields: LaunchResultFields = decode(value)?;
+                Ok(ServerMessage::LaunchResult {
+                    id: fields.id,
+                    result: fields.result,
+                })
+            }
             other => Ok(ServerMessage::Unknown {
                 message_type: other.to_owned(),
                 value,
@@ -507,6 +605,20 @@ impl ServerMessage {
                 let mut map = tagged_empty("recording");
                 insert_optional_id(&mut map, *id);
                 if let Value::Object(fields) = field(status) {
+                    map.extend(fields);
+                }
+                Value::Object(map)
+            }
+            ServerMessage::Apps { id, apps } => {
+                let mut map = tagged_empty("apps");
+                insert_optional_id(&mut map, *id);
+                map.insert("apps".to_owned(), field(apps));
+                Value::Object(map)
+            }
+            ServerMessage::LaunchResult { id, result } => {
+                let mut map = tagged_empty("launch_result");
+                insert_optional_id(&mut map, *id);
+                if let Value::Object(fields) = field(result) {
                     map.extend(fields);
                 }
                 Value::Object(map)
@@ -710,4 +822,39 @@ struct RecordingFields {
     id: Option<u64>,
     #[serde(flatten)]
     status: RecordingStatus,
+}
+
+/// Deserializes `list_apps` fields.
+#[derive(Deserialize)]
+struct ListAppsFields {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(default)]
+    query: Option<String>,
+}
+
+/// Deserializes `launch_app` fields.
+#[derive(Deserialize)]
+struct LaunchAppFields {
+    #[serde(default)]
+    id: Option<u64>,
+    app_id: AppId,
+}
+
+/// Deserializes `apps` fields.
+#[derive(Deserialize)]
+struct AppsFields {
+    #[serde(default)]
+    id: Option<u64>,
+    apps: Vec<AppEntry>,
+}
+
+/// Deserializes `launch_result` fields: the `id?` reply echo plus the flattened
+/// [`LaunchOutcome`] (whose `app_id`/`launch_id` are required, §4).
+#[derive(Deserialize)]
+struct LaunchResultFields {
+    #[serde(default)]
+    id: Option<u64>,
+    #[serde(flatten)]
+    result: LaunchOutcome,
 }

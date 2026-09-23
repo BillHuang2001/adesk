@@ -11,7 +11,11 @@ use adesk_viewer_proto::{
     KeyAction, RecordingEncoder, RecordingStatus, ServerMessage, ViewerHello, ViewerProtoError,
     DEFAULT_RECORD_FPS,
 };
-use common::{every_client_message, every_server_message};
+use common::{
+    apps_empty, apps_message, close_window_message, every_client_message, every_server_message,
+    launch_app_message, launch_result_message, launch_result_pending, list_apps_message,
+    list_apps_unfiltered,
+};
 use serde_json::{json, Value};
 
 // --- round-trips ----------------------------------------------------------
@@ -297,6 +301,130 @@ fn unknown_fields_in_nested_payloads_are_ignored() {
     assert_eq!(state.windows[0].id, WindowId(1));
 }
 
+// --- app management messages ----------------------------------------------
+
+#[test]
+fn app_management_messages_round_trip() {
+    // Through both the free codec and the serde impls.
+    for message in [
+        list_apps_message(),
+        list_apps_unfiltered(),
+        launch_app_message(),
+        close_window_message(),
+    ] {
+        let line = encode_client(&message);
+        assert_eq!(decode_client(&line).unwrap(), message, "free codec: {line}");
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ClientMessage>(&json).unwrap(),
+            message,
+            "serde impl: {json}"
+        );
+    }
+    for message in [
+        apps_message(),
+        apps_empty(),
+        launch_result_message(),
+        launch_result_pending(),
+    ] {
+        let line = encode_server(&message);
+        assert_eq!(decode_server(&line).unwrap(), message, "free codec: {line}");
+        let json = serde_json::to_string(&message).unwrap();
+        assert_eq!(
+            serde_json::from_str::<ServerMessage>(&json).unwrap(),
+            message,
+            "serde impl: {json}"
+        );
+    }
+}
+
+#[test]
+fn app_management_optional_id_is_omitted_not_null() {
+    // `list_apps` with no `id` omits the field entirely (never `null`).
+    let line = encode_client(&list_apps_unfiltered());
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert!(value.get("id").is_none(), "no `id` key: {line}");
+    assert!(value.get("query").is_none(), "no `query` key: {line}");
+    assert_eq!(
+        decode_client(&line).unwrap(),
+        ClientMessage::ListApps {
+            id: None,
+            query: None,
+        }
+    );
+
+    // The same for the `apps` reply.
+    let line = encode_server(&apps_empty());
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert!(value.get("id").is_none(), "no `id` key: {line}");
+    assert_eq!(
+        decode_server(&line).unwrap(),
+        ServerMessage::Apps {
+            id: None,
+            apps: Vec::new(),
+        }
+    );
+}
+
+#[test]
+fn launch_result_flattens_the_outcome() {
+    // The outcome's fields sit at the top level next to `id` ...
+    let line = encode_server(&launch_result_message());
+    let value: Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(
+        value,
+        json!({
+            "type": "launch_result",
+            "id": 2,
+            "app_id": "org.example.Editor",
+            "launch_id": 3,
+            "action_id": 582,
+            "window_id": 17
+        })
+    );
+    // ... and decode back into the structured outcome.
+    assert_eq!(decode_server(&line).unwrap(), launch_result_message());
+
+    // Absent `id`/`action_id`/`window_id` decode to `None`.
+    let decoded = decode_server(
+        r#"{"type": "launch_result", "app_id": "org.example.Editor", "launch_id": 3}"#,
+    )
+    .unwrap();
+    assert_eq!(decoded, launch_result_pending());
+}
+
+#[test]
+fn unknown_fields_in_app_management_messages_are_ignored() {
+    let decoded =
+        decode_client(r#"{"type": "list_apps", "id": 1, "query": "fire", "future": 1}"#).unwrap();
+    assert_eq!(decoded, list_apps_message());
+
+    let decoded = decode_client(
+        r#"{"type": "launch_app", "id": 2, "app_id": "org.example.Editor", "future": true}"#,
+    )
+    .unwrap();
+    assert_eq!(decoded, launch_app_message());
+
+    let decoded =
+        decode_client(r#"{"type": "close_window", "window_id": 17, "future": 1}"#).unwrap();
+    assert_eq!(decoded, close_window_message());
+
+    let decoded = decode_server(
+        r#"{"type": "launch_result", "id": 2, "app_id": "org.example.Editor",
+        "launch_id": 3, "action_id": 582, "window_id": 17, "future": "ignored"}"#,
+    )
+    .unwrap();
+    assert_eq!(decoded, launch_result_message());
+
+    // Unknown fields inside a nested `AppEntry` are ignored too.
+    let decoded = decode_server(
+        r#"{"type": "apps", "id": 1, "apps": [{"id": "org.mozilla.firefox", "name": "Firefox",
+        "icon": "firefox", "categories": ["Network"], "future": 1}]}"#,
+    )
+    .unwrap();
+    assert_eq!(decoded, apps_message());
+}
+
 // --- malformed input ------------------------------------------------------
 
 #[test]
@@ -319,6 +447,10 @@ fn malformed_lines_are_rejected() {
         r#"{"type": "bye", "reason": 5}"#,                    // wrong field type
         r#"{"type": "start_recording", "encoder": "bogus"}"#, // unknown encoder
         r#"{"type": "start_recording", "fps": "fast"}"#,      // wrong field type
+        r#"{"type": "launch_app"}"#,                          // known tag, missing app_id
+        r#"{"type": "launch_app", "app_id": 5}"#,             // wrong field type
+        r#"{"type": "close_window"}"#,                        // known tag, missing window_id
+        r#"{"type": "list_apps", "query": 5}"#,               // wrong field type
     ];
     for line in cases {
         assert!(
@@ -338,6 +470,9 @@ fn malformed_lines_are_rejected() {
         r#"{"type": "control", "owner": "nobody"}"#, // unknown enum value
         r#"{"type": "recording"}"#, // known tag, missing the required counters
         r#"{"type": "recording", "recording": true, "fps": 30, "frames": 0}"#, // missing duration_ms
+        r#"{"type": "apps"}"#, // known tag, missing the required apps list
+        r#"{"type": "launch_result"}"#, // known tag, missing app_id/launch_id
+        r#"{"type": "launch_result", "app_id": "org.example.Editor"}"#, // missing launch_id
     ];
     for line in server_cases {
         assert!(
