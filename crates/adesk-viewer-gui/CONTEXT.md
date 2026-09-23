@@ -441,6 +441,16 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` â†
   `cancel`/`stopped`, so a press whose sequence GTK cancels is never matched by a
   forwarded `Button` release and the remote button can stay down until the next
   click. `pointer::PointerState` pairs only events that actually arrive.
+- **The drawn remote pointer only moves when a frame is pushed.** `FrameView::set_frame`
+  stores the frame's `CursorState` and `cursor::overlay_position` paints it; the view
+  never moves the pointer optimistically on local motion. The runtime pushes a frame
+  only on a *desktop change* (`is_desktop_change` in
+  `crates/adesk-server/src/viewer/backend.rs` counts commits/activation/window/title
+  changes; no pointer-move event kind exists and `CursorTracker::set` emits nothing), so
+  a pointer move over an otherwise-static desktop updates only the runtime's tracker and
+  the overlay stays frozen until an unrelated commit arrives â€” an *applied* motion can
+  look dropped. Clicks still carry their own coordinates, so they land where clicked
+  regardless of the drawn cursor.
 - **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
   client vocabulary is `request_frame`, `request_state`, `set_control`,
   `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
