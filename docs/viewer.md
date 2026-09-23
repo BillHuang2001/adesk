@@ -18,7 +18,7 @@ needs. It is deliberately *not* a general remote-desktop protocol.
 
 - The protocol is transport-agnostic. It runs over any reliable, ordered,
   byte-stream transport. The two supported transports are:
-  - **Unix domain socket** (local; default `$XDG_RUNTIME_DIR/adesk-viewer.sock`).
+  - **Unix domain socket** (local; the default path is derived in §1.1).
   - **TCP** (remote; opt-in).
 - Framing is NDJSON — one UTF-8 JSON object per line (`\n` terminated, no
   embedded newlines), exactly like AGP (`docs/protocol.md` §1). A line cap is
@@ -28,6 +28,47 @@ needs. It is deliberately *not* a general remote-desktop protocol.
   MUST be ignored.
 - The protocol is **server-pushed**: after the handshake the server streams
   frames and state; the viewer sends input and control messages.
+
+### 1.1 Endpoint addressing
+
+The viewer endpoint is a **separate endpoint from AGP**: AGP clients speak the
+Agent GUI Protocol on `adesk.sock` (`docs/protocol.md` §1), viewers speak VAP on
+the viewer socket, and the two are never the same socket.
+
+**Default path derivation.** The server's default bind path and the client's
+default dial path follow the same rule, so a default-configured pair finds each
+other without flags or environment:
+
+- `…/adesk.sock` → `…/adesk-viewer.sock` (the file stem gains `-viewer`;
+  directory and extension are kept).
+- When `$ADESK_SOCKET` names a custom AGP socket, its viewer sibling moves with
+  it — the derivation uses the configured AGP socket, not a fixed name.
+
+**Precedence.** Both sides resolve in the same order; the first match wins.
+
+1. explicit flag (`adesk-server --viewer-socket <PATH>`, `adesk-viewer --unix
+   <PATH>`);
+2. `$ADESK_VIEWER_SOCKET`;
+3. the sibling of the AGP socket: `$ADESK_SOCKET`'s sibling when set, else
+   `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else
+   `<temp_dir>/adesk-viewer.sock`.
+
+A set-but-empty environment variable counts as set on both sides (a value that
+is not a usable path fails at bind/connect time rather than falling through).
+
+**TCP alternative.** `--viewer-tcp <HOST:PORT>` (server, env
+`ADESK_VIEWER_TCP`) and `--tcp <HOST:PORT>` (client) opt into the TCP
+transport in place of the Unix socket; the protocol is unchanged.
+`--no-viewer` disables the viewer endpoint entirely.
+
+**Wrong-socket failure mode.** A VAP client that connects to the AGP socket is
+closed by the AGP connection handler as an undecodable frame: a VAP line has a
+`type` discriminator and no AGP request `id`, so it cannot decode as an AGP
+request. The server additionally logs a WARN hint naming the viewer socket to
+use (the bound endpoint, or "endpoint disabled" under `--no-viewer`). VAP
+clients therefore must not aim `--unix` at `adesk.sock`: the help text of both
+`adesk-viewer` and `adesk-viewer-gui` states this, and their connect/mid-run
+failure messages name the resolved socket path.
 
 ## 2. Handshake
 
