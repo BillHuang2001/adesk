@@ -157,6 +157,7 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - `capture::tight_rgba8` (row de-padding) duplicates `adesk-server::images::tightly_packed`, and `capture::encode_rgba8_png` overlaps `adesk-server::images::encode_png` — a cross-crate overlap left as-is (resolving it means changing `adesk-server`).
 
 ## Notes for Agents
+- Adding a new `adesk_viewer_proto::ClientMessage` variant is a hard compile error, not a silent no-op: the session dispatch `handle_message` (`src/session.rs:273-392`) is an exhaustive `match` with no wildcard arm — the only catch-all is the explicit `ClientMessage::Unknown { .. }` arm. A new variant needs that arm, a decode arm in `adesk-viewer-proto`'s codec, and (to reach the runtime) a `ViewerInput` variant + `ViewerBackend` method + `ViewerClient` method.
 - The server session owns no transport: `serve` takes an already-connected stream; binding/accepting lives in `adesk-server`.
 - `change_signal()` default `never()` means a backend with no event source still serves `request_frame`/pacing — used by tests and simple backends.
 - The binary must never require a display: "rendering" a frame means writing a PNG, and input is script-driven.
