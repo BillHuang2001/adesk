@@ -19,7 +19,14 @@
 //! revealed again, so a guess that turns out to be wrong (a close the runtime
 //! refused, or one that has not taken effect yet) can never leave the task bar
 //! permanently missing a live window. A close the worker reports as *failed* is
-//! revealed at once as well.
+//! revealed at once as well — [`failure_message`] names it.
+//!
+//! `close_window` is fire-and-forget: the client resolves the call once the
+//! message is written, so the worker's failure arm fires for a write/transport
+//! failure, while a stale-id refusal arrives as an asynchronous VAP `error` that
+//! the client does not expose. The optimistic prune is what makes that case
+//! harmless — the row is already gone and the next state confirms the window is
+//! too — so the race never needs a visible error.
 //!
 //! This module holds only that bookkeeping and the human text; the buttons live
 //! in [`crate::task_bar_view`].
