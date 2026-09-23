@@ -3,8 +3,8 @@
 ## Intent
 `adesk-viewer` is the ADesk side of the Viewer Attachment Protocol (VAP v1, `docs/viewer.md`) plus the client that consumes it.
 It has three responsibilities and nothing else:
-1. a **server session** (`ViewerServer`) that, over a connected viewer, streams rendered desktop frames + metadata, applies the viewer's input and starts/stops the runtime's screen recording through a device-agnostic `ViewerBackend` trait the runtime implements;
-2. an **async client SDK** (`ViewerClient`) that connects over a Unix or TCP transport, performs the handshake, streams frames, sends human input and drives recording;
+1. a **server session** (`ViewerServer`) that, over a connected viewer, streams rendered desktop frames + metadata, applies the viewer's input (pointer/key/text, plus the runtime-native window switch and close), lists/launches applications and starts/stops the runtime's screen recording through a device-agnostic `ViewerBackend` trait the runtime implements;
+2. an **async client SDK** (`ViewerClient`) that connects over a Unix or TCP transport, performs the handshake, streams frames, sends human input, lists/launches applications and drives recording;
 3. a **headless `adesk-viewer` binary** that connects, captures frames to disk, records the output and can drive input from a script.
 The crate is transport-agnostic (any `AsyncRead + AsyncWrite` stream), never links Smithay and never touches the compositor — `adesk-server` implements `ViewerBackend` and binds the transport.
 
