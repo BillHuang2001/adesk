@@ -161,7 +161,8 @@ mod tests {
         let fifo: ReplyFifo<u32> = ReplyFifo::new();
         let first = fifo.register();
         let second = fifo.register();
-        let mut errors = broadcast::channel(1).1;
+        // The error stream stays open: only a real `error`/close may fail a reply.
+        let (_sender, mut errors) = broadcast::channel(1);
 
         assert!(fifo.resolve(1));
         assert!(fifo.resolve(2));
@@ -180,7 +181,7 @@ mod tests {
 
         let next = fifo.register();
         assert!(fifo.resolve(9), "the live waiter still gets the reply");
-        let mut errors = broadcast::channel(1).1;
+        let (_sender, mut errors) = broadcast::channel(1);
         assert_eq!(fifo.await_reply(next, &mut errors).await.unwrap(), 9);
     }
 
@@ -212,7 +213,7 @@ mod tests {
     #[tokio::test]
     async fn a_cleared_fifo_fails_every_waiter_with_closed() {
         let fifo: ReplyFifo<u32> = ReplyFifo::new();
-        let mut errors = broadcast::channel(1).1;
+        let (_sender, mut errors) = broadcast::channel(1);
         let pending = fifo.register();
         fifo.clear();
         assert!(matches!(

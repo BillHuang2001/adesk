@@ -17,15 +17,16 @@ mod common;
 use std::sync::Arc;
 use std::time::Duration;
 
-use adesk_core::{ActionId, Button, ButtonState, ErrorCode, Size, WindowId};
-use adesk_proto::{KeySpec, RendererKind};
+use adesk_core::{ActionId, AppId, Button, ButtonState, ErrorCode, LaunchId, Size, WindowId};
+use adesk_proto::{ImagePayload, KeySpec, RendererKind};
 use adesk_viewer::{
-    PeerInfo, RecordRequest, ViewerError, ViewerInput, ViewerServer, ViewerServerConfig,
+    PeerInfo, RecordRequest, ViewerBackend, ViewerError, ViewerInput, ViewerServer,
+    ViewerServerConfig,
 };
 use adesk_viewer_proto::{
-    decode_server, encode_client, ClientMessage, ControlOwner, CursorState, DesktopState,
-    KeyAction, RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, ViewerHello,
-    PROTOCOL_VERSION,
+    decode_server, encode_client, AppEntry, ClientMessage, ControlOwner, CursorState, DesktopState,
+    KeyAction, LaunchOutcome, RecordingEncoder, RecordingStatus, ServerHello, ServerMessage,
+    ViewerFrame, ViewerHello, PROTOCOL_VERSION,
 };
 use tokio::io::{AsyncBufRead, AsyncWrite, BufReader, DuplexStream, ReadHalf, WriteHalf};
 use tokio::task::JoinHandle;
@@ -58,9 +59,30 @@ fn recording_status() -> RecordingStatus {
         .with_counts(12, 400)
 }
 
+/// The registry entry the fake reports for `list_apps`.
+fn app_entry() -> AppEntry {
+    AppEntry {
+        id: AppId::from("org.example.Editor"),
+        name: "Example Editor".to_owned(),
+        icon: Some("editor".to_owned()),
+        categories: vec!["Utility".to_owned()],
+    }
+}
+
+/// The launch outcome the fake reports for `launch_app`.
+fn launch_outcome() -> LaunchOutcome {
+    LaunchOutcome {
+        app_id: AppId::from("org.example.Editor"),
+        launch_id: LaunchId(4),
+        action_id: Some(ActionId(7)),
+        window_id: Some(WindowId(21)),
+    }
+}
+
 /// A fake backend configured for the session suite: an empty 1280×800 Pixman
-/// desktop reported as runtime `"test"`, a fixed frame `ts_ms` of `0` and
-/// `ActionId(7)` recorded for every applied input.
+/// desktop reported as runtime `"test"`, a fixed frame `ts_ms` of `0`,
+/// `ActionId(7)` recorded for every applied input, one launchable application and
+/// a canned launch outcome.
 fn backend() -> Arc<FakeBackend> {
     Arc::new(
         FakeBackend::default()
@@ -78,7 +100,9 @@ fn backend() -> Arc<FakeBackend> {
             })
             .with_action(ActionId(7))
             .with_ts_ms(Some(0))
-            .with_recording_status(recording_status()),
+            .with_recording_status(recording_status())
+            .with_apps(vec![app_entry()])
+            .with_launch(launch_outcome()),
     )
 }
 
@@ -625,4 +649,304 @@ async fn start_recording_failure_answers_error_with_the_id() {
     }
 
     bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: `list_apps` reaches the backend with the viewer's query and answers
+/// `apps`, echoing the request id.
+#[tokio::test]
+async fn list_apps_is_forwarded_and_answered() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::ListApps {
+            id: Some(3),
+            query: Some("editor".to_owned()),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Apps { id, apps } => {
+            assert_eq!(id, Some(3), "the reply echoes the request id");
+            assert_eq!(apps, vec![app_entry()]);
+        }
+        other => panic!("expected the registry entries, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_app_queries(),
+        vec![Some("editor".to_owned())]
+    );
+
+    // An unfiltered request forwards `None` and is answered the same way.
+    send(
+        &mut writer,
+        &ClientMessage::ListApps {
+            id: None,
+            query: None,
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Apps { id, apps } => {
+            assert_eq!(id, None);
+            assert_eq!(apps, vec![app_entry()]);
+        }
+        other => panic!("expected the registry entries, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_app_queries(),
+        vec![Some("editor".to_owned()), None]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5/§6: a runtime without an app registry answers `list_apps` with an `error`
+/// carrying `not_supported` and the request id, and the connection stays usable.
+#[tokio::test]
+async fn list_apps_failure_answers_error_with_the_id() {
+    let backend = backend();
+    backend.set_fail_apps(true);
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::ListApps {
+            id: Some(9),
+            query: None,
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::NotSupported);
+            assert_eq!(id, Some(9));
+        }
+        other => panic!("expected a not_supported error, got {other:?}"),
+    }
+
+    // The connection is still usable afterwards (§6): the next request succeeds
+    // once the backend recovers.
+    backend.set_fail_apps(false);
+    send(
+        &mut writer,
+        &ClientMessage::ListApps {
+            id: None,
+            query: None,
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Apps { apps, .. } => assert_eq!(apps, vec![app_entry()]),
+        other => panic!("expected the registry entries, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: `launch_app` reaches the backend with the requested id and answers
+/// `launch_result`, echoing the request id.
+#[tokio::test]
+async fn launch_app_is_forwarded_and_answered() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    let app_id = AppId::from("org.example.Editor");
+    send(
+        &mut writer,
+        &ClientMessage::LaunchApp {
+            id: Some(11),
+            app_id: app_id.clone(),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::LaunchResult { id, result } => {
+            assert_eq!(id, Some(11), "the reply echoes the request id");
+            assert_eq!(result, launch_outcome());
+        }
+        other => panic!("expected a launch result, got {other:?}"),
+    }
+    assert_eq!(backend.recorded_launches(), vec![app_id]);
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5/§6: a failing launch answers `error` echoing the request id and keeps the
+/// connection open.
+#[tokio::test]
+async fn launch_app_failure_answers_error_with_the_id() {
+    let backend = backend();
+    backend.set_fail_launch(true);
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    let app_id = AppId::from("org.example.Editor");
+    send(
+        &mut writer,
+        &ClientMessage::LaunchApp {
+            id: Some(12),
+            app_id: app_id.clone(),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::Internal);
+            assert_eq!(id, Some(12));
+        }
+        other => panic!("expected an internal error, got {other:?}"),
+    }
+
+    // The connection is still usable afterwards (§6).
+    backend.set_fail_launch(false);
+    send(
+        &mut writer,
+        &ClientMessage::LaunchApp {
+            id: None,
+            app_id: app_id.clone(),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::LaunchResult { id, result } => {
+            assert_eq!(id, None);
+            assert_eq!(result, launch_outcome());
+        }
+        other => panic!("expected a launch result, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §4/§5: `close_window` is runtime-native window management: it reaches the
+/// backend as [`ViewerInput::CloseWindow`] and is acknowledged like input.
+#[tokio::test]
+async fn close_window_is_forwarded_and_acknowledged() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    send(
+        &mut writer,
+        &ClientMessage::CloseWindow {
+            window_id: WindowId(21),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::InputAck { id, action_id } => {
+            assert_eq!(id, None);
+            assert_eq!(action_id, ActionId(7));
+        }
+        other => panic!("expected an input_ack, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_inputs(),
+        vec![ViewerInput::CloseWindow {
+            window_id: WindowId(21)
+        }]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5/§6: the trait's default app methods refuse with `not_supported`, so a
+/// runtime that has not implemented application control answers every app request
+/// with that code and keeps the connection open.
+#[tokio::test]
+async fn the_default_app_methods_refuse_with_not_supported() {
+    let server = ViewerServer::new(Arc::new(MinimalBackend));
+    let (server_stream, client_stream) = tokio::io::duplex(CAPACITY);
+    let handle = tokio::spawn(async move {
+        server
+            .serve(server_stream, PeerInfo::Other("minimal".to_owned()))
+            .await
+    });
+    let (mut reader, mut writer) = split(client_stream);
+    match handshake(&mut reader, &mut writer, ViewerHello::new()).await {
+        ServerMessage::Hello(_) => {}
+        other => panic!("expected the server hello, got {other:?}"),
+    }
+
+    send(
+        &mut writer,
+        &ClientMessage::ListApps {
+            id: Some(2),
+            query: Some("editor".to_owned()),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::NotSupported);
+            assert_eq!(id, Some(2));
+        }
+        other => panic!("expected a not_supported error, got {other:?}"),
+    }
+
+    send(
+        &mut writer,
+        &ClientMessage::LaunchApp {
+            id: Some(4),
+            app_id: AppId::from("org.example.Editor"),
+        },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Error { code, id, .. } => {
+            assert_eq!(code, ErrorCode::NotSupported);
+            assert_eq!(id, Some(4));
+        }
+        other => panic!("expected a not_supported error, got {other:?}"),
+    }
+
+    // The refusals are per-request, not fatal: the session is still usable.
+    send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(_) => {}
+        other => panic!("expected a frame, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// A backend that implements only the required [`ViewerBackend`] methods, leaving
+/// the app methods to their trait defaults — what a runtime without application
+/// control looks like. It lives here rather than in `common` because only this
+/// suite exercises the defaults.
+struct MinimalBackend;
+
+#[async_trait::async_trait]
+impl ViewerBackend for MinimalBackend {
+    fn display(&self) -> ServerHello {
+        ServerHello {
+            protocol_version: PROTOCOL_VERSION,
+            runtime_version: "minimal".to_owned(),
+            output: Size::new(4, 2),
+            renderer: RendererKind::Pixman,
+            cursor: CursorState::hidden(),
+            control: ControlOwner::Ai,
+        }
+    }
+
+    async fn render_frame(&self) -> adesk_viewer::Result<ViewerFrame> {
+        Ok(ViewerFrame {
+            seq: 1,
+            ts_ms: 0,
+            image: ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0).expect("a valid payload"),
+            cursor: CursorState::hidden(),
+            active_window_id: None,
+        })
+    }
+
+    async fn desktop_state(&self) -> adesk_viewer::Result<DesktopState> {
+        Ok(DesktopState {
+            active_window_id: None,
+            windows: Vec::new(),
+        })
+    }
+
+    async fn apply_input(&self, _input: ViewerInput) -> adesk_viewer::Result<Option<ActionId>> {
+        Ok(None)
+    }
 }
