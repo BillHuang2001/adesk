@@ -37,4 +37,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+# Implementing the VAP `ViewerBackend` trait (which is declared with
+# `#[async_trait]`) for the bridge's gated test backend.
+async-trait.workspace = true
 tempfile.workspace = true

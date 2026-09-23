@@ -119,23 +119,39 @@ capability list) plus one documented escape hatch.
   The GTK side drives a `glib::spawn_future_local` loop over `UiEvent`s; input flows
   back through a cloneable `InputHandle`. The worker never touches GTK and the GTK
   loop never blocks on the network.
+- **Seat input never waits for a request.** `session`'s `select!` loop applies seat
+  input itself: `route` splits every `InputCommand` into a `Routed::Seat` (pointer,
+  key, text, `activate_window`, `close_window`) applied immediately by `apply_seat`
+  — whose only await is the socket write — and a `Routed::Request`, a `RequestJob`
+  (`State`, `Tick`, `Frame`, `Recording`, `Apps`, `Launch`, `StartRecording`,
+  `StopRecording`) handed to a second task, `request_worker`. That task owns the same
+  one `Arc<ViewerClient>` and serves the jobs one at a time, in submission order, so
+  a slow `request_state`/`request_recording`/`list_apps`/`launch_app` reply can no
+  longer delay the click or keystroke queued behind it (the sibling fix on the
+  `adesk-viewer` session side, applied to the client). The client's write half is a
+  single lock, so both tasks' messages still go through one writer and the NDJSON
+  stream keeps its single-writer ordering. At shutdown the loop drops the job
+  channel, aborts the requester and takes the connection back with `Arc::try_unwrap`
+  for a clean `close`.
 - **Frames are decoded on the worker.** `bridge` decodes each `ImagePayload`
   (`image::decode`) before sending it, so the GTK thread only builds a
   `gdk::MemoryTexture` from owned RGBA8 (no base64/PNG work on the main loop). A
   decode failure becomes a `UiEvent::Notice`, never fatal. `UiEvent::Frame` carries
   `seq`, `ts_ms`, the decoded image, the frame's `CursorState` and the active window
   id, so the GTK layer never re-reads the wire.
-- **Initial state + frame.** On connect the worker sends `Connected { target, hello }`,
-  calls `set_control(ControlOwner::Human)` (the advisory ownership handshake), then
-  `request_state()` + `request_frame()` so the task bar and the view fill in
-  immediately.
+- **Initial state + frame.** On connect the worker sends `Connected { target, hello }`
+  and calls `set_control(ControlOwner::Human)` (the advisory ownership handshake),
+  then hands the requester a `State` + a `Frame` (+ a `Recording`) job, so the task
+  bar and the view fill in immediately without those round trips blocking the input
+  the loop is already applying.
 - **Task-bar refresh = refresh-on-change + modest timer, coalesced.** The server has
-  no pushed `state` stream, so the worker calls `request_state()` when a frame's
-  `active_window_id` changes AND on a 500 ms `tokio::time::interval` (a third
-  `select!` branch). The request is awaited inline, so at most one is ever in flight
-  (inherent coalescing); this also converges window create/destroy/title changes that
-  leave the active id unchanged. `UiEvent::Frame` carries `active_window_id`, so the
-  highlight updates instantly without waiting for a state refresh.
+  no pushed `state` stream, so the worker queues a `RequestJob::State` when a frame's
+  `active_window_id` changes AND a `RequestJob::Tick` on a 500 ms
+  `tokio::time::interval` (a third `select!` branch). The requester serves the jobs
+  one at a time, so at most one `request_state` is ever in flight (inherent
+  coalescing); this also converges window create/destroy/title changes that leave the
+  active id unchanged. `UiEvent::Frame` carries `active_window_id`, so the highlight
+  updates instantly without waiting for a state refresh.
 - **The task bar rebuilds only on change.** `TaskBarView::update_state` rebuilds the
   rows only when the visible entry model differs; the per-frame `set_active` only
   re-renders the highlight. Each window's switch uses `clicked` (not `toggled`) so
@@ -310,7 +326,7 @@ capability list) plus one documented escape hatch.
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**148 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+**151 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
 - `cli` (8): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target = `resolve_socket_path(None)`, explicit
   `--unix` beats the environment, default follows `$ADESK_VIEWER_SOCKET` and the
@@ -354,12 +370,17 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   drops, plus `cancel`: it releases a held button once, is a no-op when nothing is
   held, pairs with a press dropped in the bars, is a no-op after a normal release,
   and lifts a press whose release never arrived exactly once.
-- `bridge` (10): decodable frame→`Frame` event (carrying the cursor), hidden cursor
+- `bridge` (13): decodable frame→`Frame` event (carrying the cursor), hidden cursor
   still reported, undecodable frame→`Notice`, `InputHandle::close` stops accepting
   commands, a recording status→`Recording(Ok)` (returning `active`), a recording
   error→`Recording(Err)`, recording commands reach the worker, the launcher commands
-  reach the worker, a close command reaches the worker, and the `Apps`/`Launch`/
-  `WindowClosed` event arms carry their replies.
+  reach the worker, a close command reaches the worker, the `Apps`/`Launch`/
+  `WindowClosed` event arms carry their replies, every seat command routes to the
+  input path and every request/response command to the requester, and the regression
+  test `seat_input_is_applied_while_a_request_is_in_flight`: a `Move` queued while a
+  `list_apps` is parked in a gated backend (a real `ViewerServer` over a temp-dir
+  Unix socket, mirroring `adesk-viewer`'s `GatedBackend`) is applied while the
+  listing is still parked — it times out on the old inline-await path.
 - `record` (6): new control is idle/`Record`/`StartRecording`, a recording
   status→Recording/`Stop`/`REC 12s`/`StopRecording`, a finished status→
   Finished/`Record`/`saved <path>`/`StartRecording`, an error status→Idle with
@@ -464,13 +485,21 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   `Move`/`Button`/`Scroll` are written to the socket unconditionally and only the
   keyboard path is gated — by the frame view's GTK focus (`focused` cell fed to
   `KeyRouter::press`/`release`, which return `Pass` when unfocused), never by the
-  advisory control handshake. The worker applies commands one at a time in its
-  `select!` loop and awaits `request_state`/`request_recording` round trips inline,
-  so a slow server head-of-line-blocks queued input (it is buffered in an unbounded
-  channel, never dropped); a transport failure of an input message surfaces only as
-  a log-only `UiEvent::Notice`, and a runtime *rejection* (`invalid_request`,
+  advisory control handshake. Seat input is applied immediately, in submission
+  order, and is never held up by a request/response round trip (those run on the
+  requester task), so the input channel is unbounded but drains promptly; a
+  transport failure of an input message surfaces only as a log-only
+  `UiEvent::Notice`, and a runtime *rejection* (`invalid_request`,
   `unknown_window`, …) is invisible to the GUI because the client's input methods
   are fire-and-forget and its error broadcast has no public accessor.
+- **Deferred requests interleave with input at the write lock.** The requester task
+  and the input loop share one connection, serialized by the client's write half, so
+  a request message and a later input message can be written in either order (the
+  two tasks' writes are not ordered against each other). That is harmless for the
+  read-only requests, which are all of `State`/`Tick`/`Frame`/`Recording`/`Apps`; a
+  state-changing `Launch`/`StartRecording`/`StopRecording` is likewise deferred, so
+  a click or keystroke racing it could reach the runtime first. What is guaranteed
+  is the *seat* input order and that the stream keeps one writer.
 - **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
   client vocabulary is `request_frame`, `request_state`, `set_control`,
   `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
@@ -496,7 +525,7 @@ default) and connect/disconnect failures name the dialed endpoint, with an
 AGP-socket hint when the file name is `adesk.sock`
 (`crates/adesk-viewer-gui/src/address.rs`).
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
-`cargo test -p adesk-viewer-gui` (148 passed); `cargo clippy -p adesk-viewer-gui
+`cargo test -p adesk-viewer-gui` (151 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;
 `cargo doc -p adesk-viewer-gui --no-deps --document-private-items` (zero warnings);
 and `cargo check --workspace --all-targets`.
