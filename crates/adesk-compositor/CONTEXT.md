@@ -25,7 +25,8 @@ Entry point:
 - `ReadyInfo { display_name: String, renderer: RendererName, output_size: Size }`.
 
 Config:
-- `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`.
+- `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096), dmabuf: bool (true) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`, `with_dmabuf`, `without_dmabuf`.
+- `dmabuf: false` makes `State::new` create **no** `zwp_linux_dmabuf_v1` global (SHM-only clients; the renderer itself is still created and `DmabufState` is still kept for the handler) — an operator escape hatch for a client/driver that crashes the graphics stack. No `adesk-server` flag exposes it yet (see Notes for Agents).
 - `RendererKind { Auto, Gl, Pixman }` — `Auto` tries surfaceless EGL and falls back to pixman with a warning; `Gl` fails startup when EGL is unavailable.
 - `RendererName { Gl, Pixman }` — `as_str()` → `"gl"`/`"pixman"` (AGP `ping`), `Display`.
 - `XkbSettings { rules, model, layout, variant, options }` — defaults `evdev`/`pc105`/`us`/empty/`None`; `us()`, `to_xkb_config() -> smithay::input::keyboard::XkbConfig<'_>`.
