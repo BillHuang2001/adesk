@@ -269,8 +269,11 @@ drives** (a viewer action is never a special code path):
 # One-shot capture of the current desktop to a PNG.
 ./scripts/dev.sh cargo run -p adesk-viewer -- --capture desktop.png
 
-# Follow the desktop, writing every frame, and replay a small input script.
-./scripts/dev.sh cargo run -p adesk-viewer -- --follow --out-dir shots/ --input script.txt
+# Follow the desktop, writing every frame into shots/.
+./scripts/dev.sh cargo run -p adesk-viewer -- --follow --out-dir shots/
+
+# Replay a small input script against the runtime.
+./scripts/dev.sh cargo run -p adesk-viewer -- --input script.txt
 
 # Watch the desktop interactively (needs a real display).
 ./scripts/dev.sh cargo run -p adesk-viewer-gui -- --unix /run/adesk/adesk-viewer.sock
@@ -313,14 +316,21 @@ backend, with an in-memory `mock` backend for tests and development.
 
 ```sh
 # Create/start an ADesk machine over rootless Podman, then inspect it.
+# No ADesk image is published yet: build one that ships `adesk-server`
+# (see "Running in a container" above) and pass it with --image.
 ./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman create \
-    --name assistant --image registry.local/adesk:latest --viewer-unix /run/adesk/adesk-viewer.sock:/run/adesk/adesk-viewer.sock
+    --name assistant --image localhost/adesk-machine:latest --viewer-unix /run/adesk/adesk-viewer.sock:/run/adesk/adesk-viewer.sock
 ./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman start assistant
 ./scripts/dev.sh cargo run -p adesk-machine -- --runtime podman list
 
 # Everything works without a container engine via the mock runtime.
 ./scripts/dev.sh cargo run -p adesk-machine -- --runtime mock list
 ```
+
+The `create` image must be built or pulled by you before the Podman path can run —
+none is published under this project's name (`localhost/adesk-machine:latest` above is
+a stand-in for your own build, e.g. from the sketch in "Running in a container");
+`--runtime mock` exercises the same host control plane with no engine and no image.
 
 The design (division of responsibility, the backend seam, viewer exposure over
 mounts/ports, approvals, trust model) is `docs/machine.md`.
