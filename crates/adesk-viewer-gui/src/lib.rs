@@ -50,6 +50,11 @@ use clap::Parser;
 /// installed subscriber is ignored rather than panicking. A configuration error
 /// (e.g. an unparseable `--tcp`) is reported and mapped to a failing
 /// `glib::ExitCode`; a `clap` usage error exits the process first.
+///
+/// GTK is then invoked with the program name only, so the `GApplication`
+/// option parser never sees the real `argv` again: handing it the process
+/// arguments would make it re-parse (and reject) the `--unix`/`--tcp`/`--log`
+/// flags clap has already consumed.
 pub fn run() -> gtk4::glib::ExitCode {
     let cli = cli::Cli::parse();
     install_logging(&cli.log);
@@ -62,7 +67,7 @@ pub fn run() -> gtk4::glib::ExitCode {
         }
     };
 
-    app::run_application(target)
+    app::run_application(target, &app::program_name())
 }
 
 /// Installs the `tracing-subscriber` from `filter`, tolerating a bad directive
