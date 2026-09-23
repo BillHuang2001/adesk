@@ -34,6 +34,23 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
   come from the static `PopupManager::popups_for_surface` (front-to-back, reversed here).
 - GL readback is y-flipped and GL rows arrive top-down; do not double-flip.
 - `XKB_CONFIG_ROOT` and EGL exist only in the dev shell; build via `./scripts/dev.sh`.
+- A buffer the backend cannot import (a DMA-BUF pixman cannot `mmap`, a bad SHM pool, ...) is
+  **dropped, never rendered**: at protocol time the `dmabuf` handler logs `dmabuf import failed`
+  and calls `notifier.failed()`; at render time Smithay's element walk logs `Failed to import
+  surface` and omits the element (`WaylandSurfaceRenderElement::from_surface` returns `Err`
+  before a texture is cached). `window_elements`/`output_scene` therefore degrade to a clear or
+  partial frame and **no dangling texture reaches `adesk_render::render_scene`** — a failed import
+  is a clean, non-fatal outcome of this module.
+- This module's own walks are bounded (`wm::MAX_SURFACE_TREE_DEPTH` = 32 in `state.rs`/`wm.rs`).
+  Smithay's walk underneath it is not: `render_elements_from_surface_tree` → `with_surface_tree_downward`
+  → `PrivateSurfaceData::map` recurses once per subsurface level, and popup collection
+  (`PopupNode::iter_popups_relative_to`) recurses once per nested popup — only a deliberately deep
+  client tree risks an 8 MiB stack overflow; an ordinary client cannot reach it.
+- The workspace's only production `unsafe` is the surfaceless-EGL bootstrap in `headless.rs`
+  (`create_gl`: `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`); the pixman path
+  contains no `unsafe`. A SIGSEGV on the software renderer faults inside libpixman
+  (Smithay `PixmanRenderer::render_texture_from_to` → `composite32` over the source image's mapped
+  pointer), not in this module's own code.
 
 ## Routing Table
 
