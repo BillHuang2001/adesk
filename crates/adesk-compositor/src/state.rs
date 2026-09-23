@@ -138,7 +138,13 @@ impl State {
         create_output(config, display);
 
         let mut dmabuf_state = DmabufState::new();
-        dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
+        if config.dmabuf {
+            dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
+        } else {
+            // Operator escape hatch: advertise no dmabuf global so only `wl_shm`
+            // clients can attach buffers. The renderer is still created normally.
+            tracing::info!("dmabuf global disabled: SHM-only clients");
+        }
 
         let data_device_state = DataDeviceState::new::<State>(display);
         let xdg_decoration_state = XdgDecorationState::new::<State>(display);
@@ -942,5 +948,21 @@ mod tests {
             .inject_key(&key, KeyState::Pressed)
             .expect_err("a keysym outside the keymap must be rejected");
         assert_eq!(error.code(), ErrorCode::InvalidRequest);
+    }
+
+    /// The dmabuf escape hatch: with `dmabuf = false` the compositor still comes up
+    /// (the renderer is created normally, only the global is skipped) and records the
+    /// disabled switch on its own config.
+    #[test]
+    fn dmabuf_disabled_state_still_starts() {
+        let display = smithay::reexports::wayland_server::Display::<State>::new()
+            .expect("a wayland display can be created headless");
+        let config = CompositorConfig::default()
+            .with_renderer(crate::config::RendererKind::Pixman)
+            .with_dmabuf(false);
+        let (events, _subscriber) = broadcast::channel(64);
+        let state = State::new(&config, &display.handle(), events)
+            .expect("an SHM-only compositor must initialise headless");
+        assert!(!state.config.dmabuf);
     }
 }

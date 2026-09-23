@@ -93,12 +93,69 @@ fn destroying_a_toplevel_returns_its_open_popup_ids() {
     registry.add_popup(3, Some(1), WindowId(1), (5, 5));
     let (window, popups) = registry.unbind_toplevel(&1);
     assert_eq!(window, Some(WindowId(1)));
-    assert_eq!(popups, vec![1, 2]);
+    assert_eq!(
+        popups
+            .iter()
+            .map(|popup| popup.popup_id)
+            .collect::<Vec<_>>(),
+        vec![1, 2]
+    );
     assert_eq!(registry.window_for_surface(&2), None);
     assert!(registry.popup(&2).is_none());
     // An unmapped toplevel destroy reports no window and no popups.
     registry.register_toplevel(9);
     assert_eq!(registry.unbind_toplevel(&9), (None, Vec::new()));
+}
+
+/// The registry seam behind the `WmBridge::popup_handles` purge: `destroy_toplevel` keys
+/// its popup handles by surface and removes the handle of every popup that died with its
+/// owner using the keys returned here. A real `WmBridge` popup needs a live
+/// `PopupSurface` (only the xdg-shell protocol path can build one), so this exercises the
+/// same removal through the integer-keyed registry instead.
+#[test]
+fn destroying_a_toplevel_returns_the_surface_keys_of_its_open_popups() {
+    let mut registry: SurfaceRegistry<u64> = SurfaceRegistry::new();
+    registry.register_toplevel(1);
+    registry.bind(1, WindowId(1));
+    registry.add_popup(2, Some(1), WindowId(1), (0, 0));
+    registry.add_popup(3, Some(2), WindowId(1), (1, 2));
+    // A popup of another, still live window must not be reported (and never removed).
+    registry.register_toplevel(7);
+    registry.bind(7, WindowId(7));
+    let survivor = registry.add_popup(4, Some(7), WindowId(7), (0, 0));
+    // A stand-in for the per-popup bookkeeping the bridge keys by surface id.
+    let mut handles: HashMap<u64, &str> =
+        HashMap::from([(2, "owner popup"), (3, "chained popup"), (4, "survivor")]);
+
+    let (window, popups) = registry.unbind_toplevel(&1);
+    assert_eq!(window, Some(WindowId(1)));
+    assert_eq!(
+        popups
+            .iter()
+            .map(|popup| (popup.popup_id, popup.surface))
+            .collect::<Vec<_>>(),
+        vec![(1, 2), (2, 3)],
+        "popups come back in creation order, paired with their own surface key"
+    );
+    for popup in &popups {
+        handles.remove(&popup.surface);
+    }
+    assert_eq!(
+        handles.len(),
+        1,
+        "purging by the returned keys leaves no dead popup behind"
+    );
+    assert_eq!(handles.get(&4), Some(&"survivor"));
+    assert_eq!(survivor, 3, "the surviving window keeps its popup id");
+
+    // The registry forgot the removed popups, exactly what made the old lookup filter
+    // match nothing: after the unbind the bridge can only purge through these keys.
+    assert!(registry.popup(&2).is_none());
+    assert!(registry.popup(&3).is_none());
+    assert_eq!(registry.popup(&4).map(|popup| popup.popup_id), Some(3));
+    // A destroy of a window that was never mapped removes no popup.
+    registry.register_toplevel(8);
+    assert_eq!(registry.unbind_toplevel(&8), (None, Vec::new()));
 }
 
 #[test]
