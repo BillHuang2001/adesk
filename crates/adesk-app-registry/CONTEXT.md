@@ -139,6 +139,12 @@ Every item below exists in `src/` and is re-exported flat at the crate root; the
 - `AppRegistry::launch` rejects an empty `argv` before building the command, so both `NoExec` arms inside the command construction (the `TerminalSpec::wrap` `None` case and the `argv.split_first()` `None` case) are unreachable defensive code, not real failure paths — do not chase coverage for them.
 - `Error::Io`, `Error::InvalidEntry` and `Error::InvalidArgument` exist for API completeness but are never constructed by this crate: `scan()` reports per-file problems as `ScanIssue`s (it only returns `Ok`), and `launch()` can only fail with `UnknownApp`, `TryExecNotFound`, `NoExec`, `InvalidExec` or `Spawn`.
 
+## Known Issues
+
+- Launched apps open on the **host** desktop when the runtime itself was started from a host session that exports `DISPLAY` (e.g. `./scripts/dev.sh cargo run -p adesk-server`). Because `build_command` inherits the full environment and the server's `LaunchEnv` only overrides `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`, the child sees `WAYLAND_DISPLAY=wayland-N` (adesk) **and** the host's `DISPLAY=:0` at once. Toolkits that prefer X11/Ozone-X11 when `DISPLAY` is present (Firefox, Chrome/Chromium) connect to the host X server and open on the host desktop; GTK terminals (ghostty, gnome console) prefer Wayland when `WAYLAND_DISPLAY` is valid and land inside adesk — hence the observed asymmetry.
+- Fix locus is **not** this crate: `crates/adesk-server/src/dispatch/apps.rs` (`launch_app`, ~lines 56-62) builds the `LaunchEnv` and never neutralizes the inherited `DISPLAY` nor sets the Wayland opt-ins (`XDG_SESSION_TYPE=wayland`, `MOZ_ENABLE_WAYLAND=1`, `OZONE_PLATFORM=wayland`, `--ozone-platform=wayland`). `LaunchEnv::with_var` exists for exactly this and currently has no production caller. This crate offers no way to *unset* a variable (no `env_clear`/`env_remove`), so the server fix must set the vars, and neutralization of `DISPLAY` needs either a server-side `with_var("DISPLAY", ...)`/empty value or an app-registry `env_remove` seam.
+- Secondary effect of the same inheritance: if a copy of Firefox/Chrome is already running on the host with the same profile, the launched process delegates to that running instance (Mozilla's remote protocol / `--user-data-dir`) and the new window appears on the host; `Exec` is expanded verbatim (`firefox %u` → `firefox`, since AGP carries no file args), so no isolation flag is added.
+
 ## Status
 
 Every item documented above is implemented and exercised by the suites in Test Strategy:
