@@ -208,7 +208,7 @@ connection, control state and a capability list) plus one documented escape hatc
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**95 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+**96 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
 - `cli` (8): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target = `resolve_socket_path(None)`, explicit
   `--unix` beats the environment, default follows `$ADESK_VIEWER_SOCKET` and the
