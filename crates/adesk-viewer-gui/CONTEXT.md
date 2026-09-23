@@ -250,10 +250,12 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   status→Recording/`Stop`/`REC 12s`/`StopRecording`, a finished status→
   Finished/`Record`/`saved <path>`/`StartRecording`, an error status→Idle with
   the reason surfaced, an idle status clears the line, duration truncation.
-- `app` (3): the argument vector GTK receives is exactly the program name
+- `app` (4): the argument vector GTK receives is exactly the program name
   (`program_name_from` passthrough; `None` → `"adesk-viewer-gui"` fallback) — the
-  regression pin for the "Unknown option --unix" bug — and the escape action's
-  accelerator name is the window action (`win.release-control`).
+  regression pin for the "Unknown option --unix" bug — the escape action's
+  accelerator name is the window action (`win.release-control`), and the help
+  markup parses as Pango (`gtk::pango::parse_markup`, display-free) with the
+  escaped window title rendering back exactly.
 - **Untested widget glue (needs a display):** everything inside `app`'s
   `HelpUi`/`RecordUi` construction and `activate()` (header/popover/revealer
   assembly, `gio::SimpleAction` registration, focus handoff), `frame_view`'s
