@@ -23,6 +23,8 @@ Types (`src/types.rs`):
 - `KeyAction { Pressed, Released, Tap }` — serde `"pressed"`/`"released"`/`"tap"`.
 - `RecordingEncoder { Auto, Software, Gpu }` — serde `"auto"`/`"software"`/`"gpu"`; `Default` is `Auto`.
 - `RecordingStatus { recording: bool, path: Option<String>, encoder: Option<String>, fps: u32, frames: u64, duration_ms: u64, error: Option<String> }` — `idle()` (`recording = false`, `fps = DEFAULT_RECORD_FPS`, zero counters, no path/encoder/error), `Default = idle()`, and `with_recording`/`with_path`/`with_encoder`/`with_counts`/`with_error` builders. `path`/`encoder`/`error` are `skip_serializing_if = None` (omitted from the wire form, never `null`).
+- `AppEntry { id: AppId, name: String, icon: Option<String>, categories: Vec<String> }` — one launchable application (the runtime's XDG registry projection). `icon` is `skip_serializing_if = None`; `categories` is always serialized.
+- `LaunchOutcome { app_id: AppId, launch_id: LaunchId, action_id: Option<ActionId>, window_id: Option<WindowId> }` — the result of a launch. `action_id`/`window_id` are `skip_serializing_if = None`.
 Codec (`src/codec.rs`):
 - `encode_client(&ClientMessage) -> String`, `encode_server(&ServerMessage) -> String` (infallible; line-ready, no trailing newline).
 - `decode_client(&str) -> Result<ClientMessage>`, `decode_server(&str) -> Result<ServerMessage>` — read the raw `"type"` tag, dispatch to the variant, and return `Unknown` for an unrecognised tag (never an error).
