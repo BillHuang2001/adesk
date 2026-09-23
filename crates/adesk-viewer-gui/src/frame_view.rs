@@ -8,10 +8,14 @@
 //! converted to VAP's normalized `0.0..=1.0` output fractions with the pure
 //! [`crate::mapping`] helpers, never sent as pixels.
 //!
-//! Three decisions are deliberately kept out of this file and unit-tested in
+//! Four decisions are deliberately kept out of this file and unit-tested in
 //! display-free modules:
-//! - where the remote pointer is drawn ([`crate::cursor`]);
-//! - whether a button event is forwarded at all ([`crate::pointer`]);
+//! - where the remote pointer is drawn and how motion and pushed frames combine
+//!   ([`crate::cursor`]);
+//! - whether a button event is forwarded at all, including the release a
+//!   cancelled gesture owes ([`crate::pointer`]);
+//! - whether a click lands on the displayed desktop or in the letterbox bars
+//!   ([`crate::mapping`]);
 //! - whether a keystroke is forwarded, passed to the toolkit or handed to the
 //!   viewer's escape hatch ([`crate::keystroke`]).
 //!
@@ -30,7 +34,7 @@ use adesk_proto::KeySpec;
 use adesk_viewer_proto::{CursorState, KeyAction};
 
 use crate::bridge::{InputCommand, InputHandle};
-use crate::cursor;
+use crate::cursor::{self, CursorOverlay};
 use crate::image::DecodedImage;
 use crate::keystroke::{Delivery as KeyDelivery, KeyRoute, KeyRouter, Modifiers};
 use crate::mapping;
@@ -48,8 +52,9 @@ pub(crate) struct FrameView {
     /// The dimensions of the currently displayed image (`(0, 0)` before the
     /// first frame), used for the letterbox coordinate mapping.
     dimensions: Rc<Cell<(u32, u32)>>,
-    /// The most recent remote cursor state (hidden until the first frame).
-    cursor: Rc<RefCell<CursorState>>,
+    /// The pointer state currently drawn: the latest of a local motion and a
+    /// pushed frame's server cursor (hidden until either arrives).
+    cursor: Rc<RefCell<CursorOverlay>>,
     /// Whether the frame view currently holds keyboard focus.
     focused: Rc<Cell<bool>>,
 }
@@ -73,7 +78,7 @@ impl FrameView {
         picture.set_can_target(true);
 
         let dimensions: Rc<Cell<(u32, u32)>> = Rc::new(Cell::new((0, 0)));
-        let cursor: Rc<RefCell<CursorState>> = Rc::new(RefCell::new(CursorState::hidden()));
+        let cursor: Rc<RefCell<CursorOverlay>> = Rc::new(RefCell::new(CursorOverlay::new()));
         let last_point: Rc<Cell<Option<(f64, f64)>>> = Rc::new(Cell::new(None));
         let pointer: Rc<RefCell<PointerState>> = Rc::new(RefCell::new(PointerState::new()));
         let focused: Rc<Cell<bool>> = Rc::new(Cell::new(false));
@@ -84,8 +89,15 @@ impl FrameView {
         overlay.set_child(Some(&picture));
         overlay.add_overlay(&cursor_area);
 
-        attach_motion(&picture, &dimensions, &last_point, &input);
-        attach_clicks(&picture, &dimensions, &pointer, &input);
+        attach_motion(
+            &picture,
+            &dimensions,
+            &last_point,
+            &cursor,
+            &cursor_area,
+            &input,
+        );
+        attach_clicks(&picture, &dimensions, &last_point, &pointer, &input);
         attach_scroll(&picture, &dimensions, &last_point, &input);
         attach_keys(&picture, &focused, &input);
         attach_focus(&picture, &focused, on_focus_change);
@@ -133,12 +145,11 @@ impl FrameView {
         self.picture.set_paintable(Some(&texture));
         self.dimensions.set((width, height));
 
-        // Repaint the overlay only when the pointer actually moved (or appeared
-        // or vanished): the position is resolved against the widget's current
-        // size inside the draw function, so a resize needs no bookkeeping here.
-        let moved = *self.cursor.borrow() != cursor;
-        *self.cursor.borrow_mut() = cursor;
-        if moved {
+        // The server cursor refines (or replaces) whatever the last local motion
+        // drew; repaint only when the pointer actually moved (or appeared or
+        // vanished). The position is resolved against the widget's current size
+        // inside the draw function, so a resize needs no bookkeeping here.
+        if self.cursor.borrow_mut().frame(&cursor) {
             self.cursor_area.queue_draw();
         }
     }
@@ -147,12 +158,12 @@ impl FrameView {
 /// Builds the overlay child that draws the remote pointer.
 ///
 /// It spans the whole frame view (so it always knows the widget's current size),
-/// is never a pointer target, and resolves the frame's normalized cursor
-/// position with the pure [`crate::cursor`] math against the same displayed-image
+/// is never a pointer target, and resolves the drawn [`CursorOverlay`] position
+/// with the pure [`crate::cursor`] math against the same displayed-image
 /// rectangle the click mapping uses.
 fn build_cursor_overlay(
     dimensions: &Rc<Cell<(u32, u32)>>,
-    cursor: &Rc<RefCell<CursorState>>,
+    cursor: &Rc<RefCell<CursorOverlay>>,
 ) -> gtk::DrawingArea {
     let area = gtk::DrawingArea::new();
     area.set_can_target(false);
@@ -170,7 +181,7 @@ fn build_cursor_overlay(
         let Some(display) = mapping::letterbox(widget, draw_dimensions.get()) else {
             return;
         };
-        if let Some((x, y)) = cursor::overlay_position(&display, &draw_cursor.borrow()) {
+        if let Some((x, y)) = cursor::overlay_position(&display, draw_cursor.borrow().state()) {
             draw_pointer(context, x, y);
         }
     });
@@ -233,17 +244,16 @@ fn normalize(
 
 /// Like [`normalize`], but returns `None` when `point` falls outside the image
 /// (a click in the letterbox/pillarbox bars has no desktop target).
+///
+/// The inside/outside decision itself is the pure, unit-tested
+/// [`mapping::contains`]; this only supplies the geometry.
 fn normalize_click(
     picture: &gtk::Picture,
     dimensions: (u32, u32),
     point: (f64, f64),
 ) -> Option<(f64, f64)> {
     let rect = display_rect(picture, dimensions)?;
-    let inside = point.0 >= rect.x
-        && point.0 <= rect.x + rect.w
-        && point.1 >= rect.y
-        && point.1 <= rect.y + rect.h;
-    inside.then(|| mapping::widget_to_normalized(point, &rect))
+    mapping::contains(&rect, point).then(|| mapping::widget_to_normalized(point, &rect))
 }
 
 /// The center of `picture` in widget pixels (the fallback scroll position).
@@ -306,32 +316,84 @@ fn deliver_key(delivery: KeyDelivery, action: KeyAction, input: &InputHandle) ->
 }
 
 /// Attaches the pointer-motion controller (`Move`).
+///
+/// Besides forwarding the move, each motion immediately draws the remote pointer
+/// at the local position. The runtime pushes a frame only on a desktop change
+/// (never on pointer motion), so without this the drawn pointer would stay frozen
+/// between frames while the runtime's own pointer moved. A later frame's server
+/// cursor refines or replaces the local position (`CursorOverlay`'s latest-wins
+/// rule).
 fn attach_motion(
     picture: &gtk::Picture,
     dimensions: &Rc<Cell<(u32, u32)>>,
     last_point: &Rc<Cell<Option<(f64, f64)>>>,
+    cursor: &Rc<RefCell<CursorOverlay>>,
+    cursor_area: &gtk::DrawingArea,
     input: &InputHandle,
 ) {
     let motion = gtk::EventControllerMotion::new();
     let weak = picture.downgrade();
     let dimensions = dimensions.clone();
     let last_point = last_point.clone();
+    let cursor = cursor.clone();
+    let cursor_area = cursor_area.clone();
     let input = input.clone();
     motion.connect_motion(move |_, x, y| {
         last_point.set(Some((x, y)));
         if let Some(picture) = weak.upgrade() {
             if let Some((nx, ny)) = normalize(&picture, dimensions.get(), (x, y)) {
                 input.send(InputCommand::Move { x: nx, y: ny });
+                if cursor.borrow_mut().motion(nx, ny) {
+                    cursor_area.queue_draw();
+                }
             }
         }
     });
     picture.add_controller(motion);
 }
 
+/// Forwards one button release for `button` at `point` iff `decision` says the
+/// viewer still holds it.
+///
+/// The normal release and the cancelled-gesture release share this path (and
+/// [`PointerState`]'s pairing), so a cancelled sequence lifts the button exactly
+/// once. The position is clamped by [`normalize`], so a release that lands in a
+/// letterbox bar still lifts the button instead of leaving the remote pointer
+/// stuck down.
+fn forward_release(
+    picture: &gtk::Picture,
+    dimensions: (u32, u32),
+    input: &InputHandle,
+    button: Button,
+    point: (f64, f64),
+    decision: PointerDelivery,
+) {
+    if decision != PointerDelivery::Forward {
+        return;
+    }
+    if let Some((nx, ny)) = normalize(picture, dimensions, point) {
+        input.send(InputCommand::Button {
+            button,
+            state: ButtonState::Released,
+            x: nx,
+            y: ny,
+        });
+    }
+}
+
 /// Attaches one click controller per mouse button (`Button`).
+///
+/// Each gesture forwards a press/release through the shared [`PointerState`]. The
+/// gesture's cancel/stop path forwards the matching release too, so a sequence
+/// GTK gives up on after a forwarded press can never leave the remote button
+/// held — which would pin Smithay's pointer focus and make further clicks stop
+/// registering. [`PointerState::cancel`] shares [`PointerState::release`]'s
+/// pairing, so firing `stopped` and `cancel` (or cancel after the normal release)
+/// is idempotent and never double-sends.
 fn attach_clicks(
     picture: &gtk::Picture,
     dimensions: &Rc<Cell<(u32, u32)>>,
+    last_point: &Rc<Cell<Option<(f64, f64)>>>,
     pointer: &Rc<RefCell<PointerState>>,
     input: &InputHandle,
 ) {
@@ -377,20 +439,40 @@ fn attach_clicks(
             let Some(picture) = release_weak.upgrade() else {
                 return;
             };
-            // A forwarded press is always matched by a release — the position is
-            // clamped, so a drag that ends in a letterbox bar still lifts the
-            // button instead of leaving the remote pointer stuck down.
-            if release_pointer.borrow_mut().release(button) == PointerDelivery::Forward {
-                if let Some((nx, ny)) = normalize(&picture, release_dimensions.get(), (x, y)) {
-                    release_input.send(InputCommand::Button {
-                        button,
-                        state: ButtonState::Released,
-                        x: nx,
-                        y: ny,
-                    });
-                }
-            }
+            let decision = release_pointer.borrow_mut().release(button);
+            forward_release(
+                &picture,
+                release_dimensions.get(),
+                &release_input,
+                button,
+                (x, y),
+                decision,
+            );
         });
+
+        // `stopped`/`cancel` fire when GTK gives up on the gesture after a press
+        // (a stolen sequence, too much motion); both carry no position, so the
+        // release uses the last known pointer point. Either may also fire after a
+        // normal release, which `PointerState::cancel` makes a harmless no-op.
+        let cancel = {
+            let weak = picture.downgrade();
+            let dimensions = dimensions.clone();
+            let pointer = pointer.clone();
+            let last_point = last_point.clone();
+            let input = input.clone();
+            Rc::new(move || {
+                let Some(picture) = weak.upgrade() else {
+                    return;
+                };
+                let point = last_point.get().unwrap_or_else(|| center(&picture));
+                let decision = pointer.borrow_mut().cancel(button);
+                forward_release(&picture, dimensions.get(), &input, button, point, decision);
+            }) as Rc<dyn Fn()>
+        };
+        let stopped = cancel.clone();
+        click.connect_stopped(move |_| stopped());
+        let cancelled = cancel.clone();
+        click.connect_cancel(move |_, _| cancelled());
 
         picture.add_controller(click);
     }

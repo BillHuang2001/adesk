@@ -44,14 +44,15 @@ capability list) plus one documented escape hatch.
     - `pub mod image` — `DecodedImage { width, height, rgba8 }`, `decode(&ImagePayload)`
       → tightly packed RGBA8.
     - `pub mod mapping` — `DisplayRect`, `letterbox()`, `widget_to_normalized()`
-      (the letterbox math).
+      and `contains()` (the letterbox math and the click bars-boundary test).
     - `pub mod taskbar` — `TaskBarEntry`, `entries(&DesktopState)`, `set_active()`.
-  - Crate-private GTK-free modules: `cursor` (remote-pointer placement), `help`
-    (status/help text, incl. the shared `escape`), `pointer` (button press/release
-    pairing), `keystroke` (keyboard forwarding decision + escape chord), `record`
-    (recording-control state machine), `app_launcher` (app list, local filtering,
-    launch state machine, status text), `window_close` (optimistic close/race
-    decision + failure text).
+  - Crate-private GTK-free modules: `cursor` (remote-pointer placement + the
+    drawn-cursor state holder), `help` (status/help text, incl. the shared
+    `escape`), `pointer` (button press/release pairing, incl. the
+    cancelled-gesture release), `keystroke` (keyboard forwarding decision +
+    escape chord), `record` (recording-control state machine), `app_launcher`
+    (app list, local filtering, launch state machine, status text),
+    `window_close` (optimistic close/race decision + failure text).
   - Crate-private GTK layer: `bridge`, `frame_view`, `task_bar_view`,
     `app_launcher_view`, `app`.
 
@@ -185,16 +186,40 @@ capability list) plus one documented escape hatch.
   window close under the connection banner; connection failures keep using the
   banner, so the two never fight over one label. `UiEvent::Notice` (frame-decode
   and seat-input failures) remains log-only, as before.
-- **The remote pointer is drawn over the frames.** The frame view is a `gtk::Overlay`
-  whose main child is the picture and whose single overlay child is a
-  `gtk::DrawingArea` spanning the whole view (`set_can_target(false)`, so clicks and
-  key handling stay with the picture). Its draw function resolves the frame's
-  normalized `CursorState` with the pure `cursor::overlay_position` against the same
-  `mapping::letterbox` rectangle the click mapping uses, and paints a small arrow
-  with cairo. Because the position is computed at draw time from the widget's current
-  size and the widget is repainted on resize, a window resize needs no bookkeeping:
-  `set_frame` only `queue_draw()`s when the cursor actually moved, appeared or
-  vanished.
+- **The remote pointer is drawn over the frames, and the latest update wins.** The
+  frame view is a `gtk::Overlay` whose main child is the picture and whose single
+  overlay child is a `gtk::DrawingArea` spanning the whole view
+  (`set_can_target(false)`, so clicks and key handling stay with the picture). Its
+  draw function resolves the drawn cursor with the pure `cursor::overlay_position`
+  against the same `mapping::letterbox` rectangle the click mapping uses, and paints
+  a small arrow with cairo. The drawn state is the GTK-free `cursor::CursorOverlay`:
+  a local pointer motion (`attach_motion`, using the same normalized fraction it
+  forwards) sets a *visible* cursor at that position, and a pushed frame's server
+  `CursorState` refines or replaces it (it may be hidden). The server pushes a frame
+  only on a desktop change, never on pointer motion, so without the local source the
+  drawn pointer would stay frozen between frames while the runtime's own pointer
+  moved. Both sources `queue_draw()` only when `CursorOverlay` reports a real change,
+  and a non-finite fraction is rejected (the drawn state is left untouched). Because
+  the position is computed at draw time from the widget's current size and the widget
+  is repainted on resize, a window resize needs no bookkeeping.
+- **A cancelled gesture owes a release.** Each mouse button has its own
+  `gtk::GestureClick`; besides `pressed`/`released`, the worker connects the
+  gesture's cancel/stop path (`GestureClick::stopped` and `Gesture::cancel`) and
+  forwards the matching `Button` release when `PointerState::cancel(button)` — which
+  shares `PointerState::release`'s pairing — returns `Forward`. A press whose
+  sequence GTK gives up on therefore lifts the remote button instead of leaving it
+  held (which would pin Smithay's `ClickGrab` pointer focus and make further clicks
+  stop registering). The cancel/stop signals carry no position, so the release uses
+  the frame view's last known pointer point with the widget center as fallback; the
+  pairing makes firing both signals (or cancel after a normal release) idempotent, so
+  it can never double-send.
+- **The click bars-boundary is a pure decision.** `frame_view::normalize_click` drops
+  a click outside the displayed image (a letterbox/pillarbox bar) and clamps pointer
+  motion to the nearest edge instead — motion and click fail differently. The
+  inside/outside test is the unit-tested `mapping::contains(&DisplayRect, (f64,
+  f64))`; the GTK glue only supplies the geometry. The press path keeps its
+  `picture.grab_focus()` *before* forwarding, so the first click on an unfocused
+  desktop takes control and still delivers press+release.
 - **Clicking the desktop takes control *and* is delivered.** The click controller
   calls `grab_focus()` and still forwards the press, so the very first click on an
   unfocused desktop reaches the remote app (and wires 2, 3, 8, 9 too). The press and
@@ -285,7 +310,7 @@ capability list) plus one documented escape hatch.
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**129 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+**148 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
 - `cli` (8): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target = `resolve_socket_path(None)`, explicit
   `--unix` beats the environment, default follows `$ADESK_VIEWER_SOCKET` and the
@@ -294,11 +319,19 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   named, prefix/suffix matches and file-name-less paths do not), connect-failure
   and unexpected-close wording naming the path, hint appended on the AGP path,
   TCP composes without a hint.
-- `mapping` (8): identity, pillarbox, letterbox, corners, center, out-of-rect
-  clamping, zero-sized/non-finite → `None`, zero-size-rect guard.
-- `cursor` (8): identity fraction→widget point, corners, letterbox/pillarbox
+- `mapping` (12): identity, pillarbox, letterbox, corners, center, out-of-rect
+  clamping, zero-sized/non-finite → `None`, zero-size-rect guard, plus
+  `contains`: a point inside, every edge inclusive, just outside on each side, a
+  click in a letterbox bar not contained, a zero-size rect containing only its
+  origin.
+- `cursor` (17): identity fraction→widget point, corners, letterbox/pillarbox
   offsets, hidden cursor → `None`, out-of-range fractions clamp into the rect,
-  non-finite position → `None`, collapsed rect → `None`.
+  non-finite position → `None`, collapsed rect → `None`, plus `CursorOverlay`: a
+  new overlay draws nothing; a motion makes it visible at the fraction and reports
+  the change; a repeated identical motion reports no change; a frame replaces a
+  local position; a frame reporting a hidden cursor hides it; a following motion
+  re-shows it; an identical frame reports no change; a non-finite motion is
+  rejected (hidden stays hidden / the previous state survives).
 - `taskbar` (7): label from title/app_id/fallback/empty, active flag, `set_active`,
   empty state.
 - `help` (12): a fresh model is connecting with the desktop in control; the four
@@ -315,10 +348,12 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   chord is never forwarded (press and release, and it forgets a held plain `Escape`),
   it needs both modifiers, nothing is forwarded without focus, the accelerator/label
   constants agree with the chord the router detects.
-- `pointer` (7): a press on the image forwards, a press in the bars drops (and its
+- `pointer` (12): a press on the image forwards, a press in the bars drops (and its
   release drops), a release matches its press, a drag ending outside still releases,
   buttons pair independently, repeated presses do not double-record, a stray release
-  drops.
+  drops, plus `cancel`: it releases a held button once, is a no-op when nothing is
+  held, pairs with a press dropped in the bars, is a no-op after a normal release,
+  and lifts a press whose release never arrived exactly once.
 - `bridge` (10): decodable frame→`Frame` event (carrying the cursor), hidden cursor
   still reported, undecodable frame→`Notice`, `InputHandle::close` stops accepting
   commands, a recording status→`Recording(Ok)` (returning `active`), a recording
@@ -436,21 +471,6 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   a log-only `UiEvent::Notice`, and a runtime *rejection* (`invalid_request`,
   `unknown_window`, …) is invisible to the GUI because the client's input methods
   are fire-and-forget and its error broadcast has no public accessor.
-- **A cancelled click forwards a press but no release.** `frame_view` connects only
-  `GestureClick::pressed`/`released` (per button); it does not handle the gesture's
-  `cancel`/`stopped`, so a press whose sequence GTK cancels is never matched by a
-  forwarded `Button` release and the remote button can stay down until the next
-  click. `pointer::PointerState` pairs only events that actually arrive.
-- **The drawn remote pointer only moves when a frame is pushed.** `FrameView::set_frame`
-  stores the frame's `CursorState` and `cursor::overlay_position` paints it; the view
-  never moves the pointer optimistically on local motion. The runtime pushes a frame
-  only on a *desktop change* (`is_desktop_change` in
-  `crates/adesk-server/src/viewer/backend.rs` counts commits/activation/window/title
-  changes; no pointer-move event kind exists and `CursorTracker::set` emits nothing), so
-  a pointer move over an otherwise-static desktop updates only the runtime's tracker and
-  the overlay stays frozen until an unrelated commit arrives — an *applied* motion can
-  look dropped. Clicks still carry their own coordinates, so they land where clicked
-  regardless of the drawn cursor.
 - **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
   client vocabulary is `request_frame`, `request_state`, `set_control`,
   `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
@@ -476,7 +496,7 @@ default) and connect/disconnect failures name the dialed endpoint, with an
 AGP-socket hint when the file name is `adesk.sock`
 (`crates/adesk-viewer-gui/src/address.rs`).
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
-`cargo test -p adesk-viewer-gui` (129 passed); `cargo clippy -p adesk-viewer-gui
+`cargo test -p adesk-viewer-gui` (148 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;
 `cargo doc -p adesk-viewer-gui --no-deps --document-private-items` (zero warnings);
 and `cargo check --workspace --all-targets`.
