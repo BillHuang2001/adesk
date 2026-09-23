@@ -167,6 +167,7 @@ The app and launch replies (also §5):
 | `request_recording` | `id?` | Push the current `recording` status |
 | `list_apps` | `id?`, `query?` | List installed applications, optionally filtered by `query` (case-insensitive substring, matching the runtime's registry) |
 | `launch_app` | `id?`, `app_id` | Launch an application by its registry id (answered by `launch_result`, or `error`) |
+| `activate_window` | `window_id` | Activate (focus) a window (runtime-native, like `close_window`; acknowledged with `input_ack`) |
 | `close_window` | `window_id` | Close a window (runtime-native, like `activate_window`; acknowledged with `input_ack`) |
 | `bye` | `reason?` | Viewer is leaving |
 
