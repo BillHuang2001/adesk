@@ -18,6 +18,14 @@ wiring layer. The flake imports everything here (no standalone entry points).
   `types.str` alias of it. Other modules consume
   `config.services.adesk.socket` (always defined, even when the service is
   disabled) instead of re-deriving the path.
+- `services.adesk.accessibility` (`types.enum [ "auto" "off" ]`, default
+  `"auto"`) selects the AT-SPI2 backend (`ADESK_ACCESSIBILITY`); `auto` needs a
+  reachable session bus and degrades to `not_supported` without one, `off` never
+  touches D-Bus.
+- `services.adesk.recordingsDir` (`types.nullOr types.path`, default `null`) is
+  the directory recordings started without an explicit path are written to
+  (`ADESK_RECORDINGS_DIR`); `null` lets the runtime derive
+  `<AGP socket dir>/adesk-recordings`.
 - `services.adesk.agent.*` is the pluggable companion-agent submodule
   (`enable`, `package`, `command`, `extraArgs`, `execStart`, `environment`,
   `user`, `group`, `restart`, `restartSec`). The AGP socket is injected as
@@ -30,8 +38,9 @@ wiring layer. The flake imports everything here (no standalone entry points).
   wired up by `import ./nix/adesk-module.nix self` in `flake.nix`.
 - Option names/defaults must track the `adesk-server` CLI/env surface
   (`crates/adesk-server/src/main.rs`): `ADESK_SOCKET`, `ADESK_OUTPUT`,
-  `ADESK_RENDERER`, `ADESK_LOG`, `ADESK_APPS_DIR`, `ADESK_XKB_*`,
-  `ADESK_VIEWER_SOCKET`, `ADESK_VIEWER_TCP` and the `--no-viewer` flag.
+  `ADESK_RENDERER`, `ADESK_ACCESSIBILITY`, `ADESK_RECORDINGS_DIR`, `ADESK_LOG`,
+  `ADESK_APPS_DIR`, `ADESK_XKB_*`, `ADESK_VIEWER_SOCKET`, `ADESK_VIEWER_TCP` and
+  the `--no-viewer` flag.
 - The AGP socket defaults under the service `RuntimeDirectory`
   (`/run/adesk`), which is also `XDG_RUNTIME_DIR`; `XKB_CONFIG_ROOT` points at
   `pkgs.xkeyboard-config` (libxkbcommon needs it).
@@ -41,8 +50,8 @@ wiring layer. The flake imports everything here (no standalone entry points).
 - `nix flake show`, `nix flake check`, and
   `nix eval .#packages.x86_64-linux.adesk.drvPath` must be green.
 - `nix build .#adesk` installs exactly
-  `bin/{adesk-server,adesk-viewer,adesk-machine,adesk-agent}`; `postInstall`
-  removes the dev-only `adesk-test-app`.
+  `bin/{adesk-server,adesk-viewer,adesk-viewer-gui,adesk-machine,adesk-agent}`;
+  `postInstall` removes the dev-only `adesk-test-app`.
 - Evaluate a `lib.nixosSystem` that imports the module and read
   `config.systemd.services.adesk.serviceConfig.ExecStart` /
   `config.services.adesk.socket` (and `config.system.build.toplevel.drvPath`

@@ -78,6 +78,14 @@ let
     ADESK_APPS_DIR = concatStringsSep ":" (map toString cfg.appsDir);
   };
 
+  accessibilityEnv = {
+    ADESK_ACCESSIBILITY = cfg.accessibility;
+  };
+
+  recordingsDirEnv = optionalAttrs (cfg.recordingsDir != null) {
+    ADESK_RECORDINGS_DIR = toString cfg.recordingsDir;
+  };
+
   xkbEnv =
     optionalAttrs (cfg.xkb.layout != null) { ADESK_XKB_LAYOUT = cfg.xkb.layout; }
     // optionalAttrs (cfg.xkb.variant != null) { ADESK_XKB_VARIANT = cfg.xkb.variant; }
@@ -190,6 +198,19 @@ in
       '';
     };
 
+    accessibility = mkOption {
+      type = types.enum [ "auto" "off" ];
+      default = "auto";
+      description = ''
+        Accessibility (AT-SPI2) backend selection, in the same spirit as
+        [](#opt-services.adesk.renderer). Maps to `ADESK_ACCESSIBILITY`.
+        `auto` connects lazily to the session D-Bus on first use and degrades
+        to `not_supported` when no bus is reachable, whereas `off` never touches
+        D-Bus. `auto` therefore needs a reachable session bus (and accessible
+        applications) to answer the AGP §5.11 methods.
+      '';
+    };
+
     log = mkOption {
       type = types.str;
       default = "info";
@@ -206,6 +227,18 @@ in
       description = ''
         Extra `.desktop` application directories, colon-joined into
         `ADESK_APPS_DIR`. Leave empty to use the XDG default search set.
+      '';
+    };
+
+    recordingsDir = mkOption {
+      type = types.nullOr types.path;
+      default = null;
+      example = "/var/lib/adesk/recordings";
+      description = ''
+        Directory recordings started without an explicit path are written to.
+        Maps to `ADESK_RECORDINGS_DIR`. When `null` the runtime derives
+        `<AGP socket dir>/adesk-recordings` from
+        [](#opt-services.adesk.socketPath).
       '';
     };
 
@@ -396,7 +429,9 @@ in
         description = "ADesk — AI-native headless Wayland runtime";
         wantedBy = [ "multi-user.target" ];
         after = [ "network.target" ];
-        environment = runtimeEnv // appsDirEnv // xkbEnv // viewerEnv // cfg.environment;
+        environment =
+          runtimeEnv // appsDirEnv // accessibilityEnv // recordingsDirEnv // xkbEnv // viewerEnv
+          // cfg.environment;
         serviceConfig = {
           Type = "simple";
           ExecStart = escapeShellArgs (
