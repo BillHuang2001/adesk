@@ -11,12 +11,12 @@
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-use adesk_core::{ActionId, ErrorCode, Size};
+use adesk_core::{ActionId, AppId, ErrorCode, LaunchId, Size, WindowId};
 use adesk_proto::{ImagePayload, RendererKind};
 use adesk_viewer::{ChangeSignal, RecordRequest, ViewerBackend, ViewerError, ViewerInput};
 use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, RecordingStatus, ServerHello, ViewerFrame,
-    PROTOCOL_VERSION,
+    AppEntry, ControlOwner, CursorState, DesktopState, LaunchOutcome, RecordingStatus, ServerHello,
+    ViewerFrame, PROTOCOL_VERSION,
 };
 
 /// A configurable [`ViewerBackend`] that records every input and control owner it
@@ -26,13 +26,18 @@ use adesk_viewer_proto::{
 /// [`with_display`](FakeBackend::with_display),
 /// [`with_desktop`](FakeBackend::with_desktop),
 /// [`with_action`](FakeBackend::with_action),
-/// [`with_ts_ms`](FakeBackend::with_ts_ms) and
-/// [`with_recording_status`](FakeBackend::with_recording_status). The defaults
-/// describe an empty 1280×800 Pixman desktop at a fixed timestamp `0`, recording
-/// input under `ActionId(7)` and an idle recording.
+/// [`with_ts_ms`](FakeBackend::with_ts_ms),
+/// [`with_recording_status`](FakeBackend::with_recording_status),
+/// [`with_apps`](FakeBackend::with_apps) and
+/// [`with_launch`](FakeBackend::with_launch). The defaults describe an empty
+/// 1280×800 Pixman desktop at a fixed timestamp `0`, recording input under
+/// `ActionId(7)`, an idle recording, an empty app registry and a canned launch
+/// outcome.
 ///
-/// [`set_fail_recording`](FakeBackend::set_fail_recording) and
-/// [`set_fail_state`](FakeBackend::set_fail_state) inject backend failures so a
+/// [`set_fail_recording`](FakeBackend::set_fail_recording),
+/// [`set_fail_state`](FakeBackend::set_fail_state),
+/// [`set_fail_apps`](FakeBackend::set_fail_apps) and
+/// [`set_fail_launch`](FakeBackend::set_fail_launch) inject backend failures so a
 /// test can drive the server's `error` reply paths.
 ///
 /// State is behind interior mutability and no lock is ever held across an
@@ -48,6 +53,10 @@ pub struct FakeBackend {
     controls: Mutex<Vec<ControlOwner>>,
     /// `start_recording` requests received, in submission order.
     record_requests: Mutex<Vec<RecordRequest>>,
+    /// `list_apps` queries received, in submission order.
+    app_queries: Mutex<Vec<Option<String>>>,
+    /// `launch_app` ids received, in submission order.
+    launch_apps: Mutex<Vec<AppId>>,
     /// The handshake reply's metadata.
     display: ServerHello,
     /// The desktop `desktop_state()` reports; rendered frames reuse its
@@ -59,10 +68,18 @@ pub struct FakeBackend {
     ts_ms: Option<u64>,
     /// The recording status the recording methods report.
     recording: RecordingStatus,
+    /// The registry entries `list_apps` reports.
+    apps: Vec<AppEntry>,
+    /// The outcome `launch_app` reports.
+    launch: LaunchOutcome,
     /// When set, every recording method fails with a `not_supported` error.
     fail_recording: AtomicBool,
     /// When set, `desktop_state` fails with an `internal` error.
     fail_state: AtomicBool,
+    /// When set, `list_apps` fails with a `not_supported` error.
+    fail_apps: AtomicBool,
+    /// When set, `launch_app` fails with an `internal` error.
+    fail_launch: AtomicBool,
 }
 
 impl Default for FakeBackend {
@@ -73,6 +90,8 @@ impl Default for FakeBackend {
             inputs: Mutex::new(Vec::new()),
             controls: Mutex::new(Vec::new()),
             record_requests: Mutex::new(Vec::new()),
+            app_queries: Mutex::new(Vec::new()),
+            launch_apps: Mutex::new(Vec::new()),
             display: ServerHello {
                 protocol_version: PROTOCOL_VERSION,
                 runtime_version: "test".to_owned(),
@@ -88,8 +107,17 @@ impl Default for FakeBackend {
             action: ActionId(7),
             ts_ms: Some(0),
             recording: RecordingStatus::idle(),
+            apps: Vec::new(),
+            launch: LaunchOutcome {
+                app_id: AppId::from("org.example.Fake"),
+                launch_id: LaunchId(3),
+                action_id: Some(ActionId(7)),
+                window_id: Some(WindowId(7)),
+            },
             fail_recording: AtomicBool::new(false),
             fail_state: AtomicBool::new(false),
+            fail_apps: AtomicBool::new(false),
+            fail_launch: AtomicBool::new(false),
         }
     }
 }
@@ -131,6 +159,18 @@ impl FakeBackend {
         self
     }
 
+    /// Replaces the registry entries `list_apps` reports.
+    pub fn with_apps(mut self, apps: Vec<AppEntry>) -> Self {
+        self.apps = apps;
+        self
+    }
+
+    /// Replaces the outcome `launch_app` reports.
+    pub fn with_launch(mut self, launch: LaunchOutcome) -> Self {
+        self.launch = launch;
+        self
+    }
+
     /// The inputs recorded so far, in submission order.
     pub fn recorded_inputs(&self) -> Vec<ViewerInput> {
         self.inputs.lock().expect("inputs lock").clone()
@@ -146,6 +186,17 @@ impl FakeBackend {
         self.record_requests.lock().expect("record lock").clone()
     }
 
+    /// The `list_apps` queries recorded so far, in submission order (`None` for
+    /// an unfiltered request).
+    pub fn recorded_app_queries(&self) -> Vec<Option<String>> {
+        self.app_queries.lock().expect("app query lock").clone()
+    }
+
+    /// The `launch_app` ids recorded so far, in submission order.
+    pub fn recorded_launches(&self) -> Vec<AppId> {
+        self.launch_apps.lock().expect("launch lock").clone()
+    }
+
     /// Makes every recording method fail with a `not_supported` error while
     /// `fail` is set.
     pub fn set_fail_recording(&self, fail: bool) {
@@ -155,6 +206,16 @@ impl FakeBackend {
     /// Makes `desktop_state` fail with an `internal` error while `fail` is set.
     pub fn set_fail_state(&self, fail: bool) {
         self.fail_state.store(fail, Ordering::SeqCst);
+    }
+
+    /// Makes `list_apps` fail with a `not_supported` error while `fail` is set.
+    pub fn set_fail_apps(&self, fail: bool) {
+        self.fail_apps.store(fail, Ordering::SeqCst);
+    }
+
+    /// Makes `launch_app` fail with an `internal` error while `fail` is set.
+    pub fn set_fail_launch(&self, fail: bool) {
+        self.fail_launch.store(fail, Ordering::SeqCst);
     }
 
     /// The failure every recording method reports while `fail_recording` is set.
@@ -236,5 +297,36 @@ impl ViewerBackend for FakeBackend {
             return Err(error);
         }
         Ok(self.recording.clone())
+    }
+
+    async fn list_apps(&self, query: Option<String>) -> adesk_viewer::Result<Vec<AppEntry>> {
+        self.app_queries.lock().expect("app query lock").push(query);
+        if self.fail_apps.load(Ordering::SeqCst) {
+            return Err(ViewerError::Backend {
+                code: ErrorCode::NotSupported,
+                message: "application listing is not supported by this backend".to_owned(),
+            });
+        }
+        Ok(self.apps.clone())
+    }
+
+    async fn launch_app(&self, app_id: AppId) -> adesk_viewer::Result<LaunchOutcome> {
+        self.launch_apps
+            .lock()
+            .expect("launch lock")
+            .push(app_id.clone());
+        if self.fail_launch.load(Ordering::SeqCst) {
+            return Err(ViewerError::Backend {
+                code: ErrorCode::Internal,
+                message: "the application could not be launched".to_owned(),
+            });
+        }
+        // The runtime reports the application it actually launched, so the
+        // requested id wins over the canned one; the rest of the outcome comes
+        // from `with_launch` (its default when the test did not set one).
+        Ok(LaunchOutcome {
+            app_id,
+            ..self.launch.clone()
+        })
     }
 }

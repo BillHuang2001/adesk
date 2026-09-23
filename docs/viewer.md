@@ -7,9 +7,12 @@ provides the server session and the client SDK; `adesk-server` serves it.
 
 The Viewer is deliberately simple: it renders the ADesk desktop, shows what the
 AI is interacting with, and provides limited human input (pointer, click, scroll,
-keys, text). It is not a remote desktop: applications, the container and the
-machine lifecycle are out of scope. Human input reuses the same seat/input path
-the AI uses — ADesk never treats a viewer click as a special code path.
+keys, text) plus lightweight application management (listing, launching and
+closing applications). It is not a remote desktop: the container and the
+machine lifecycle are out of scope, and applications are reachable only through
+the runtime's own registry and launch path. Human input reuses the same
+seat/input path the AI uses — ADesk never treats a viewer click as a special code
+path.
 
 The protocol is **purpose-built**: it carries only the primitives the Viewer
 needs. It is deliberately *not* a general remote-desktop protocol.
@@ -104,6 +107,8 @@ The first message from each side of a connection is a `hello`.
 | `control` | `owner` | Who owns input: `"ai"` or `"human"` |
 | `input_ack` | `id`, `action_id` | The input message with client id `id` was applied (its AGP `action_id`) |
 | `recording` | `id?`, `recording`, `path?`, `encoder?`, `fps`, `frames`, `duration_ms`, `error?` | Recording status / reply to a recording request (active flag, output path, resolved backend label, frame count, elapsed ms) |
+| `apps` | `id?`, `apps` | The installed-application list (reply to `list_apps`) |
+| `launch_result` | `id?`, `app_id`, `launch_id`, `action_id?`, `window_id?` | The outcome of a `launch_app` (reply to `launch_app`) |
 | `error` | `code`, `message`, `id?` | A message could not be applied |
 | `bye` | `reason` | The server is ending the connection |
 
@@ -119,6 +124,30 @@ The first message from each side of a connection is a `hello`.
   the runtime encodes frames with one code path (`adesk-server::images`).
 - `seq`/`ts_ms` describe the rendered frame in the runtime's monotonic domains.
 - `active_window_id` is the window the frame/input targets.
+
+The app and launch replies (also §5):
+
+```jsonc
+{"type": "apps", "id": 1,
+ "apps": [{"id": "org.mozilla.firefox", "name": "Firefox", "icon": "firefox",
+           "categories": ["Network"]}]}
+
+{"type": "launch_result", "id": 2, "app_id": "org.example.Editor",
+ "launch_id": 3, "window_id": 17}
+```
+
+- `apps` is the installed-application list (the reply to `list_apps`): each entry
+  carries the stable desktop-file `id`, a human-readable `name`, an optional
+  `icon` name and a `categories` list. It is a lean subset of the AGP `AppInfo`
+  (`docs/protocol.md` §4). `id` echoes the request when it carried one.
+- `launch_result` reports the outcome of a `launch_app`: `app_id` is the launched
+  registry id and `launch_id` the runtime's launch-record id, mirroring the AGP
+  `launch_app` result (`docs/protocol.md` §5.2). `action_id` (an AGP action id,
+  present only when the runtime recorded an observer action for the launch) and
+  `window_id` (the window correlated to the launch) are reported only when the
+  runtime genuinely knows them and are never fabricated. A launch returns before
+  the resulting window maps, so a viewer MUST NOT assume `window_id` is set
+  immediately.
 
 ## 4. Viewer → Server
 
@@ -136,6 +165,10 @@ The first message from each side of a connection is a `hello`.
 | `start_recording` | `id?`, `path?`, `fps?`, `encoder?` | Start capturing the output to a file (`encoder` is `"auto"`/`"software"`/`"gpu"`) |
 | `stop_recording` | `id?` | Stop the active recording |
 | `request_recording` | `id?` | Push the current `recording` status |
+| `list_apps` | `id?`, `query?` | List installed applications, optionally filtered by `query` (case-insensitive substring, matching the runtime's registry) |
+| `launch_app` | `id?`, `app_id` | Launch an application by its registry id (answered by `launch_result`, or `error`) |
+| `activate_window` | `window_id` | Activate (focus) a window (runtime-native, like `close_window`; acknowledged with `input_ack`) |
+| `close_window` | `window_id` | Close a window (runtime-native, like `activate_window`; acknowledged with `input_ack`) |
 | `bye` | `reason?` | Viewer is leaving |
 
 - Coordinates are **normalized** `0.0..=1.0` of the virtual output, not pixels:
@@ -146,8 +179,13 @@ The first message from each side of a connection is a `hello`.
 - `state` is `"pressed" | "released"`, or `"tap"` for `key` (press + release).
 - `keys` is an AGP `KeySpec` (a single string or a chord array, `docs/protocol.md` §3).
 - `window_id` is an AGP `WindowId` (`docs/protocol.md` §3): the target of
-  `activate_window`.
-- `id`, when present, is echoed in the matching `input_ack`/`error`.
+  `activate_window`/`close_window`.
+- `app_id` is an application registry id (the stable desktop-file `id`, as
+  returned by `list_apps`).
+- `query`, when present, filters `list_apps` by a case-insensitive substring of
+  the application's id or name (the runtime's registry matching).
+- `id`, when present, is echoed in the matching `input_ack`, `apps`,
+  `launch_result`, `recording` or `error` reply.
 
 ```jsonc
 // viewer -> server
@@ -156,6 +194,13 @@ The first message from each side of a connection is a `hello`.
 // server -> viewer
 {"type": "recording", "id": 7, "recording": true, "path": "adesk-rec-7.avi",
  "encoder": "mjpeg", "fps": 30, "frames": 0, "duration_ms": 0}
+
+// viewer -> server
+{"type": "list_apps", "id": 1, "query": "fire"}
+
+{"type": "launch_app", "id": 2, "app_id": "org.example.Editor"}
+
+{"type": "close_window", "window_id": 17}
 ```
 
 ## 5. Semantics
@@ -177,6 +222,18 @@ The first message from each side of a connection is a `hello`.
   connection stays open. This is what lets a human viewer switch between tiled
   windows (the runtime shows one toplevel at a time), and it is never a code path
   the AI cannot also take.
+- **Window closing is runtime-native, not synthesized input.** `close_window`
+  changes compositor window state directly (like `activate_window`, AGP §5.3
+  `close_window`), is acknowledged with an `input_ack` carrying the recorded AGP
+  `action_id`, and an unknown id answers `error` with `unknown_window` while the
+  connection stays open.
+- **App management reuses the runtime's own registry and launch path.**
+  `list_apps` reads the same XDG `.desktop` registry AGP §5.2 exposes;
+  `launch_app` goes through the runtime's launch path verbatim (Exec field-code
+  expansion, `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR`, spawn, `AppLaunched` event,
+  launch→window correlation) and is never a viewer-specific code path. The
+  runtime reports the launcher's own `launch_id`; `action_id`/`window_id` are
+  reported only when genuinely known and are never fabricated.
 - **Coordinates are output-relative and the target is the active window.** A
   viewer points at the desktop, so input targets the runtime's active window
   (viewer input carries no `window_id`); pointer positions resolve to output
@@ -186,6 +243,11 @@ The first message from each side of a connection is a `hello`.
   (`AI_CONTROL` ⇄ `HUMAN_CONTROL`) is coordinated *above* ADesk
   (`docs/machine.md`). ADesk reports the current owner and applies whatever it
   receives.
+- **No new authorization gate.** A viewer that already has full pointer/keyboard
+  control over the desktop gains no new authority from listing or launching
+  applications or closing windows, so these messages ride the same advisory
+  `control` ownership as the existing input messages; app/window *permission*
+  remains coordinated above ADesk (as with control ownership).
 - **State is best-effort metadata.** `state` is pushed at handshake and whenever
   the window set or focus changes; it is advisory, mirroring `list_windows`.
 - **Recording captures the output on demand.** While a recording is active the
@@ -240,6 +302,9 @@ connection.
   are not breaking. A viewer MUST ignore unknown message types.
 - The recording messages (`start_recording`, `stop_recording`,
   `request_recording`, `recording`) are additive and do not change
+  `protocol_version`.
+- The app-management messages (`list_apps`, `launch_app`, `close_window`,
+  `apps`, `launch_result`) are likewise additive and do not change
   `protocol_version`.
 
 ## 8. Crate / module contract

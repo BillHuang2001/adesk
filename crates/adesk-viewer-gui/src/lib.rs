@@ -2,9 +2,10 @@
 //!
 //! This crate is the human-facing projection of an ADesk runtime: it connects to
 //! the runtime's viewer endpoint over the Viewer Attachment Protocol (VAP,
-//! `docs/viewer.md`), renders the streamed desktop frames, and turns local
-//! mouse/keyboard activity into VAP input so the human is placed in the same
-//! seat the agent drives — a viewer action is never a special code path.
+//! `docs/viewer.md`), renders the streamed desktop frames together with the
+//! remote pointer, and turns local mouse/keyboard activity into VAP input so the
+//! human is placed in the same seat the agent drives — a viewer action is never a
+//! special code path.
 //!
 //! It pairs with the headless `adesk-viewer` binary (frames → PNG, scripted
 //! input); this crate owns the interactive GUI instead.
@@ -19,11 +20,15 @@
 //! - [`address`] — failure-message composition that names the dialed endpoint,
 //!   with a targeted hint when the path looks like the AGP socket.
 //!
-//! The GTK-facing modules are crate-private: `keystroke` (the pure keystroke
-//! routing state machine), `record` (the pure recording-control state machine),
-//! `bridge` (the tokio ↔ GLib bridge), `frame_view` and `task_bar_view` (the
-//! widgets) and `app` (the application and event loop). The public entry point
-//! is [`run`].
+//! The GTK-facing modules are crate-private: the pure `mapping`-style helpers
+//! `cursor` (remote-pointer placement) and `help` (status/help text), the pure
+//! state machines `keystroke` (keyboard forwarding and the escape hatch),
+//! `pointer` (button press/release pairing), `record` (recording control),
+//! `app_launcher` (the application list and launch state machine) and
+//! `window_close` (the optimistic close/race decision), plus `bridge` (the
+//! tokio ↔ GLib bridge), `frame_view`, `task_bar_view` and `app_launcher_view`
+//! (the widgets) and `app` (the application and event loop). The public entry
+//! point is [`run`].
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -35,11 +40,17 @@ pub mod mapping;
 pub mod taskbar;
 
 mod app;
+mod app_launcher;
+mod app_launcher_view;
 mod bridge;
+mod cursor;
 mod frame_view;
+mod help;
 mod keystroke;
+mod pointer;
 mod record;
 mod task_bar_view;
+mod window_close;
 
 pub use error::{GuiError, Result};
 

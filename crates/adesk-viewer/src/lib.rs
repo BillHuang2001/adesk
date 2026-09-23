@@ -25,6 +25,7 @@ mod backend;
 mod capture;
 mod client;
 mod error;
+mod reply;
 mod script;
 mod server;
 mod session;

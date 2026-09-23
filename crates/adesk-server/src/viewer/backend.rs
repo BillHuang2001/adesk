@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use adesk_compositor::{CompositorError, KeyCode, RendererName, RuntimeCommand};
 use adesk_core::{
-    ActionId, ButtonState, ErrorCode, KeyState, Position, Rect, RuntimeEvent, Size, WindowId,
+    ActionId, AppId, AppInfo, ButtonState, ErrorCode, KeyState, Position, Rect, RuntimeEvent, Size,
+    WindowId,
 };
 use adesk_observer::ActionKind;
 use adesk_recorder::{RecorderConfig, RecordingSession};
@@ -34,7 +35,8 @@ use adesk_viewer::{
     ChangeSignal, RecordRequest, Result as ViewerResult, ViewerBackend, ViewerError, ViewerInput,
 };
 use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
+    AppEntry, ControlOwner, CursorState, DesktopState, KeyAction, LaunchOutcome, RecordingStatus,
+    ServerHello, ViewerFrame,
 };
 use tokio::sync::{broadcast, watch};
 
@@ -124,6 +126,20 @@ impl ViewerBackendImpl {
         }
     }
 
+    /// A [`RequestContext`] over a throwaway [`Session`], for the runtime-native
+    /// operations this backend reuses from the AGP dispatch.
+    ///
+    /// VAP requests are not AGP requests and carry no per-connection session
+    /// state, and every dispatch entry point reused here (`dispatch::windows`,
+    /// `dispatch::apps`) reads only `ctx.server` — so the session is a
+    /// placeholder, exactly as in [`ViewerBackendImpl::activate_window`].
+    fn runtime_context<'a>(&'a self, session: &'a Session) -> RequestContext<'a> {
+        RequestContext {
+            server: &self.context,
+            session,
+        }
+    }
+
     /// Applies a viewer `activate_window` (`docs/viewer.md` §5).
     ///
     /// This reuses the runtime-native AGP §5.3 path verbatim
@@ -134,15 +150,34 @@ impl ViewerBackendImpl {
     /// `activate_window` (it reads no `ctx.session` field).
     async fn activate_window(&self, window_id: WindowId) -> ViewerResult<Option<ActionId>> {
         let session = Session::new(0);
-        let ctx = RequestContext {
-            server: &self.context,
-            session: &session,
-        };
+        let ctx = self.runtime_context(&session);
         let action = self
             .input
             .run(crate::dispatch::windows::activate_window(
                 &ctx,
                 adesk_proto::ActivateWindowParams { window_id },
+            ))
+            .await
+            .map_err(backend_error)?;
+        Ok(Some(action.action_id))
+    }
+
+    /// Applies a viewer `close_window` (`docs/viewer.md` §5).
+    ///
+    /// This reuses the runtime-native AGP §5.3 path verbatim
+    /// ([`crate::dispatch::windows::close_window`]): it changes compositor window
+    /// state directly, records the `ActionId` and never synthesizes input. The
+    /// call runs through the shared [`InputQueue`], so it stays ordered with the
+    /// connection's other input. An unknown `window_id` surfaces
+    /// `unknown_window`, never a panic and never a silent drop.
+    async fn close_window(&self, window_id: WindowId) -> ViewerResult<Option<ActionId>> {
+        let session = Session::new(0);
+        let ctx = self.runtime_context(&session);
+        let action = self
+            .input
+            .run(crate::dispatch::windows::close_window(
+                &ctx,
+                adesk_proto::CloseWindowParams { window_id },
             ))
             .await
             .map_err(backend_error)?;
@@ -228,6 +263,26 @@ fn viewer_position(x: Option<f64>, y: Option<f64>, output: Size, rect: Rect) -> 
             x, y, output, rect,
         )),
         _ => None,
+    }
+}
+
+/// Projects a registry [`AppInfo`] onto the VAP [`AppEntry`].
+///
+/// `name` is the desktop entry's localized `Name`; the registry only lists
+/// entries that carry one, but an empty `Name` is still representable, so the
+/// id is used as the display name rather than sending an empty string. `icon` is
+/// optional in both types and maps unchanged, and `categories` is the raw
+/// `Categories` list.
+fn app_entry(info: &AppInfo) -> AppEntry {
+    AppEntry {
+        id: info.id.clone(),
+        name: if info.name.is_empty() {
+            info.id.as_str().to_owned()
+        } else {
+            info.name.clone()
+        },
+        icon: info.icon.clone(),
+        categories: info.categories.clone(),
     }
 }
 
@@ -462,11 +517,69 @@ impl ViewerBackend for ViewerBackendImpl {
         })
     }
 
+    /// Applies a viewer `list_apps` (`docs/viewer.md` §4, §5).
+    ///
+    /// Reuses the AGP §5.2 handler verbatim
+    /// ([`crate::dispatch::apps::list_apps`]), so a viewer sees exactly the
+    /// registry projection an agent does. `include_hidden` is `false`
+    /// deliberately: VAP lists the applications a human can launch from the
+    /// desktop, and AGP's own `list_apps` default likewise excludes
+    /// `Hidden`/`NoDisplay` entries (protocol §5.2).
+    async fn list_apps(&self, query: Option<String>) -> ViewerResult<Vec<AppEntry>> {
+        let session = Session::new(0);
+        let ctx = self.runtime_context(&session);
+        let result = crate::dispatch::apps::list_apps(
+            &ctx,
+            adesk_proto::ListAppsParams {
+                query,
+                include_hidden: false,
+            },
+        )
+        .await
+        .map_err(backend_error)?;
+        Ok(result.apps.iter().map(app_entry).collect())
+    }
+
+    /// Applies a viewer `launch_app` (`docs/viewer.md` §4, §5).
+    ///
+    /// Reuses the AGP §5.2 handler verbatim
+    /// ([`crate::dispatch::apps::launch_app`]): the registry resolves `app_id`,
+    /// the process is spawned with `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` set and
+    /// the launch is recorded so the event pump can correlate its window.
+    ///
+    /// `action_id` is always `None`: the AGP `launch_app` path records no
+    /// observer action (there is no launch `ActionKind` in `adesk-observer`), and
+    /// inventing one would fabricate observer history the runtime never produced.
+    /// `window_id` is `None` at reply time because `launch_app` returns right
+    /// after the asynchronous spawn, before the launched window maps and is
+    /// correlated; the viewer discovers the window through
+    /// `request_state`/`state`. No blocking wait is added for it — that would
+    /// stall the per-connection session loop.
+    async fn launch_app(&self, app_id: AppId) -> ViewerResult<LaunchOutcome> {
+        let session = Session::new(0);
+        let ctx = self.runtime_context(&session);
+        let result = crate::dispatch::apps::launch_app(
+            &ctx,
+            adesk_proto::LaunchAppParams {
+                app_id: app_id.clone(),
+                args: Vec::new(),
+            },
+        )
+        .await
+        .map_err(backend_error)?;
+        Ok(LaunchOutcome {
+            app_id,
+            launch_id: result.launch_id,
+            action_id: None,
+            window_id: None,
+        })
+    }
     async fn apply_input(&self, input: ViewerInput) -> ViewerResult<Option<ActionId>> {
         let server = &self.context;
 
         match input {
             ViewerInput::ActivateWindow { window_id } => self.activate_window(window_id).await,
+            ViewerInput::CloseWindow { window_id } => self.close_window(window_id).await,
             ViewerInput::PointerMove { x, y } => {
                 let (target, rect, output) = input_target(server).await?;
                 // `pointer_move` always carries both fractions.
@@ -772,4 +885,53 @@ fn parse_key_chord(
     KeyCode::parse_chord(keys.keys()).map_err(|error| {
         backend_error(crate::dispatch::windows::command_error(Some(target), error))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The registry entry a projection test starts from.
+    fn info(name: &str, icon: Option<&str>, categories: &[&str]) -> AppInfo {
+        AppInfo {
+            id: AppId::from("org.example.projected"),
+            name: name.to_owned(),
+            icon: icon.map(str::to_owned),
+            exec: Some("true".to_owned()),
+            terminal: false,
+            categories: categories.iter().map(|c| (*c).to_owned()).collect(),
+            startup_wm_class: None,
+            dbus_activatable: false,
+            hidden: false,
+            no_display: false,
+            try_exec: None,
+        }
+    }
+
+    #[test]
+    fn app_entry_projects_id_name_icon_and_categories() {
+        let entry = app_entry(&info(
+            "Projected App",
+            Some("projected"),
+            &["Utility", "Viewer"],
+        ));
+        assert_eq!(entry.id, AppId::from("org.example.projected"));
+        assert_eq!(entry.name, "Projected App");
+        assert_eq!(entry.icon.as_deref(), Some("projected"));
+        assert_eq!(entry.categories, vec!["Utility", "Viewer"]);
+    }
+
+    #[test]
+    fn app_entry_falls_back_to_the_id_when_the_name_is_empty() {
+        let entry = app_entry(&info("", None, &[]));
+        assert_eq!(
+            entry.name, "org.example.projected",
+            "an empty display name must not reach the viewer as an empty string"
+        );
+        assert_eq!(entry.icon, None, "an absent icon stays absent");
+        assert!(
+            entry.categories.is_empty(),
+            "an entry with no categories projects an empty list"
+        );
+    }
 }

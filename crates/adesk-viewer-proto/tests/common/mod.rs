@@ -21,13 +21,14 @@
 //! There is no display, GPU, network or socket: these are pure values.
 
 use adesk_core::{
-    ActionId, AppId, Button, ButtonState, ErrorCode, OverlayKind, Rect, Size, WindowId, WindowInfo,
-    WindowState,
+    ActionId, AppId, Button, ButtonState, ErrorCode, LaunchId, OverlayKind, Rect, Size, WindowId,
+    WindowInfo, WindowState,
 };
 use adesk_proto::{ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
-    ClientMessage, ControlOwner, CursorState, DesktopState, KeyAction, RecordingEncoder,
-    RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello, DEFAULT_RECORD_FPS,
+    AppEntry, ClientMessage, ControlOwner, CursorState, DesktopState, KeyAction, LaunchOutcome,
+    RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello,
+    DEFAULT_RECORD_FPS,
 };
 use serde_json::{json, Value};
 
@@ -54,6 +55,16 @@ pub fn sample_window() -> WindowInfo {
         created_seq: 800,
         last_commit_seq: 8291,
         popup_count: 0,
+    }
+}
+
+/// The shared `AppEntry` fixture (`org.mozilla.firefox` / "Firefox" / Network).
+pub fn sample_app() -> AppEntry {
+    AppEntry {
+        id: AppId::from("org.mozilla.firefox"),
+        name: "Firefox".to_owned(),
+        icon: Some("firefox".to_owned()),
+        categories: vec!["Network".to_owned()],
     }
 }
 
@@ -179,6 +190,45 @@ pub fn request_recording_message() -> ClientMessage {
     ClientMessage::RequestRecording { id: Some(11) }
 }
 
+/// `ClientMessage::ListApps { id: Some(1), query: Some("fire") }`.
+pub fn list_apps_message() -> ClientMessage {
+    ClientMessage::ListApps {
+        id: Some(1),
+        query: Some("fire".to_owned()),
+    }
+}
+
+/// `ClientMessage::ListApps { id: None, query: None }` (list everything).
+pub fn list_apps_unfiltered() -> ClientMessage {
+    ClientMessage::ListApps {
+        id: None,
+        query: None,
+    }
+}
+
+/// `ClientMessage::LaunchApp { id: Some(2), app_id: "org.example.Editor" }`.
+pub fn launch_app_message() -> ClientMessage {
+    ClientMessage::LaunchApp {
+        id: Some(2),
+        app_id: AppId::from("org.example.Editor"),
+    }
+}
+
+/// `ClientMessage::LaunchApp { id: None, app_id: "org.example.Editor" }`.
+pub fn launch_app_without_id() -> ClientMessage {
+    ClientMessage::LaunchApp {
+        id: None,
+        app_id: AppId::from("org.example.Editor"),
+    }
+}
+
+/// `ClientMessage::CloseWindow { window_id: 17 }`.
+pub fn close_window_message() -> ClientMessage {
+    ClientMessage::CloseWindow {
+        window_id: WindowId(17),
+    }
+}
+
 /// `ClientMessage::Unknown { "future_thing", {"type": "future_thing", "x": 1} }`.
 pub fn unknown_client_message() -> ClientMessage {
     ClientMessage::Unknown {
@@ -295,6 +345,49 @@ pub fn recording_idle() -> ServerMessage {
     }
 }
 
+/// `ServerMessage::Apps { id: Some(1), apps: [sample_app()] }`.
+pub fn apps_message() -> ServerMessage {
+    ServerMessage::Apps {
+        id: Some(1),
+        apps: vec![sample_app()],
+    }
+}
+
+/// `ServerMessage::Apps { id: None, apps: [] }`.
+pub fn apps_empty() -> ServerMessage {
+    ServerMessage::Apps {
+        id: None,
+        apps: Vec::new(),
+    }
+}
+
+/// `ServerMessage::LaunchResult { id: Some(2), launch 3 for "org.example.Editor",
+/// action 582, window 17 }`.
+pub fn launch_result_message() -> ServerMessage {
+    ServerMessage::LaunchResult {
+        id: Some(2),
+        result: LaunchOutcome {
+            app_id: AppId::from("org.example.Editor"),
+            launch_id: LaunchId(3),
+            action_id: Some(ActionId(582)),
+            window_id: Some(WindowId(17)),
+        },
+    }
+}
+
+/// `ServerMessage::LaunchResult { id: None, launch 3, no action/window yet }`.
+pub fn launch_result_pending() -> ServerMessage {
+    ServerMessage::LaunchResult {
+        id: None,
+        result: LaunchOutcome {
+            app_id: AppId::from("org.example.Editor"),
+            launch_id: LaunchId(3),
+            action_id: None,
+            window_id: None,
+        },
+    }
+}
+
 // --- corpora (round-trip / acceptance fixtures) ---------------------------
 
 /// Every `ClientMessage` variant the codec must round-trip.
@@ -347,6 +440,11 @@ pub fn every_client_message() -> Vec<ClientMessage> {
         ClientMessage::StopRecording { id: None },
         request_recording_message(),
         ClientMessage::RequestRecording { id: None },
+        list_apps_message(),
+        list_apps_unfiltered(),
+        launch_app_message(),
+        launch_app_without_id(),
+        close_window_message(),
         unknown_client_message(),
     ]
 }
@@ -381,6 +479,10 @@ pub fn every_server_message() -> Vec<ServerMessage> {
             id: Some(4),
             status: RecordingStatus::idle().with_error("encoder unavailable".to_owned()),
         },
+        apps_message(),
+        apps_empty(),
+        launch_result_message(),
+        launch_result_pending(),
         unknown_server_message(),
     ]
 }
