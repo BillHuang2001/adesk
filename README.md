@@ -153,13 +153,18 @@ that connects to a running server over the socket and runs a plan/act/observe lo
     --max-steps 30 --report runs/dark-mode.json
 ```
 
-CLI flags: `--socket`, `--provider <mock|openai>`, `--task "<goal>"` **or**
+CLI flags: `--socket`, `--provider <mock|dummy|openai>`, `--task "<goal>"` **or**
 `--scenario <id>` (built-ins: `launch`, `activate`, `click`, `type`, `scroll`, `dialog`,
 `navigation`, `error-recovery`), `--max-steps`, `--report <PATH>`, `--model`,
-`--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`. Provider configuration also
-reads `ADESK_AGENT_PROVIDER`, `ADESK_AGENT_MODEL`, `ADESK_AGENT_BASE_URL` and
+`--base-url`, `--api-key`, `--max-dimension`, `--quiet-ms`, `--include-accessibility`
+(let the agent read a window's UI as a text outline via `accessibility_tree` instead of a
+screenshot), plus `--watch` (documented below). Provider configuration also reads
+`ADESK_AGENT_PROVIDER`, `ADESK_AGENT_MODEL`, `ADESK_AGENT_BASE_URL` and
 `ADESK_AGENT_API_KEY` (falling back to `OPENAI_API_KEY`). The `openai` provider speaks
-any OpenAI-compatible `/chat/completions` endpoint; `mock` is the network-free default.
+any OpenAI-compatible `/chat/completions` endpoint; `dummy` is a synthetic no-I/O VLM
+configured by `--dummy-mode <fixed|random>`, `--dummy-seed`,
+`--dummy-finish-probability` and `--dummy-step-budget`; `mock` is the network-free
+default.
 
 **Watch mode.** `--watch` turns the agent into an idle listener: it validates the runtime
 once, then loops `wait_for_events` → feeds the wake events into the LLM context → runs the
