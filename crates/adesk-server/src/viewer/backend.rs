@@ -544,8 +544,10 @@ impl ViewerBackend for ViewerBackendImpl {
     ///
     /// Reuses the AGP §5.2 handler verbatim
     /// ([`crate::dispatch::apps::launch_app`]): the registry resolves `app_id`,
-    /// the process is spawned with `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` set and
-    /// the launch is recorded so the event pump can correlate its window.
+    /// the process is spawned with an environment that targets this runtime
+    /// (`dispatch/apps.rs::launch_env` — the compositor's Wayland socket, no host
+    /// `DISPLAY`, and the Wayland toolkit opt-ins) and the launch is recorded so
+    /// the event pump can correlate its window.
     ///
     /// `action_id` is always `None`: the AGP `launch_app` path records no
     /// observer action (there is no launch `ActionKind` in `adesk-observer`), and

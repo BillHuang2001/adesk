@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use clap::Parser;
 
 use adesk_compositor::XkbSettings;
-use adesk_server::config::{parse_accessibility, parse_renderer, parse_size, ServerConfig};
+use adesk_server::config::{
+    parse_accessibility, parse_dmabuf, parse_renderer, parse_size, ServerConfig,
+};
 use adesk_server::Server;
 
 /// ADesk — AI-native headless Wayland runtime (AGP server).
@@ -28,6 +30,11 @@ struct Cli {
     /// Accessibility backend: `auto` (connect lazily) or `off` (never touch D-Bus).
     #[arg(long, env = "ADESK_ACCESSIBILITY", value_name = "MODE")]
     accessibility: Option<String>,
+    /// DMA-BUF global: `on` (default) advertises `zwp_linux_dmabuf_v1`; `off` makes
+    /// the runtime SHM-only (an escape hatch for a client/driver that crashes on a
+    /// DMA-BUF import).
+    #[arg(long, env = "ADESK_DMABUF", value_name = "MODE")]
+    dmabuf: Option<String>,
     /// xkb layout list (e.g. `us`, `de,us`).
     #[arg(long, env = "ADESK_XKB_LAYOUT", value_name = "NAME")]
     xkb_layout: Option<String>,
@@ -112,6 +119,11 @@ fn build_config(cli: &Cli) -> anyhow::Result<ServerConfig> {
             .map_err(|message| anyhow::anyhow!("invalid --accessibility: {message}"))?;
         config = config.with_accessibility(kind);
     }
+    if let Some(dmabuf) = &cli.dmabuf {
+        let enabled = parse_dmabuf(dmabuf)
+            .map_err(|message| anyhow::anyhow!("invalid --dmabuf: {message}"))?;
+        config = config.with_dmabuf(enabled);
+    }
     if cli.xkb_layout.is_some()
         || cli.xkb_variant.is_some()
         || cli.xkb_model.is_some()
@@ -182,6 +194,7 @@ mod tests {
             output: None,
             renderer: None,
             accessibility: None,
+            dmabuf: None,
             xkb_layout: None,
             xkb_variant: None,
             xkb_model: None,
@@ -256,6 +269,24 @@ mod tests {
         cli.accessibility = Some("off".to_owned());
         let config = build_config(&cli).unwrap();
         assert_eq!(config.accessibility, AccessibilityKind::Off);
+    }
+
+    #[test]
+    fn dmabuf_flag_toggles_the_global() {
+        let baseline = build_config(&cli()).unwrap();
+        assert!(
+            baseline.compositor.dmabuf,
+            "an unset flag keeps the compositor default (dmabuf on)"
+        );
+
+        let mut off = cli();
+        off.dmabuf = Some("off".to_owned());
+        assert!(!build_config(&off).unwrap().compositor.dmabuf);
+
+        let mut bad = cli();
+        bad.dmabuf = Some("maybe".to_owned());
+        let error = build_config(&bad).unwrap_err().to_string();
+        assert!(error.contains("--dmabuf"), "{error}");
     }
 
     #[test]
