@@ -23,11 +23,12 @@ use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 use adesk_core::{Button, ButtonState, WindowId};
 use adesk_proto::KeySpec;
-use adesk_viewer::{RecordRequest, ViewerClient, ViewerTarget};
+use adesk_viewer::{RecordRequest, ViewerClient, ViewerError, ViewerTarget};
 use adesk_viewer_proto::{
     ControlOwner, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
 };
 
+use crate::address::{connect_failure, unexpected_close};
 use crate::image::{decode, DecodedImage};
 
 /// How often the task bar is refreshed even without a change (`docs/viewer.md` §3).
@@ -109,7 +110,11 @@ pub(crate) enum UiEvent {
         /// The window the frame targets, when one is active.
         active_window_id: Option<WindowId>,
     },
-    /// The connection ended; carries a human-readable reason.
+    /// The endpoint could not be connected to at all; carries a
+    /// human-readable reason naming the dialed endpoint.
+    ConnectFailed(String),
+    /// The connection ended; carries a human-readable reason naming the
+    /// endpoint it happened on.
     Disconnected(String),
     /// A screen-recording status (or the failure of a recording command).
     ///
@@ -171,15 +176,16 @@ impl Bridge {
         let (event_tx, event_rx) = unbounded_channel();
         let worker_events = event_tx.clone();
 
+        let worker_target = target.clone();
         let spawned = std::thread::Builder::new()
             .name("adesk-viewer-gui-bridge".to_owned())
-            .spawn(move || worker(target, input_rx, worker_events));
+            .spawn(move || worker(worker_target, input_rx, worker_events));
 
         if let Err(error) = spawned {
             // The thread never started, so report a terminal disconnect and drop
             // the (unused) input receiver with the closure.
             let _ = event_tx.send(UiEvent::Disconnected(format!(
-                "could not start the viewer bridge thread: {error}"
+                "could not start the viewer bridge thread (viewer socket {target}): {error}"
             )));
         }
 
@@ -219,7 +225,7 @@ fn worker(
         Ok(runtime) => runtime,
         Err(error) => {
             let _ = events.send(UiEvent::Disconnected(format!(
-                "could not start the viewer async runtime: {error}"
+                "could not start the viewer async runtime (viewer socket {target}): {error}"
             )));
             return;
         }
@@ -239,7 +245,7 @@ async fn session(
     let client = match ViewerClient::connect(target.clone()).await {
         Ok(client) => client,
         Err(error) => {
-            let _ = events.send(UiEvent::Disconnected(error.to_string()));
+            let _ = events.send(UiEvent::ConnectFailed(connect_failure(&target, &error)));
             return;
         }
     };
@@ -303,9 +309,10 @@ async fn session(
                     let _ = events.send(UiEvent::Notice(format!("frame stream error: {error}")));
                 }
                 None => {
-                    let _ = events.send(UiEvent::Disconnected(
-                        "the viewer connection closed".to_owned(),
-                    ));
+                    let _ = events.send(UiEvent::Disconnected(unexpected_close(
+                        &target,
+                        ViewerError::Closed,
+                    )));
                     break;
                 }
             },

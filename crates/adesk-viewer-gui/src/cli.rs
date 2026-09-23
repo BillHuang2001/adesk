@@ -3,9 +3,11 @@
 //! GTK-free and unit-testable through [`clap::Parser::try_parse_from`]. The flag
 //! names and help text mirror the headless `adesk-viewer` binary
 //! (`crates/adesk-viewer/src/main.rs`) so a human can move between the two
-//! front-ends without relearning the transport flags.
+//! front-ends without relearning the transport flags — and the default Unix
+//! socket comes from the same [`adesk_viewer::resolve_socket_path`] the headless
+//! viewer uses, so both dial the socket a default-configured `adesk-server`
+//! actually binds its viewer endpoint on (never the AGP socket by omission).
 
-use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
@@ -13,19 +15,20 @@ use clap::Parser;
 
 use crate::error::{GuiError, Result};
 
-/// The Unix socket file name used under `$XDG_RUNTIME_DIR` (`docs/viewer.md` §1).
-const SOCKET_FILE_NAME: &str = "adesk-viewer.sock";
-
 /// `adesk-viewer-gui` — a GTK4/libadwaita Viewer Attachment Protocol client.
 #[derive(Debug, Parser)]
 #[command(name = "adesk-viewer-gui", version, long_about = None)]
 pub struct Cli {
-    /// Connect over a Unix domain socket at PATH (default:
-    /// `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else `<temp_dir>/adesk-viewer.sock`).
+    /// VAP viewer Unix socket to connect to — the server's viewer endpoint,
+    /// e.g. $XDG_RUNTIME_DIR/adesk-viewer.sock — NOT the AGP socket
+    /// (adesk.sock; a connection there is closed as an undecodable frame).
+    /// Default: $ADESK_VIEWER_SOCKET, else the sibling of the server's default
+    /// AGP socket.
     #[arg(long, value_name = "PATH")]
     pub unix: Option<PathBuf>,
 
-    /// Connect over TCP instead of Unix, to `HOST:PORT`.
+    /// Connect over TCP instead of Unix, to `HOST:PORT` (a `--viewer-tcp`
+    /// listener of the runtime, not its AGP TCP endpoint).
     #[arg(long, value_name = "HOST:PORT", conflicts_with = "unix")]
     pub tcp: Option<String>,
 
@@ -36,52 +39,96 @@ pub struct Cli {
 
 impl Cli {
     /// Resolves the viewer endpoint from `--unix`/`--tcp`, defaulting to the
-    /// runtime-derived Unix socket path when neither is given.
+    /// runtime-derived Unix socket when neither is given.
+    ///
+    /// The Unix path is [`adesk_viewer::resolve_socket_path`]: an explicit
+    /// `--unix` always wins, otherwise `$ADESK_VIEWER_SOCKET`, else the sibling
+    /// of the server's default AGP socket — exactly the server's own
+    /// viewer-endpoint derivation, so the GUI's default can never be the AGP
+    /// socket.
     ///
     /// # Errors
     ///
     /// Returns [`GuiError::Config`] when `--tcp` is not a valid `HOST:PORT`
     /// socket address.
     pub fn target(&self) -> Result<adesk_viewer::ViewerTarget> {
-        if let Some(path) = &self.unix {
-            return Ok(adesk_viewer::ViewerTarget::Unix(path.clone()));
-        }
         if let Some(address) = &self.tcp {
             let address = address.parse::<SocketAddr>().map_err(|error| {
                 GuiError::Config(format!("invalid --tcp address `{address}`: {error}"))
             })?;
             return Ok(adesk_viewer::ViewerTarget::Tcp(address));
         }
-        Ok(adesk_viewer::ViewerTarget::Unix(default_socket_path()))
+        Ok(adesk_viewer::ViewerTarget::Unix(
+            adesk_viewer::resolve_socket_path(self.unix.clone()),
+        ))
     }
 }
 
-/// The default Unix socket path: `$XDG_RUNTIME_DIR/adesk-viewer.sock` when the
-/// variable is set and non-empty, otherwise `<temp_dir>/adesk-viewer.sock`.
-///
-/// Reads the process environment once and delegates to [`socket_path_from`].
+/// The default Unix socket path: `adesk_viewer::resolve_socket_path(None)` —
+/// `$ADESK_VIEWER_SOCKET`, else the sibling of the server's default AGP socket
+/// (`$ADESK_SOCKET`'s sibling, else `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else
+/// `<temp_dir>/adesk-viewer.sock`).
 pub fn default_socket_path() -> PathBuf {
-    socket_path_from(std::env::var_os("XDG_RUNTIME_DIR"))
-}
-
-/// Pure socket-path helper: joins `adesk-viewer.sock` onto `xdg_runtime_dir`
-/// when it is set and non-empty, otherwise onto the system temp directory.
-///
-/// Taking the environment value as a parameter keeps the logic testable without
-/// mutating process-global state.
-pub fn socket_path_from(xdg_runtime_dir: Option<OsString>) -> PathBuf {
-    match xdg_runtime_dir {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(SOCKET_FILE_NAME),
-        _ => std::env::temp_dir().join(SOCKET_FILE_NAME),
-    }
+    adesk_viewer::resolve_socket_path(None)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
     use super::*;
 
     fn parse(args: &[&str]) -> Cli {
         Cli::try_parse_from(args).expect("the CLI should parse")
+    }
+
+    /// Serializes the tests that mutate the process-global environment: the
+    /// resolver reads it with `std::env::var_os`, which is process-global state
+    /// (the same pattern as `crates/adesk-viewer/src/socket.rs`).
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds [`ENV_LOCK`] for the test body. Poisoning is tolerated: a failing
+    /// test has already reported its own assertion, and the others must still run.
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Overrides a set of environment variables for the test body, restoring
+    /// their prior state (present or absent) on drop.
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        /// Sets every `name` to `value`, or removes it when `value` is `None`,
+        /// remembering the prior state.
+        fn set(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let mut previous = Vec::with_capacity(vars.len());
+            for (name, _) in vars {
+                previous.push((*name, std::env::var_os(name)));
+            }
+            for (name, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            EnvGuard { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, previous) in self.previous.drain(..) {
+                match previous {
+                    Some(previous) => std::env::set_var(name, previous),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     #[test]
@@ -127,7 +174,19 @@ mod tests {
 
     #[test]
     fn defaults_to_the_runtime_socket_path() {
+        // The GUI default must be exactly the shared resolver's default — the
+        // server's own viewer-endpoint derivation — not a GUI-local guess.
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", None),
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+        ]);
         let cli = parse(&["adesk-viewer-gui"]);
+        assert_eq!(
+            cli.target().unwrap(),
+            adesk_viewer::ViewerTarget::Unix(adesk_viewer::resolve_socket_path(None))
+        );
         assert_eq!(
             cli.target().unwrap(),
             adesk_viewer::ViewerTarget::Unix(default_socket_path())
@@ -135,15 +194,50 @@ mod tests {
     }
 
     #[test]
-    fn socket_path_from_uses_the_xdg_runtime_dir_when_set() {
-        let path = socket_path_from(Some(OsString::from("/run/user/1000")));
-        assert_eq!(path, PathBuf::from("/run/user/1000/adesk-viewer.sock"));
+    fn an_explicit_unix_flag_wins_over_every_environment() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", Some("/env/viewer.sock")),
+            ("ADESK_SOCKET", Some("/env/agp.sock")),
+            ("XDG_RUNTIME_DIR", Some("/env/xdg")),
+        ]);
+        let cli = parse(&["adesk-viewer-gui", "--unix", "/flag/viewer.sock"]);
+        assert_eq!(
+            cli.target().unwrap(),
+            adesk_viewer::ViewerTarget::Unix(PathBuf::from("/flag/viewer.sock"))
+        );
     }
 
     #[test]
-    fn socket_path_from_falls_back_to_the_temp_dir() {
-        let expected = std::env::temp_dir().join("adesk-viewer.sock");
-        assert_eq!(socket_path_from(None), expected);
-        assert_eq!(socket_path_from(Some(OsString::new())), expected);
+    fn the_default_follows_the_viewer_socket_environment() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", Some("/env/viewer.sock")),
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", Some("/env/xdg")),
+        ]);
+        let cli = parse(&["adesk-viewer-gui"]);
+        assert_eq!(
+            cli.target().unwrap(),
+            adesk_viewer::ViewerTarget::Unix(PathBuf::from("/env/viewer.sock"))
+        );
+    }
+
+    #[test]
+    fn the_default_follows_the_agp_socket_environment_to_its_sibling() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", None),
+            ("ADESK_SOCKET", Some("/run/custom/agp.sock")),
+            ("XDG_RUNTIME_DIR", Some("/env/xdg")),
+        ]);
+        // A custom `$ADESK_SOCKET` moves the server's viewer endpoint to that
+        // socket's sibling; the GUI default must follow it — that is what keeps
+        // the GUI off the AGP socket in a non-default deployment.
+        let cli = parse(&["adesk-viewer-gui"]);
+        assert_eq!(
+            cli.target().unwrap(),
+            adesk_viewer::ViewerTarget::Unix(PathBuf::from("/run/custom/agp-viewer.sock"))
+        );
     }
 }
