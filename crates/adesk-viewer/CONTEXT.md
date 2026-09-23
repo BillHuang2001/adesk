@@ -94,7 +94,7 @@ Crate root (`src/lib.rs`) re-exports every public item below (`adesk_viewer::<Na
 
 ## Constraints
 - `docs/viewer.md` is normative; the crate invents no message or field — it speaks only `adesk-viewer-proto`.
-- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (largest: `src/client.rs` 943, `src/session.rs` 914; `src/main.rs` is ~1130 lines of which ~550 are its cohesive CLI test module — the documented exception for cohesive test modules).
+- `#![forbid(unsafe_code)]` and `#![deny(missing_docs)]`; files stay well under the ~1000-line threshold (`src/client.rs` is 1015 of which ~72 are its cohesive inline `ConnectOptions`/`ViewerTarget` test module, so its non-test code is well under; `src/main.rs` is ~1130 lines of which ~550 are its cohesive CLI test module — the same documented exception).
 - Transport-agnostic: the crate never imports a listener (`tokio::net::UnixListener`, `std::os::unix::net::*`) — `adesk-server` owns binding; `ViewerTarget` is the only place socket/TCP addresses appear.
 - No panics on connection/input paths: every failure returns `ViewerError`. Empty `pub mod` stubs are not viable here — `missing_docs` requires at least a `//!` module doc.
 - No pixel payloads in logs; `tracing` at `debug`/`trace` for transport internals only.
