@@ -247,7 +247,7 @@ impl Default for RecordingStatus {
 }
 
 /// One launchable application, as reported by an `apps` message
-/// (`docs/viewer.md` §4).
+/// (`docs/viewer.md` §3).
 ///
 /// A projection of the runtime's XDG registry entry: the desktop-file id, its
 /// display name, an optional icon name and its raw `Categories` entries.
@@ -266,7 +266,7 @@ pub struct AppEntry {
 }
 
 /// The outcome of a `launch_app` request, carried by a `launch_result` message
-/// (`docs/viewer.md` §4).
+/// (`docs/viewer.md` §3).
 ///
 /// The `action_id`/`window_id` fields are optional and are omitted from the
 /// wire form when absent (e.g. before the launched window has been correlated).
