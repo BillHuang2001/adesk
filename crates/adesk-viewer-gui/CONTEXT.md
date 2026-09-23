@@ -130,10 +130,17 @@ text use the normal seat input path.
 - **Lifecycle.** On `close-request` the app calls `InputHandle::close()` (drops the
   shared sender → the worker's `recv()` returns `None` → it ends) and aborts the
   event-loop `glib::JoinHandle`; nothing leaks.
+- **GTK runs on `argv[0]` alone.** `ApplicationExtManual::run()` would hand the real
+  process `argv` to `g_application_run`, whose GOptionContext re-parses (and rejects)
+  the flags clap already consumed — the "Unknown option --unix" bug. `run_application`
+  therefore takes the program name and calls `run_with_args_os(&[argv0])` (the `OsStr`
+  variant, so a non-UTF-8 `argv[0]` cannot panic like `env::args()` would), with
+  `program_name_from` as the pure, unit-tested helper (falling back to
+  `"adesk-viewer-gui"` when the environment provides no `argv[0]`).
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**47 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+**49 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
 - `cli` (7): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target, `socket_path_from` for `None`/empty/set.
 - `mapping` (8): identity, pillarbox, letterbox, corners, center, out-of-rect
@@ -152,8 +159,11 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   status→Recording/`Stop`/`REC 12s`/`StopRecording`, a finished status→
   Finished/`Record`/`saved <path>`/`StartRecording`, an error status→Idle with
   the reason surfaced, an idle status clears the line, duration truncation.
-- The GTK widget wiring (`app`/`frame_view`/`task_bar_view`) is untested glue — it
-  needs a display; test pure logic instead, never GUI behavior.
+- `app` (2): the argument vector GTK receives is exactly the program name
+  (`program_name_from` passthrough; `None` → `"adesk-viewer-gui"` fallback) — the
+  regression pin for the "Unknown option --unix" bug.
+- The GTK widget wiring (`app`'s widget glue, `frame_view`, `task_bar_view`) is
+  untested glue — it needs a display; test pure logic instead, never GUI behavior.
 
 ## Notes for Agents
 - Run every command through `./scripts/dev.sh` (bare `cargo` cannot link outside the
@@ -181,7 +191,7 @@ Implemented and green: `run()`, the GTK application (frame view, task bar,
 recording toggle + status line, status banner), the tokio↔GLib bridge, the CLI,
 and every pure module with unit tests.
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
-`cargo test -p adesk-viewer-gui` (47 passed); `cargo clippy -p adesk-viewer-gui
+`cargo test -p adesk-viewer-gui` (49 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;
 `cargo doc -p adesk-viewer-gui --no-deps --document-private-items` (zero warnings);
 and `cargo check --workspace --all-targets`.
