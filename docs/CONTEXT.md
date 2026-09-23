@@ -11,10 +11,12 @@ for cross-crate contracts, and the crate's `CONTEXT.md` wins for internals.
 | File | Purpose |
 |---|---|
 | `protocol.md` | Normative Agent GUI Protocol (AGP) v1 spec: framing, methods, types, errors, semantics. |
+| `viewer.md` | Normative Viewer Attachment Protocol (VAP) v1 spec: transport (incl. §1.1 endpoint addressing), handshake, messages, semantics, recording. |
 | `architecture.md` | Internal system architecture: threading, channels, event vocabulary, render pipeline, observation engine, registry, testing layers. |
 | `core-api.md` | Authoritative `adesk-core` public API surface — the shared domain model every crate designs against. |
 | `notifications.md` | Design record for the notification subsystem and the agent event inbox (`protocol.md` §5.9/§5.10). |
 | `accessibility.md` | Design record for the accessibility subsystem (`protocol.md` §5.11): the agent's text-first view of a window's UI over AT-SPI2. |
+| `machine.md` | Design record for the AI Machine runtime (`adesk-machine`) and the host control plane. |
 
 ## Constraints
 
