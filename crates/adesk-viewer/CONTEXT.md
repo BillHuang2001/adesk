@@ -164,7 +164,7 @@ No display, GPU or real network; a fake `ViewerBackend` plus an in-memory duplex
 - Inline unit tests: 68 in the lib target (backend, transport incl. the `LineReader` cancellation/split-read tests, capture, session, server, client, error, reply, test_support, socket resolution) and 32 in the bin target (CLI parsing incl. `--record`/`--record-fps`/`--record-encoder` and mode exclusivity, exit-code mapping, `--fps` mapping, socket resolution through `resolve_target` under an env lock, and the path-bearing connect-failure/close messages).
 - `tests/CONTEXT.md` records the remaining audit notes and coverage gaps in this suite (the ~6 `src/session.rs` inline tests already covered by `tests/session.rs`; no TCP-transport or multi-connection-fan-out test); read it before adding parser/session tests.
 - Environment-mutating tests (socket resolution) serialize on a process-global `Mutex`, set/remove vars through a save/restore guard (`EnvGuard`), and tolerate lock poisoning; both the lib (`src/socket.rs`) and bin (`src/main.rs`) test modules carry their own copy, mirroring `crates/adesk-compositor/tests/compositor_smoke.rs`.
-- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **155 passed / 0 failed / 0 ignored** (66 lib + 32 bin + 19 client + 16 script + 22 session; 0 doc-tests).
+- Run with `./scripts/dev.sh cargo test -p adesk-viewer` → **159 passed / 0 failed / 0 ignored** (68 lib + 32 bin + 19 client + 16 script + 24 session; 0 doc-tests).
 - Also green: `cargo clippy -p adesk-viewer --all-targets --no-deps -- -D warnings`, `cargo fmt -p adesk-viewer --check`, `cargo doc -p adesk-viewer --no-deps --document-private-items` (warning-free), and `cargo check --workspace --all-targets`.
 
 ## Known Issues
