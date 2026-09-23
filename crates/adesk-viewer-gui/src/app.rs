@@ -13,6 +13,7 @@
 //! loop aborted, so the worker thread ends and nothing leaks.
 
 use std::cell::RefCell;
+use std::ffi::{OsStr, OsString};
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -30,13 +31,37 @@ use crate::task_bar_view::TaskBarView;
 /// The GTK application id (`docs/viewer.md`, GUI front-end).
 const APP_ID: &str = "org.adesk.Viewer";
 
-/// Builds the application for `target` and runs the GTK main loop.
+/// Builds the application for `target` and runs the GTK main loop with
+/// `program_name` as the only argument.
 ///
-/// Returns the GTK exit code; the connection itself never fails the process.
-pub(crate) fn run_application(target: ViewerTarget) -> glib::ExitCode {
+/// `ApplicationExtManual::run` would hand the real process `argv` to
+/// `g_application_run`, whose GOptionContext knows nothing about the
+/// already-parsed `--unix`/`--tcp`/`--log` flags and rejects them with
+/// "Unknown option --unix"; passing the program name alone keeps the parsed
+/// command line out of GTK. Returns the GTK exit code; the connection itself
+/// never fails the process.
+pub(crate) fn run_application(target: ViewerTarget, program_name: &OsStr) -> glib::ExitCode {
     let app = adw::Application::builder().application_id(APP_ID).build();
     app.connect_activate(move |app| activate(app, target.clone()));
-    app.run()
+    app.run_with_args_os(&[program_name])
+}
+
+/// The process' own program name (`argv[0]`), or `"adesk-viewer-gui"` when the
+/// environment provides none.
+///
+/// Reads the process environment once and delegates to [`program_name_from`].
+pub(crate) fn program_name() -> OsString {
+    program_name_from(std::env::args_os().next())
+}
+
+/// Pure program-name helper: returns `argv0` when present, otherwise the
+/// fallback `"adesk-viewer-gui"`.
+///
+/// Taking the `argv[0]` value as a parameter keeps the logic testable without
+/// mutating process-global state, and `args_os` never panics where
+/// `args` would on a non-UTF-8 `argv[0]`.
+fn program_name_from(argv0: Option<OsString>) -> OsString {
+    argv0.unwrap_or_else(|| OsString::from("adesk-viewer-gui"))
 }
 
 /// Builds the window and event loop for a single `activate` (window creation).
@@ -194,5 +219,31 @@ fn sync_record(control: &RecordControl, button: &gtk::ToggleButton, status: &gtk
             status.set_visible(true);
         }
         None => status.set_visible(false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gtk_gets_the_program_name_alone() {
+        // The regression: `run_application` must hand GTK only `argv[0]`, never
+        // the parsed-away flags (GTK's GOption rejects them with
+        // "Unknown option --unix"). This pins the argument vector computed by
+        // `program_name_from`, the exact slice `run_with_args_os` receives.
+        assert_eq!(
+            program_name_from(Some(OsString::from("/usr/bin/adesk-viewer-gui"))),
+            OsString::from("/usr/bin/adesk-viewer-gui")
+        );
+        assert_eq!(
+            program_name_from(Some(OsString::from("adesk-viewer-gui"))),
+            OsString::from("adesk-viewer-gui")
+        );
+    }
+
+    #[test]
+    fn a_missing_argv0_falls_back_to_the_binary_name() {
+        assert_eq!(program_name_from(None), OsString::from("adesk-viewer-gui"));
     }
 }
