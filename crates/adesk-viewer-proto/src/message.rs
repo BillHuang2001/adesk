@@ -188,7 +188,7 @@ pub enum ServerMessage {
         /// The reported recording status.
         status: RecordingStatus,
     },
-    /// The launchable applications, answering `list_apps` (`docs/viewer.md` §4).
+    /// The launchable applications, answering `list_apps` (`docs/viewer.md` §3).
     /// `id` echoes the request when it carried one.
     Apps {
         /// The client id being answered, when the request carried one.
@@ -196,7 +196,7 @@ pub enum ServerMessage {
         /// The matching registry entries.
         apps: Vec<AppEntry>,
     },
-    /// The outcome of a `launch_app` request (`docs/viewer.md` §4). `id` echoes
+    /// The outcome of a `launch_app` request (`docs/viewer.md` §3). `id` echoes
     /// the request when it carried one.
     LaunchResult {
         /// The client id being answered, when the request carried one.
