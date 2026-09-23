@@ -260,13 +260,21 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 ## Known Issues
 
-- A client that streams DMA-BUF buffers (e.g. a GTK4/OpenGL app) whose import the backend rejects
-  (`Dmabuf::map_plane` mmap returns `EPERM`) is handled cleanly — the protocol handler logs
-  `dmabuf import failed` and answers `notifier.failed()`, and the render-time element walk drops the
-  element — so no crate code panics or dereferences a bad pointer on that path. A SIGSEGV seen
-  alongside those repeated failures therefore originates in the unsafe dependency/backend layer
-  (Smithay's pixman `import_dmabuf` handing a raw mmap pointer + client stride to libpixman, or the
-  EGL/Mesa import path on GL), not in this crate. See the triage note in `src/CONTEXT.md`.
+- A SIGSEGV can be triggered by an OpenGL client (observed: ghostty) streaming DMA-BUF buffers under
+  the GL renderer: the server logs repeated `dmabuf import failed … Operation not permitted` and then
+  dies with SIGSEGV while the client reports a lost connection. This crate is **not** the crash site
+  (verified): the protocol handler is non-panicking, the render-time element walk drops an unimportable
+  element, and the GL import path never mmaps in Smithay — `Dmabuf::map_plane` has exactly one Smithay
+  caller, `PixmanRenderer::import_dmabuf` — so the `mmap`/EPERM text must be emitted inside Mesa's
+  `eglCreateImageKHR`/`EGL_LINUX_DMA_BUF_EXT` import on llvmpipe. Restricting the advertised
+  formats/modifiers is **not** a fix: the advertised set already *is* the active renderer's own
+  (`GlesRenderer` reports the EGL display's `dmabuf_texture_formats`, pixman its static single-plane
+  `Linear` set; Smithay's `has_dmabuf_format` is the same expression), and the client streams a format
+  the display itself claimed. What is in place: a pre-import descriptor guard + telemetry in
+  `src/protocols/dmabuf.rs` (`validate_dmabuf`/`describe_dmabuf`), the `--renderer pixman` fallback
+  (pixman validates plane count, modifier, format and `stride * height <= mapping length` *before*
+  handing a pointer to libpixman), and a `CompositorConfig::dmabuf == false` SHM-only escape hatch
+  (not yet surfaced by `adesk-server`). See `src/CONTEXT.md` and `src/render/CONTEXT.md`.
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
