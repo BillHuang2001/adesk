@@ -205,7 +205,7 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 
 - There is no container/OCI/Docker packaging and no CI config in the repo (no `Dockerfile`/`Containerfile`, `.github/`, `.gitlab-ci`, Jenkins, CircleCI, Makefile or justfile).
 - The only build/dev tooling is `flake.nix` and `scripts/dev.sh` (an `exec nix develop <root> -c "$@"` wrapper). The flake exposes `devShells.default`, `packages.<system>.{default,adesk}` (a `rustPlatform.buildRustPackage` over the workspace's `Cargo.lock`, installing the `adesk-server`/`adesk-viewer`/`adesk-viewer-gui`/`adesk-machine`/`adesk-agent` binaries; its `buildInputs` include GTK4/libadwaita because the virtual-manifest build compiles the `adesk-viewer-gui` crate) and `nixosModules.{default,adesk}` (the module in `./nix/adesk-module.nix`, which runs `adesk-server` as a systemd service with an optional companion agent, exposing the server's CLI/env surface incl. `accessibility` and `recordingsDir`).
-- The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. `--accessibility auto|off` selects the accessibility backend (`auto` connects lazily, `off` never touches D-Bus). All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_ACCESSIBILITY`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`, plus viewer `ADESK_VIEWER_SOCKET` / `ADESK_VIEWER_TCP`), so it is service/container friendly.
+- The `adesk-server` binary runs headless with no GPU: `--renderer pixman` forces the software path; `auto` (default) tries surfaceless EGL then falls back to pixman. `--accessibility auto|off` selects the accessibility backend (`auto` connects lazily, `off` never touches D-Bus). All flags have `ADESK_*` env fallbacks (`ADESK_SOCKET`, `ADESK_OUTPUT`, `ADESK_RENDERER`, `ADESK_ACCESSIBILITY`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`, plus viewer `ADESK_VIEWER_TCP`; `ADESK_VIEWER_SOCKET` names the viewer endpoint for the server and doubles as the client fallback — default on both sides is the AGP socket's sibling, `…/adesk-viewer.sock`, see `docs/viewer.md` §1.1), so it is service/container friendly.
 - Two more headless binaries ship: `adesk-viewer` (VAP client: connects to the viewer endpoint, writes frames as PNG, drives scripted input) and `adesk-machine` (host-side AI Machine lifecycle CLI over a `podman` or `mock` runtime).
 - Socket path resolution: `$ADESK_SOCKET` → `$XDG_RUNTIME_DIR/adesk.sock` → `<temp_dir>/adesk.sock`; the process needs a writable `XDG_RUNTIME_DIR` (Wayland socket) at runtime.
 
@@ -227,6 +227,11 @@ Bare `cargo build` fails to link outside the shell — that is expected, not a c
 - The server does not push `state` except in reply to `request_state` (the spec's
   advisory per-change push is not implemented), so a viewer refreshes the window
   list by pulling `request_state` rather than via a server push stream.
+- The AGP socket and the VAP viewer socket are distinct endpoints (`docs/viewer.md` §1.1):
+  a VAP client pointed at `adesk.sock` is closed as an undecodable frame — the server logs
+  a WARN hint naming the viewer socket, both viewer clients resolve the sibling default and
+  name the path (plus an AGP-socket hint) in their errors, and `--unix` help states the
+  distinction.
 - Screen recording's GPU path needs an external `ffmpeg` on `PATH` plus a hardware
   encoder (VA-API/NVENC/V4L2) and a `/dev/dri` render node; the sandbox has none, so
   `adesk-recorder`'s hardware tests are detection-gated (they early-return when the
