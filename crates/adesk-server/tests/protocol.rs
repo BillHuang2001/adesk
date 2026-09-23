@@ -19,6 +19,9 @@
 //! - a line that identifies no request — not JSON at all, JSON that is not an
 //!   object, or a request-shaped object without a `u64` id — closes only the
 //!   offending connection (§1/§6, scenario 6).
+//! - a VAP viewer message sent to the AGP socket (a viewer connected to the
+//!   wrong endpoint) is one such line: the connection closes with nothing sent
+//!   back, and a line that does carry a `u64` id is still answered (scenario 6b).
 //! - concurrent (scenario 7) and pipelined (scenario 8) requests on one
 //!   connection all resolve with exactly one response each (§1).
 //! - blank lines are ignored (§1, scenario 9).
@@ -41,6 +44,7 @@ use adesk_client::{
     PointerButtonRequest, Renderer, ScrollRequest, WaitForChangeRequest, WaitForQuietRequest,
 };
 use adesk_core::{AppId, ErrorCode, Observation, OverlayKind, Position, Rect, WindowId};
+use adesk_viewer_proto::{encode_client, ClientMessage, ViewerHello};
 use common::{
     assert_error_code, expect_ok, output_size, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH,
     REQUEST_TIMEOUT, SHORT_TIMEOUT_MS,
@@ -667,6 +671,105 @@ fn malformed_ndjson_closes_only_that_connection() {
     let info = expect_ok(
         t.block_on_timeout(client.ping()),
         "ping from a second client after the first sent a malformed line",
+    );
+    assert_eq!(info.protocol_version, adesk_server::PROTOCOL_VERSION);
+}
+
+// ---------------------------------------------------------------------------
+// Scenario 6b — a VAP viewer message on the AGP socket closes the connection
+// ---------------------------------------------------------------------------
+
+/// A viewer pointed at the **AGP** socket (the one misconnection that happens in
+/// practice: `…/adesk.sock` vs the sibling `…/adesk-viewer.sock`) sends VAP
+/// frames, and VAP frames carry no AGP `method`/`event`/`id`. The runtime must
+/// treat them exactly like any other unusable line — close the connection with
+/// nothing sent back (§6). The flip side is pinned too: a VAP frame that
+/// happens to carry a `u64` `id` (`request_frame` and friends have an optional
+/// one) is an answerable request-shaped line, answered `invalid_request` with
+/// the connection kept.
+#[test]
+fn a_vap_frame_on_the_agp_socket_closes_that_connection() {
+    let t = TestRuntime::start();
+    // One connection per close (§6), created outside `block_on` like scenario
+    // 6, plus one that must survive its id-carrying VAP frame.
+    let mut hello = t.connect_raw();
+    let mut input = t.connect_raw();
+    let mut id_carrying = t.connect_raw();
+
+    // The exact first line a real viewer sends, built by the VAP codec itself:
+    // the §2 handshake, which carries no AGP-usable id and must close.
+    let hello_line = encode_client(&ClientMessage::Hello(ViewerHello::new()));
+
+    t.block_on(async {
+        // Each connection works as an AGP connection before its VAP line, so a
+        // close can only be caused by the line itself.
+        for (raw, id) in [
+            (&mut hello, 82u64),
+            (&mut input, 83),
+            (&mut id_carrying, 84),
+        ] {
+            raw.send_json(&json!({ "id": id, "method": "ping", "params": {} }))
+                .await;
+            let response = raw.expect_json(REQUEST_TIMEOUT).await;
+            assert_eq!(
+                response["id"],
+                json!(id),
+                "the connection works before the VAP line, got {response}"
+            );
+        }
+
+        // A VAP `request_frame` with an explicit client `id` *is* id-carrying
+        // on the AGP side: the id is a `u64`, so the read loop can lift it and
+        // must answer (§6) instead of closing. It is not a valid AGP request
+        // (no `method`), so the answer is `invalid_request`.
+        id_carrying
+            .send_line(r#"{"type":"request_frame","id":9}"#)
+            .await;
+        let response = id_carrying.expect_json(REQUEST_TIMEOUT).await;
+        assert_eq!(
+            response["id"],
+            json!(9),
+            "the answer must carry the VAP frame's client id, got {response}"
+        );
+        assert_eq!(
+            response["error"]["code"],
+            json!("invalid_request"),
+            "a method-less id-carrying line is answered invalid_request (§6), got {response}"
+        );
+        assert!(
+            response.get("result").is_none(),
+            "an `invalid_request` response must not carry a `result`, got {response}"
+        );
+        // Still usable afterwards (§6).
+        id_carrying
+            .send_json(&json!({ "id": 85, "method": "ping", "params": {} }))
+            .await;
+        let response = id_carrying.expect_json(REQUEST_TIMEOUT).await;
+        assert_eq!(
+            response["id"],
+            json!(85),
+            "the connection must stay open after the answered VAP frame (§6), got {response}"
+        );
+
+        // The §2 `hello` (no `id` at all): framing corruption on the AGP side —
+        // the connection closes and nothing is sent back (§6).
+        hello.send_line(&hello_line).await;
+        hello.expect_closed(Duration::from_secs(5)).await;
+
+        // A VAP input frame (`pointer_move`): also id-less, also closes. It is
+        // a valid VAP message the viewer considers sent — the moment the
+        // misconnected viewer loses its connection.
+        input
+            .send_line(r#"{"type":"pointer_move","x":0.5,"y":0.5}"#)
+            .await;
+        input.expect_closed(Duration::from_secs(5)).await;
+    });
+
+    // The runtime still serves everyone else (§6: only that connection closed).
+    let client = t.connect();
+    let info = expect_ok(
+        t.block_on_timeout(client.ping()),
+        "ping from a second client after the VAP misconnections",
     );
     assert_eq!(info.protocol_version, adesk_server::PROTOCOL_VERSION);
 }

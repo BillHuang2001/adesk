@@ -7,6 +7,12 @@
 //! closes only on framing corruption — a line that is not a request at all
 //! (invalid UTF-8, or JSON without a `u64` id) or a decoded non-request frame —
 //! and then only that connection (§6).
+//!
+//! A line that closes the connection is also classified by shape
+//! (`classify_raw_line`): when it is a VAP viewer message (a `type`-tagged
+//! object, `docs/viewer.md` §2–§4) the closing warning names the viewer
+//! endpoint socket, so a viewer pointed at the AGP socket diagnoses itself in
+//! the log. This is log-only: the wire behavior is identical either way.
 
 use std::sync::Arc;
 
@@ -190,6 +196,10 @@ async fn read_loop(
             Err(error) => {
                 let Some(id) = request_id_from_line(text) else {
                     tracing::warn!(%error, "undecodable frame without a usable id; closing connection");
+                    // Log-only diagnosis of the one common cause: the client is
+                    // a VAP viewer pointed at the AGP socket (§6 close stays
+                    // exactly as it is — nothing is sent, nothing is added).
+                    hint_if_viewer_line(context, classify_raw_line(text));
                     break;
                 };
                 tracing::debug!(%error, id, "answering an undecodable request");
@@ -257,6 +267,75 @@ fn request_id_from_line(text: &str) -> Option<u64> {
     value.get("id")?.as_u64()
 }
 
+/// Why a raw line failed to decode into an AGP frame, at the granularity needed
+/// to diagnose the one real-world cause of a connection close: a VAP viewer
+/// connected to the AGP socket instead of the viewer endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawLineKind {
+    /// The line is a VAP viewer message (`docs/viewer.md` §2–§4): a JSON object
+    /// with a string `"type"` field, which AGP frames never carry.
+    Viewer,
+    /// Anything else: an AGP frame, other JSON, or not JSON at all.
+    Other,
+}
+
+/// Classifies a raw line by shape, without validating it as either protocol.
+///
+/// VAP messages (`adesk-viewer-proto`) are flat JSON objects discriminated by a
+/// string `"type"` field; the VAP client tags are `hello`, `request_frame`,
+/// `request_state`, `pointer_move`, `pointer_button`, `scroll`, `key`, `text`,
+/// `activate_window`, `set_control`, `bye`, `start_recording`,
+/// `stop_recording` and `request_recording` — and even an *unknown* tag keeps
+/// the `"type"` string. AGP frames are discriminated by `method`/`event`/`id`
+/// (`adesk_proto::Frame::from_value`) and never carry `"type"`, so a string
+/// `"type"` on an otherwise unusable line is a viewer's signature. The line is
+/// not required to be a *valid* VAP message (a real viewer's first line always
+/// is, but the hint must not depend on it being parsed).
+fn classify_raw_line(text: &str) -> RawLineKind {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+        return RawLineKind::Other;
+    };
+    match value.get("type") {
+        Some(serde_json::Value::String(_)) => RawLineKind::Viewer,
+        _ => RawLineKind::Other,
+    }
+}
+
+/// Emits the misconnection hint when a closing line is a VAP viewer message.
+///
+/// The log-only twin of the close: the caller has already decided to close the
+/// connection exactly as it would have without the classification, and this
+/// only explains *why* a viewer is seeing EOF. It resolves the viewer endpoint
+/// socket viewers must use from the runtime's configuration — the one this
+/// runtime actually bound (`ServerConfig::viewer_socket_path`), or `None`
+/// when the endpoint is disabled, which the message then says instead.
+fn hint_if_viewer_line(context: &ServerContext, kind: RawLineKind) {
+    warn_viewer_misconnection(kind, context.config.viewer_socket_path().as_deref());
+}
+
+/// Logs the VAP-on-the-AGP-socket warning for a `Viewer` line; `viewer_socket`
+/// is the viewer endpoint socket the client should have connected to, or `None`
+/// when this runtime has no viewer endpoint at all. A non-`Viewer` line logs
+/// nothing. Pure log emitter, so tests can capture it.
+fn warn_viewer_misconnection(kind: RawLineKind, viewer_socket: Option<&std::path::Path>) {
+    if kind != RawLineKind::Viewer {
+        return;
+    }
+    match viewer_socket {
+        Some(path) => tracing::warn!(
+            viewer_socket = %path.display(),
+            "this line is a VAP viewer message, but the client connected to the AGP \
+             socket; point the viewer (adesk-viewer / adesk-viewer-gui) at the viewer \
+             endpoint socket instead (the \"viewer endpoint bound\" log line names it)"
+        ),
+        None => tracing::warn!(
+            "this line is a VAP viewer message, but the client connected to the AGP \
+             socket; this runtime was started with the viewer (VAP) endpoint disabled \
+             (--no-viewer), so there is no viewer socket to use"
+        ),
+    }
+}
+
 /// Outbound half of a connection: frames for responses and subscription events.
 #[derive(Clone)]
 pub struct ConnectionWriter {
@@ -295,6 +374,8 @@ mod tests {
     use super::*;
     use adesk_core::ErrorCode;
     use adesk_proto::{ErrorPayload, ResponseFrame};
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
 
     fn response(id: u64) -> Frame {
         Frame::Response(ResponseFrame::error(
@@ -397,5 +478,171 @@ mod tests {
         ] {
             assert_eq!(request_id_from_line(line), None, "line: {line}");
         }
+    }
+
+    #[test]
+    fn a_vap_typed_line_is_classified_as_a_viewer_message() {
+        // Every VAP client tag (`adesk_viewer_proto::ClientMessage::message_type`).
+        for tag in [
+            "hello",
+            "request_frame",
+            "request_state",
+            "pointer_move",
+            "pointer_button",
+            "scroll",
+            "key",
+            "text",
+            "activate_window",
+            "set_control",
+            "bye",
+            "start_recording",
+            "stop_recording",
+            "request_recording",
+        ] {
+            let line = format!(r#"{{"type":"{tag}"}}"#);
+            assert_eq!(classify_raw_line(&line), RawLineKind::Viewer, "tag: {tag}");
+        }
+        // An unrecognised tag is still VAP-shaped: forward compatibility keeps
+        // the `"type"` string (docs/viewer.md §1), so a newer viewer is hinted
+        // too.
+        assert_eq!(
+            classify_raw_line(r#"{"type":"something_newer","field":1}"#),
+            RawLineKind::Viewer
+        );
+        // The real handshake line, built by the VAP codec itself — the exact
+        // first line a viewer pointed at the wrong socket sends.
+        let hello = adesk_viewer_proto::encode_client(&adesk_viewer_proto::ClientMessage::Hello(
+            adesk_viewer_proto::ViewerHello::new(),
+        ));
+        assert_eq!(classify_raw_line(&hello), RawLineKind::Viewer);
+    }
+
+    #[test]
+    fn an_agp_or_non_json_line_is_not_a_viewer_message() {
+        // Ordinary AGP frames discriminate on `method`/`event`/`id` and never
+        // carry `"type"`.
+        assert_eq!(
+            classify_raw_line(r#"{"id":77,"method":"ping","params":{}}"#),
+            RawLineKind::Other
+        );
+        assert_eq!(
+            classify_raw_line(r#"{"event":"surface_commit","seq":1,"ts_ms":0,"data":{}}"#),
+            RawLineKind::Other
+        );
+        assert_eq!(
+            classify_raw_line(r#"{"id":5,"result":{"protocol_version":1}}"#),
+            RawLineKind::Other
+        );
+        // Valid JSON that is neither protocol.
+        assert_eq!(classify_raw_line("null"), RawLineKind::Other);
+        assert_eq!(classify_raw_line("[1, 2, 3]"), RawLineKind::Other);
+        assert_eq!(classify_raw_line(r#"{}"#), RawLineKind::Other);
+        assert_eq!(
+            classify_raw_line(r#"{"typed":true}"#),
+            RawLineKind::Other,
+            "a `type`-like key is not the VAP discriminator"
+        );
+        // A non-string `"type"` is not a VAP discriminator either.
+        assert_eq!(classify_raw_line(r#"{"type":7}"#), RawLineKind::Other);
+        assert_eq!(classify_raw_line(r#"{"type":null}"#), RawLineKind::Other);
+        // Not JSON at all.
+        assert_eq!(classify_raw_line("this is not json"), RawLineKind::Other);
+        assert_eq!(classify_raw_line(""), RawLineKind::Other);
+    }
+
+    /// Captures everything the emitter logs into a shared buffer; per-thread
+    /// default dispatch keeps concurrent tests from cross-talking.
+    struct Captured(Arc<Mutex<Vec<String>>>);
+
+    impl tracing::Subscriber for Captured {
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor(Vec::new());
+            event.record(&mut visitor);
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .extend(visitor.0);
+        }
+
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::Id, _: &tracing::Id) {}
+        fn enter(&self, _: &tracing::Id) {}
+        fn exit(&self, _: &tracing::Id) {}
+    }
+
+    /// Pulls the `message` field plus every structured field out of each
+    /// logged event, one flat string per event (`message … viewer_socket=…`).
+    struct MessageVisitor(Vec<String>);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0.push(format!("{value:?}"));
+            } else {
+                if let Some(message) = self.0.last_mut() {
+                    message.push_str(&format!(" {}={value:?}", field.name()));
+                }
+            }
+        }
+    }
+
+    fn captured_logs(f: impl FnOnce()) -> Vec<String> {
+        let logs: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = Captured(Arc::clone(&logs));
+        let _guard = tracing::subscriber::set_default(subscriber);
+        f();
+        let result = logs.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        result
+    }
+
+    #[test]
+    fn a_viewer_line_logs_the_misconnection_hint_with_the_viewer_socket() {
+        let logs = captured_logs(|| {
+            warn_viewer_misconnection(
+                RawLineKind::Viewer,
+                Some(Path::new("/run/x/adesk-viewer.sock")),
+            );
+        });
+        assert_eq!(logs.len(), 1, "exactly one warning: {logs:?}");
+        assert!(
+            logs[0].contains("VAP viewer message"),
+            "the hint must name the misconnection: {:?}",
+            logs[0]
+        );
+        assert!(
+            logs[0].contains("adesk-viewer.sock"),
+            "the hint must point at the viewer endpoint socket: {:?}",
+            logs[0]
+        );
+    }
+
+    #[test]
+    fn a_viewer_line_without_a_viewer_endpoint_says_the_endpoint_is_disabled() {
+        let logs = captured_logs(|| {
+            warn_viewer_misconnection(RawLineKind::Viewer, None);
+        });
+        assert_eq!(logs.len(), 1, "exactly one warning: {logs:?}");
+        assert!(
+            logs[0].contains("disabled"),
+            "a disabled endpoint must be named as such: {:?}",
+            logs[0]
+        );
+    }
+
+    #[test]
+    fn a_non_viewer_line_logs_nothing() {
+        let logs = captured_logs(|| {
+            warn_viewer_misconnection(
+                RawLineKind::Other,
+                Some(Path::new("/run/x/adesk-viewer.sock")),
+            );
+        });
+        assert!(logs.is_empty(), "no hint for ordinary garbage: {logs:?}");
     }
 }

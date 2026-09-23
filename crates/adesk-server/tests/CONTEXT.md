@@ -46,7 +46,7 @@ They assert protocol values (`docs/protocol.md`, `docs/viewer.md`), never wall-c
 
 | File | Covers |
 |---|---|
-| `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; params that fail validation answer `invalid_request` and keep the connection open; error responses keep the connection open; malformed NDJSON closes only that connection — pinned for non-JSON, JSON non-object and id-less object lines (the §6 open/close boundary); concurrent + pipelined requests; blank lines ignored. |
+| `protocol.rs` | ping identity/version/uptime; all 29 methods answer exactly once (aggregated sweep); unknown method; params that fail validation answer `invalid_request` and keep the connection open; error responses keep the connection open; malformed NDJSON closes only that connection — pinned for non-JSON, JSON non-object and id-less object lines (the §6 open/close boundary) — **and for a VAP viewer frame on the AGP socket** (scenario 6b: the codec-built §2 `hello` and a `pointer_move` close that connection with nothing sent back, while a `request_frame` carrying a `u64` client id is answered `invalid_request` and the connection stays usable); concurrent + pipelined requests; blank lines ignored. |
 | `apps.rs` | §5.2 `list_apps` (query, include_hidden, invalid entries skipped, Exec-less entries), `get_app`, unknown app. |
 | `windows.rs` | §5.3 empty `list_windows`/`get_focus`, unknown-window errors, input on unknown windows (11-method matrix), keyboard methods without `window_id` answer `invalid_request` (no keyboard focus). |
 | `observation.rs` | §5.4 optional `window_id`, timeouts as `timed_out` observations (never errors), quiet horizon, `after_action` correlation errors, wait `include_image=false` on the wire, `observe(include_image=true)` with no candidate window answering a `null` image (SDK result and raw wire). Eleven sync `#[test]`s on the real clock (no paused time; bounded by `block_on_timeout`). The §4 JSON *shape* of an `Observation` (`image` key present as `null`, `seq`/`last_commit_seq` u64, `after_action` null, nullable `focus_changed`) and the `include_image` protocol defaults are pinned only here — `adesk-observer` has no serde and never asserts wire shape. |
@@ -156,7 +156,7 @@ Per-file test counts (94 total, all plain sync `#[test]`; no `#[tokio::test]`, n
 - Harness accessors with narrow call sites: `TestRuntime::connect_viewer`, `connect_viewer_raw` and
   `viewer_socket_path` are reached only from `viewer.rs`; `runtime_dir` and `wayland_display_name` only from
   `viewer.rs` and `accessibility.rs` (the two suites that connect a real Wayland client);
-  `RawClient::expect_closed` only from `protocol.rs`, `TestRuntime::running` only from `shutdown.rs`;
+  `RawClient::expect_closed` only from `protocol.rs` (including scenario 6b's VAP-on-AGP-socket closes), `TestRuntime::running` only from `shutdown.rs`;
   `RawClient::read_json` is reached from `inspector.rs`, `notify.rs` and `accessibility.rs` (bounded "nothing arrived" windows).
 - `raw_request` and `subscription_id` live once in `common/mod.rs` (see the helpers bullet above) and are
   shared by `subscriptions.rs`, `sequence.rs`, `notify.rs` and `accessibility.rs` instead of being copied per target.
