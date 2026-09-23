@@ -20,14 +20,19 @@
 //!
 //! Before a buffer reaches the renderer it is checked structurally by
 //! [`validate_dmabuf`]: every plane must have a non-zero stride, an offset inside
-//! its plane fd, and room for at least one row, and a single-plane buffer must fit
-//! entirely inside its fd. These are exactly the arithmetic preconditions of the
-//! backends' own mmap path — Smithay's `Dmabuf::map_plane` computes
-//! `len = fd_size - offset` (an underflow for an offset beyond the fd, which would
-//! hand a bogus length to `mmap`/EGL) and `PixmanRenderer` rejects a buffer whose
-//! mapping is shorter than `stride * height`. Rejecting such a descriptor here
-//! answers the client `failed()` with a WARN naming the defect instead of feeding
-//! out-of-range geometry into the C graphics stack.
+//! its plane fd, and room for at least one row; a single-plane buffer *without* a
+//! real modifier (Linear or implicit) must additionally fit entirely inside its fd.
+//! The per-plane checks are exactly the arithmetic preconditions of the backends'
+//! own mmap path — Smithay's `Dmabuf::map_plane` computes `len = fd_size - offset`
+//! (an underflow for an offset beyond the fd, which would hand a bogus length to
+//! `mmap`/EGL) — while the whole-buffer check is `PixmanRenderer`'s own condition
+//! for a linearly mapped buffer. That whole-buffer rule is therefore applied only to
+//! Linear/implicit single-plane buffers: for a tiled, compressed or vendor modifier
+//! the plane allocation's relationship to `stride * height` is driver-defined, so
+//! enforcing the strict rule would false-reject a buffer the renderer can import.
+//! Rejecting a genuinely out-of-range descriptor here answers the client `failed()`
+//! with a WARN naming the defect instead of feeding out-of-range geometry into the C
+//! graphics stack.
 //!
 //! Telemetry ([`describe_dmabuf`]) is structural only — format, size, plane count,
 //! and per plane the offset, stride and fd size — and never contains pixel
@@ -152,8 +157,13 @@ pub(crate) enum DmabufDefect {
         /// The plane fd's size in bytes.
         plane_size: u64,
     },
-    /// A single-plane buffer's fd cannot hold the whole image
+    /// A linearly mapped single-plane buffer's fd cannot hold the whole image
     /// (`offset + stride * height`).
+    ///
+    /// Only reported for a single-plane buffer without a real modifier (Linear or
+    /// implicit): a tiled/compressed/vendor modifier makes the plane allocation's
+    /// relationship to `stride * height` driver-defined, so the whole-buffer rule is
+    /// not applied there.
     WholeBufferTooShort {
         /// Zero-based plane index (always `0`).
         plane: usize,
@@ -226,6 +236,14 @@ impl fmt::Display for DmabufDefect {
 
 /// Check a client's DMA-BUF descriptor before it reaches the renderer.
 ///
+/// Every plane must have a non-zero stride, an offset inside its plane fd and room
+/// for at least one row. A single-plane buffer that has no real modifier (Linear or
+/// implicit) must additionally fit entirely inside its fd, mirroring
+/// `PixmanRenderer`'s Linear-only `IncompleteBuffer` condition; a tiled, compressed
+/// or vendor modifier makes the plane allocation's relationship to
+/// `stride * height` driver-defined, so for those the whole-buffer rule is skipped
+/// and a buffer the renderer can import is never false-rejected.
+///
 /// Pure: it reads the buffer and its plane fds (a dup'd `lseek` per plane for the
 /// fd size) and never mutates anything. Returns the first structural defect found,
 /// or `Ok(())` when the descriptor is safe to hand to a backend.
@@ -287,10 +305,14 @@ pub(crate) fn validate_dmabuf(dmabuf: &Dmabuf) -> Result<(), DmabufDefect> {
             });
         }
 
-        // A single-plane image is read as one contiguous mapping, so the whole
-        // buffer must fit — the same condition `PixmanRenderer` enforces with its
-        // own `IncompleteBuffer` check.
-        if single_plane {
+        // A linearly mapped single-plane image is read as one contiguous mapping, so
+        // the whole buffer must fit — the same condition `PixmanRenderer` enforces
+        // with its own `IncompleteBuffer` check. With a tiled/compressed/vendor
+        // modifier the plane allocation's relationship to `stride * height` is
+        // driver-defined (the modifier describes the layout, not a row-major
+        // allocation), so only the universal per-plane checks above apply and a
+        // buffer the renderer can import is never false-rejected.
+        if single_plane && !dmabuf.has_modifier() {
             let required = match u64::from(stride)
                 .checked_mul(height)
                 .and_then(|bytes| offset_u64.checked_add(bytes))
@@ -408,12 +430,18 @@ mod tests {
 
     /// A one-plane `Dmabuf` over a `fd_len`-byte file, `size` pixels at `stride`.
     fn single_plane(size: (i32, i32), stride: u32, offset: u32, fd_len: u64) -> Dmabuf {
-        let mut builder = Dmabuf::builder(
-            size,
-            Fourcc::Argb8888,
-            Modifier::Linear,
-            DmabufFlags::empty(),
-        );
+        single_plane_with_modifier(size, stride, offset, fd_len, Modifier::Linear)
+    }
+
+    /// A one-plane `Dmabuf` with an explicit format modifier.
+    fn single_plane_with_modifier(
+        size: (i32, i32),
+        stride: u32,
+        offset: u32,
+        fd_len: u64,
+        modifier: Modifier,
+    ) -> Dmabuf {
+        let mut builder = Dmabuf::builder(size, Fourcc::Argb8888, modifier, DmabufFlags::empty());
         assert!(builder.add_plane(plane_fd(fd_len), 0, offset, stride));
         builder.build().expect("one plane builds a dmabuf")
     }
@@ -505,6 +533,62 @@ mod tests {
             Err(DmabufDefect::WholeBufferTooShort {
                 plane: 0,
                 required: 32,
+                plane_size: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn non_linear_single_plane_smaller_than_the_image_is_accepted() {
+        // A tiled modifier makes the plane allocation's relationship to
+        // `stride * height` driver-defined, so the whole-buffer rule must not apply:
+        // 4 rows of 8 bytes (32 bytes) are declared over a 16-byte fd that still
+        // holds one full row — the same shape the Linear test above rejects.
+        let dmabuf = single_plane_with_modifier((8, 4), 8, 0, 16, Modifier::I915_y_tiled);
+        assert!(
+            dmabuf.has_modifier(),
+            "the fixture must exercise a real modifier"
+        );
+        assert_eq!(validate_dmabuf(&dmabuf), Ok(()));
+    }
+
+    #[test]
+    fn implicit_modifier_single_plane_still_gets_the_whole_buffer_check() {
+        // `Invalid` means "implicit tiling", which PixmanRenderer still maps linearly,
+        // so the whole-buffer rule keeps applying to it.
+        let dmabuf = single_plane_with_modifier((8, 4), 8, 0, 16, Modifier::Invalid);
+        assert!(!dmabuf.has_modifier());
+        assert_eq!(
+            validate_dmabuf(&dmabuf),
+            Err(DmabufDefect::WholeBufferTooShort {
+                plane: 0,
+                required: 32,
+                plane_size: 16,
+            })
+        );
+    }
+
+    #[test]
+    fn non_linear_single_plane_still_enforces_the_per_plane_checks() {
+        // An offset at the end of the fd is rejected whatever the modifier is.
+        let beyond = single_plane_with_modifier((8, 4), 8, 16, 16, Modifier::I915_y_tiled);
+        assert_eq!(
+            validate_dmabuf(&beyond),
+            Err(DmabufDefect::PlaneOffsetBeyondSize {
+                plane: 0,
+                offset: 16,
+                plane_size: 16,
+            })
+        );
+
+        // So is an offset that leaves no room for a full row.
+        let too_short = single_plane_with_modifier((8, 4), 16, 8, 16, Modifier::I915_y_tiled);
+        assert_eq!(
+            validate_dmabuf(&too_short),
+            Err(DmabufDefect::PlaneTooShort {
+                plane: 0,
+                offset: 8,
+                stride: 16,
                 plane_size: 16,
             })
         );
