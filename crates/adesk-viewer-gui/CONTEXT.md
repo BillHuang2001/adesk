@@ -319,7 +319,7 @@ every pure module with unit tests. Socket resolution goes through
 failures name the dialed endpoint, with an AGP-socket hint when the file name is
 `adesk.sock` (`crates/adesk-viewer-gui/src/address.rs`).
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
-`cargo test -p adesk-viewer-gui` (95 passed); `cargo clippy -p adesk-viewer-gui
+`cargo test -p adesk-viewer-gui` (96 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;
 `cargo doc -p adesk-viewer-gui --no-deps --document-private-items` (zero warnings);
 and `cargo check --workspace --all-targets`.
