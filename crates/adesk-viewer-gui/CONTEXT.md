@@ -151,8 +151,8 @@ text use the normal seat input path.
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**63 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
-- `cli` (9): `--unix`/`--tcp` parsing, conflict rejection, bad address →
+**60 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+- `cli` (8): `--unix`/`--tcp` parsing, conflict rejection, bad address →
   `GuiError::Config`, default target = `resolve_socket_path(None)`, explicit
   `--unix` beats the environment, default follows `$ADESK_VIEWER_SOCKET` and the
   `$ADESK_SOCKET` sibling.
