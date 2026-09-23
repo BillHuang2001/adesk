@@ -23,10 +23,12 @@
 //! The GTK-facing modules are crate-private: the pure `mapping`-style helpers
 //! `cursor` (remote-pointer placement) and `help` (status/help text), the pure
 //! state machines `keystroke` (keyboard forwarding and the escape hatch),
-//! `pointer` (button press/release pairing) and `record` (recording control),
-//! plus `bridge` (the tokio ↔ GLib bridge), `frame_view` and `task_bar_view` (the
-//! widgets) and `app` (the application and event loop). The public entry point is
-//! [`run`].
+//! `pointer` (button press/release pairing), `record` (recording control),
+//! `app_launcher` (the application list and launch state machine) and
+//! `window_close` (the optimistic close/race decision), plus `bridge` (the
+//! tokio ↔ GLib bridge), `frame_view`, `task_bar_view` and `app_launcher_view`
+//! (the widgets) and `app` (the application and event loop). The public entry
+//! point is [`run`].
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -38,6 +40,8 @@ pub mod mapping;
 pub mod taskbar;
 
 mod app;
+mod app_launcher;
+mod app_launcher_view;
 mod bridge;
 mod cursor;
 mod frame_view;
@@ -46,6 +50,7 @@ mod keystroke;
 mod pointer;
 mod record;
 mod task_bar_view;
+mod window_close;
 
 pub use error::{GuiError, Result};
 

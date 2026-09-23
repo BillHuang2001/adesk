@@ -21,11 +21,12 @@ use std::time::Duration;
 use futures::StreamExt;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use adesk_core::{Button, ButtonState, WindowId};
+use adesk_core::{AppId, Button, ButtonState, WindowId};
 use adesk_proto::KeySpec;
 use adesk_viewer::{RecordRequest, ViewerClient, ViewerError, ViewerTarget};
 use adesk_viewer_proto::{
-    ControlOwner, CursorState, DesktopState, KeyAction, RecordingStatus, ServerHello, ViewerFrame,
+    AppEntry, ControlOwner, CursorState, DesktopState, KeyAction, LaunchOutcome, RecordingStatus,
+    ServerHello, ViewerFrame,
 };
 
 use crate::address::{connect_failure, unexpected_close};
@@ -81,6 +82,15 @@ pub(crate) enum InputCommand {
     /// Activate a window — the runtime-native `activate_window` path, never
     /// synthesized input.
     ActivateWindow(WindowId),
+    /// Close a window — the runtime-native `close_window` path, which the
+    /// runtime answers with an ack or an `unknown_window` error (`docs/viewer.md`
+    /// §4, §5).
+    CloseWindow(WindowId),
+    /// Fetch the runtime's launchable applications (one round trip; the launcher
+    /// filters the result locally).
+    ListApps,
+    /// Launch an application through the runtime's app registry.
+    LaunchApp(AppId),
     /// Start a screen recording with the given request (`docs/viewer.md` §4).
     StartRecording(RecordRequest),
     /// Stop the active screen recording.
@@ -124,6 +134,25 @@ pub(crate) enum UiEvent {
     /// The `Err` arm carries the failure's `Display` so it can be surfaced in
     /// the UI without leaking the error type into the GTK layer.
     Recording(Result<RecordingStatus, String>),
+    /// The runtime's launchable applications (or the failure of the `list_apps`
+    /// request), for the application launcher.
+    Apps(Result<Vec<AppEntry>, String>),
+    /// The outcome of a `launch_app` request.
+    ///
+    /// The `Err` arm carries the failure's `Display` (e.g. `unknown_app`), so a
+    /// refusal is surfaced like the successful reply.
+    Launch(Result<LaunchOutcome, String>),
+    /// The outcome of a `close_window` command.
+    ///
+    /// `Ok(())` once the runtime acknowledged the close; the `Err` arm carries
+    /// the failure's `Display` — notably `unknown_window` for a window that was
+    /// already gone. The connection stays open either way.
+    WindowClosed {
+        /// The window the close was requested for.
+        window_id: WindowId,
+        /// The outcome, or the failure's `Display`.
+        result: Result<(), String>,
+    },
     /// A non-fatal notice (e.g. a frame that could not be decoded).
     Notice(String),
 }
@@ -405,8 +434,10 @@ fn emit_recording(
 /// Applies one input command, logging and noticing (never failing) on error.
 ///
 /// Recording commands carry a status reply, so they are forwarded as
-/// [`UiEvent::Recording`] and update `recording`; the seat commands are
-/// fire-and-forget and only produce a [`UiEvent::Notice`] on failure.
+/// [`UiEvent::Recording`] and update `recording`; the app commands carry their
+/// own replies ([`UiEvent::Apps`], [`UiEvent::Launch`],
+/// [`UiEvent::WindowClosed`]); the seat commands are fire-and-forget and only
+/// produce a [`UiEvent::Notice`] on failure.
 async fn apply_input(
     client: &ViewerClient,
     command: InputCommand,
@@ -428,6 +459,38 @@ async fn apply_input(
                 .await
                 .map_err(|error| error.to_string());
             *recording = emit_recording(result, events);
+            return;
+        }
+        InputCommand::ListApps => {
+            let result = client
+                .list_apps(None)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = events.send(UiEvent::Apps(result));
+            return;
+        }
+        InputCommand::LaunchApp(app_id) => {
+            let result = client
+                .launch_app(app_id)
+                .await
+                .map_err(|error| error.to_string());
+            let launched = result.is_ok();
+            let _ = events.send(UiEvent::Launch(result));
+            if launched {
+                // The reply never carries the launched window, so the window is
+                // discovered by re-reading the desktop state right away instead
+                // of waiting up to a refresh tick for it to appear in the task
+                // bar.
+                refresh_state(client, events).await;
+            }
+            return;
+        }
+        InputCommand::CloseWindow(window_id) => {
+            let result = client
+                .close_window(window_id)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = events.send(UiEvent::WindowClosed { window_id, result });
             return;
         }
         InputCommand::Move { x, y } => client.pointer_move(x, y).await,
@@ -586,5 +649,91 @@ mod tests {
             receiver.try_recv().unwrap(),
             InputCommand::StopRecording
         ));
+    }
+
+    #[test]
+    fn launcher_commands_reach_the_worker() {
+        let (sender, mut receiver) = unbounded_channel();
+        let handle = InputHandle {
+            sender: Rc::new(RefCell::new(Some(sender))),
+        };
+
+        handle.send(InputCommand::ListApps);
+        assert!(matches!(
+            receiver.try_recv().unwrap(),
+            InputCommand::ListApps
+        ));
+
+        let app_id = AppId::from("org.mozilla.firefox");
+        handle.send(InputCommand::LaunchApp(app_id.clone()));
+        match receiver.try_recv().unwrap() {
+            InputCommand::LaunchApp(received) => assert_eq!(received, app_id),
+            // `InputCommand` deliberately has no `Debug` (its `Text` arm must
+            // never reach a log), so the mismatch is reported by variant name.
+            _ => panic!("expected a launch command"),
+        }
+    }
+
+    #[test]
+    fn a_close_command_reaches_the_worker() {
+        let (sender, mut receiver) = unbounded_channel();
+        let handle = InputHandle {
+            sender: Rc::new(RefCell::new(Some(sender))),
+        };
+
+        handle.send(InputCommand::CloseWindow(WindowId(9)));
+        match receiver.try_recv().unwrap() {
+            InputCommand::CloseWindow(window_id) => assert_eq!(window_id, WindowId(9)),
+            _ => panic!("expected a close command"),
+        }
+    }
+
+    #[test]
+    fn launcher_events_carry_their_replies() {
+        let (events, mut receiver) = unbounded_channel();
+        let app = AppEntry {
+            id: AppId::from("org.mozilla.firefox"),
+            name: "Firefox".to_owned(),
+            icon: None,
+            categories: Vec::new(),
+        };
+
+        let _ = events.send(UiEvent::Apps(Ok(vec![app.clone()])));
+        match receiver.try_recv().unwrap() {
+            UiEvent::Apps(Ok(apps)) => assert_eq!(apps, vec![app.clone()]),
+            other => panic!("expected an apps event, got {other:?}"),
+        }
+
+        let _ = events.send(UiEvent::Apps(Err("not_supported".to_owned())));
+        match receiver.try_recv().unwrap() {
+            UiEvent::Apps(Err(message)) => assert_eq!(message, "not_supported"),
+            other => panic!("expected an apps error, got {other:?}"),
+        }
+
+        let _ = events.send(UiEvent::Launch(Ok(LaunchOutcome {
+            app_id: app.id.clone(),
+            launch_id: adesk_core::LaunchId(3),
+            action_id: None,
+            window_id: None,
+        })));
+        match receiver.try_recv().unwrap() {
+            UiEvent::Launch(Ok(outcome)) => {
+                assert_eq!(outcome.app_id, app.id);
+                assert_eq!(outcome.window_id, None);
+            }
+            other => panic!("expected a launch event, got {other:?}"),
+        }
+
+        let _ = events.send(UiEvent::WindowClosed {
+            window_id: WindowId(2),
+            result: Err("backend error: unknown window 2".to_owned()),
+        });
+        match receiver.try_recv().unwrap() {
+            UiEvent::WindowClosed { window_id, result } => {
+                assert_eq!(window_id, WindowId(2));
+                assert!(result.is_err());
+            }
+            other => panic!("expected a window-closed event, got {other:?}"),
+        }
     }
 }

@@ -31,12 +31,14 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use adesk_viewer::ViewerTarget;
 use adesk_viewer_proto::RecordingStatus;
 
+use crate::app_launcher_view::AppLauncherView;
 use crate::bridge::{Bridge, InputHandle, UiEvent};
 use crate::frame_view::FrameView;
 use crate::help::{self, ConnectionState, Help};
 use crate::keystroke;
 use crate::record::RecordControl;
 use crate::task_bar_view::TaskBarView;
+use crate::window_close;
 
 /// The GTK application id (`docs/viewer.md`, GUI front-end).
 const APP_ID: &str = "org.adesk.Viewer";
@@ -94,11 +96,18 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
         FrameView::new(input.clone(), move |focused| focus_ui.set_focused(focused))
     };
     let task_bar = TaskBarView::new(input.clone());
+    // The application launcher: a header "Open app" menu listing the runtime's
+    // applications and launching the chosen one (`docs/viewer.md` §3, §5).
+    let launcher = AppLauncherView::new(input.clone());
 
     let banner = adw::Banner::builder()
         .title(format!("Connecting to {target}…"))
         .revealed(true)
         .build();
+
+    // The global notice line: a refused launch or a refused window close has to
+    // stay visible after the popover that started it closed.
+    let notice = NoticeUi::new();
 
     // The recording control: a header toggle that drives the worker, plus a
     // status line. Both are updated from the server's status (never just the
@@ -114,6 +123,7 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
     )));
 
     let header = adw::HeaderBar::new();
+    header.pack_start(&launcher.widget());
     header.pack_start(&release_button);
     header.pack_end(&help_ui.menu);
     header.pack_end(&record.button);
@@ -122,6 +132,7 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
     content.append(&banner);
     content.append(&help_ui.revealer);
     content.append(&record.status);
+    content.append(&notice.widget());
     content.append(&frame_view.widget());
 
     let toolbar = adw::ToolbarView::new();
@@ -175,7 +186,16 @@ fn activate(app: &adw::Application, target: ViewerTarget) {
     help_ui.set_focused(frame_view.is_focused());
 
     let handle = glib::spawn_future_local(event_loop_fn(
-        events, frame_view, task_bar, banner, record, help_ui,
+        events,
+        Widgets {
+            frame_view,
+            task_bar,
+            launcher,
+            notice,
+            banner,
+            record,
+            help_ui,
+        },
     ));
     *event_loop.borrow_mut() = Some(handle);
 }
@@ -291,14 +311,20 @@ impl HelpUi {
 
 /// Consumes [`UiEvent`]s from the worker and updates the widgets until the
 /// worker drops its sender (which ends this loop).
-async fn event_loop_fn(
-    mut events: UnboundedReceiver<UiEvent>,
-    frame_view: FrameView,
-    task_bar: TaskBarView,
-    banner: adw::Banner,
-    record: RecordUi,
-    help_ui: Rc<HelpUi>,
-) {
+///
+/// The widgets travel as one [`Widgets`] bundle so adding a control never grows
+/// this function's signature.
+async fn event_loop_fn(mut events: UnboundedReceiver<UiEvent>, widgets: Widgets) {
+    let Widgets {
+        frame_view,
+        task_bar,
+        launcher,
+        notice,
+        banner,
+        record,
+        help_ui,
+    } = widgets;
+
     while let Some(event) = events.recv().await {
         match event {
             UiEvent::Connected { target, hello } => {
@@ -328,6 +354,29 @@ async fn event_loop_fn(
                 task_bar.set_active(active_window_id);
             }
             UiEvent::Recording(result) => record.apply(result),
+            UiEvent::Apps(result) => launcher.apply_list(result),
+            UiEvent::Launch(result) => {
+                // A refused launch is surfaced twice on purpose: in the
+                // launcher's own status line and in the window's notice line, so
+                // it is still visible once the popover closes.
+                if let Some(message) = launcher.apply_launch(result) {
+                    tracing::debug!(%message, "application launch failed");
+                    notice.show(&message);
+                }
+            }
+            UiEvent::WindowClosed { window_id, result } => match result {
+                // The runtime acknowledged the close; the row was already
+                // pruned optimistically and the next state confirms it.
+                Ok(()) => tracing::debug!(window = %window_id, "window closed"),
+                // A close the runtime refused (e.g. `unknown_window` for a
+                // window that had already gone) leaves the connection open: the
+                // row comes back and the reason is shown, never swallowed.
+                Err(message) => {
+                    tracing::debug!(window = %window_id, %message, "window close failed");
+                    task_bar.restore(window_id);
+                    notice.show(&window_close::failure_message(window_id, &message));
+                }
+            },
             UiEvent::ConnectFailed(message) => {
                 tracing::warn!(%message, "viewer connection failed");
                 banner.set_title(&message);
@@ -344,6 +393,75 @@ async fn event_loop_fn(
                 tracing::debug!(%message, "viewer notice");
             }
         }
+    }
+}
+
+/// The window's widget set, handed to the event loop in one piece.
+struct Widgets {
+    /// Renders the desktop frames and the remote pointer.
+    frame_view: FrameView,
+    /// Lists and switches the runtime's windows.
+    task_bar: TaskBarView,
+    /// Lists and launches the runtime's applications.
+    launcher: AppLauncherView,
+    /// The window's global notice line.
+    notice: NoticeUi,
+    /// The connection banner.
+    banner: adw::Banner,
+    /// The recording toggle and its status line.
+    record: RecordUi,
+    /// The help/status model.
+    help_ui: Rc<HelpUi>,
+}
+
+/// The window's global notice line: the last action the runtime refused (a
+/// launch, a window close), shown under the connection banner until a click
+/// dismisses it or a newer notice replaces it.
+///
+/// Connection failures keep the banner, so this line is only for failures of
+/// things the human did — a launch or a close must be visible, never silently
+/// swallowed, even after the popover that started it has closed.
+struct NoticeUi {
+    /// Reveals the line while it carries a message.
+    revealer: gtk::Revealer,
+    /// The message itself.
+    label: gtk::Label,
+}
+
+impl NoticeUi {
+    /// Builds the (initially hidden) notice line.
+    fn new() -> NoticeUi {
+        let label = gtk::Label::new(None);
+        label.set_xalign(0.0);
+        label.set_wrap(true);
+        label.set_margin_top(4);
+        label.set_margin_bottom(4);
+        label.set_margin_start(12);
+        label.set_margin_end(12);
+
+        let button = gtk::Button::new();
+        button.add_css_class("flat");
+        button.set_child(Some(&label));
+        button.set_tooltip_text(Some("Click to dismiss this message"));
+
+        let revealer = gtk::Revealer::new();
+        revealer.set_child(Some(&button));
+
+        let dismiss = revealer.clone();
+        button.connect_clicked(move |_| dismiss.set_reveal_child(false));
+
+        NoticeUi { revealer, label }
+    }
+
+    /// The widget to place in the window's content box.
+    fn widget(&self) -> gtk::Revealer {
+        self.revealer.clone()
+    }
+
+    /// Shows `message`, replacing any previous one.
+    fn show(&self, message: &str) {
+        self.label.set_text(message);
+        self.revealer.set_reveal_child(true);
     }
 }
 

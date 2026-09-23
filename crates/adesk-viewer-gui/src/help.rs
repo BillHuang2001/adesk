@@ -199,7 +199,9 @@ pub(crate) fn capabilities() -> Vec<String> {
          remote app, not to this window"
             .to_owned(),
         format!("release the keyboard with the header button (or {ESCAPE_LABEL}) and click the desktop to take it back"),
+        "open an application with the Open app button in the header".to_owned(),
         "switch windows with the task bar at the bottom".to_owned(),
+        "close a window with the × button next to it in the task bar".to_owned(),
         "record the desktop with the Record button".to_owned(),
         "close this window to quit".to_owned(),
     ]
@@ -227,7 +229,10 @@ pub(crate) fn active_window_label(state: &DesktopState) -> Option<String> {
 
 /// Escapes `text` for Pango markup (`&`, `<` and `>` are the only characters
 /// Pango treats specially).
-fn escape(text: &str) -> String {
+///
+/// Shared with [`crate::app_launcher`], whose rows render runtime-supplied
+/// application names and desktop-file ids through Pango markup.
+pub(crate) fn escape(text: &str) -> String {
     let mut escaped = String::with_capacity(text.len());
     for character in text.chars() {
         match character {
