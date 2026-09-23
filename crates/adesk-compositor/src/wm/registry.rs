@@ -29,6 +29,19 @@ pub(super) struct PopupRecord<K> {
     pub(super) offset: (i32, i32),
 }
 
+/// A popup that was untracked together with its owner toplevel.
+///
+/// Carries the popup's own surface key, so the caller can drop the bookkeeping it
+/// keys by that surface (the bridge's popup handles) without having to look the
+/// popup up again — the record is already gone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct RemovedPopup<K> {
+    /// The id the popup was tracked under.
+    pub(super) popup_id: u64,
+    /// The popup's surface key.
+    pub(super) surface: K,
+}
+
 /// Pure surface-tree bookkeeping: stable keys, owner lookup and popup ids.
 ///
 /// Kept free of Smithay types (the key is generic) so the logic is unit-tested with
@@ -99,31 +112,38 @@ impl<K: Clone + Eq + Hash> SurfaceRegistry<K> {
 
     /// Drop a toplevel and every popup it owns.
     ///
-    /// Returns the window id (when it was mapped) and the ids of the popups that were
-    /// still open.
-    pub(super) fn unbind_toplevel(&mut self, surface: &K) -> (Option<WindowId>, Vec<u64>) {
+    /// Returns the window id (when it was mapped) and the popups that were still open,
+    /// in creation order. Each [`RemovedPopup`] carries the popup's surface key as well
+    /// as its id, so a caller holding per-popup bookkeeping keyed by that surface can
+    /// drop exactly the entries the registry just forgot.
+    pub(super) fn unbind_toplevel(
+        &mut self,
+        surface: &K,
+    ) -> (Option<WindowId>, Vec<RemovedPopup<K>>) {
         let window = self.toplevels.remove(surface).and_then(|slot| slot.window);
         self.owners.remove(surface);
-        let popup_ids = match window {
+        let popups = match window {
             Some(window_id) => self.remove_popups_of(window_id),
             None => Vec::new(),
         };
-        (window, popup_ids)
+        (window, popups)
     }
 
-    /// Remove every popup owned by `window_id`, returning their ids in creation order.
-    fn remove_popups_of(&mut self, window_id: WindowId) -> Vec<u64> {
-        let mut ids: Vec<(u64, u64)> = self
+    /// Remove every popup owned by `window_id`, returning them in creation order.
+    fn remove_popups_of(&mut self, window_id: WindowId) -> Vec<RemovedPopup<K>> {
+        let mut popups: Vec<RemovedPopup<K>> = self
             .popups
             .iter()
             .filter(|(_, popup)| popup.window_id == window_id)
-            .map(|(key, popup)| (popup.popup_id, key_hash(key)))
+            .map(|(key, popup)| RemovedPopup {
+                popup_id: popup.popup_id,
+                surface: key.clone(),
+            })
             .collect();
-        ids.sort_unstable();
-        let ordered: Vec<u64> = ids.into_iter().map(|(popup_id, _)| popup_id).collect();
+        popups.sort_unstable_by_key(|popup| (popup.popup_id, key_hash(&popup.surface)));
         self.popups.retain(|_, popup| popup.window_id != window_id);
         self.owners.retain(|_, owner| *owner != window_id);
-        ordered
+        popups
     }
 
     /// Track a popup under its owner window, returning its stable id.

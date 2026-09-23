@@ -579,24 +579,13 @@ impl WmBridge {
     ) -> Option<DestroyedWindow> {
         let surface = toplevel.wl_surface().id();
         self.surfaces.slot(&surface)?;
-        let (window_id, popup_ids) = self.surfaces.unbind_toplevel(&surface);
+        let (window_id, popups) = self.surfaces.unbind_toplevel(&surface);
         self.toplevels.remove(&surface);
-        for popup_id in &popup_ids {
-            // Drop the handles of popups that died with their owner.
-            let stale: Vec<ObjectId> = self
-                .popup_handles
-                .iter()
-                .filter(|(key, _)| {
-                    self.surfaces
-                        .popup(key)
-                        .map(|popup| popup.popup_id == *popup_id)
-                        .unwrap_or(false)
-                })
-                .map(|(key, _)| key.clone())
-                .collect();
-            for key in stale {
-                self.popup_handles.remove(&key);
-            }
+        // Popups die with their owner: drop the handle of exactly the popups the registry
+        // just forgot. Their records are gone after this, so `popup_removed` returns early
+        // for them and would never reap the handle itself.
+        for popup in &popups {
+            self.popup_handles.remove(&popup.surface);
         }
         if let Some(id) = window_id {
             self.roots.remove(&id);
@@ -609,7 +598,8 @@ impl WmBridge {
         };
         Some(DestroyedWindow {
             window_id,
-            popup_ids,
+            // In creation order: each popup's disappearance is emitted before the owner's.
+            popup_ids: popups.into_iter().map(|popup| popup.popup_id).collect(),
             // `ActivatePrevious`'s predecessor is already destroyed, so its `previous`
             // is always `None`; capture nothing.
             decision: WmDecision {
