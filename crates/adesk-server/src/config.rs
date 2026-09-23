@@ -150,6 +150,18 @@ impl ServerConfig {
         self
     }
 
+    /// Enables or disables the `zwp_linux_dmabuf_v1` global (SHM-only when
+    /// `false`).
+    ///
+    /// This is the operator escape hatch for a client or graphics driver that
+    /// crashes while streaming DMA-BUF buffers: the renderer is still created
+    /// normally, only the global is skipped, so only `wl_shm` clients can attach
+    /// buffers.
+    pub fn with_dmabuf(mut self, enabled: bool) -> ServerConfig {
+        self.compositor = self.compositor.with_dmabuf(enabled);
+        self
+    }
+
     /// Sets the xkb keymap settings of the virtual keyboard.
     pub fn with_xkb(mut self, xkb: XkbSettings) -> ServerConfig {
         self.compositor = self.compositor.with_xkb(xkb);
@@ -348,6 +360,25 @@ pub fn parse_accessibility(value: &str) -> std::result::Result<AccessibilityKind
     }
 }
 
+/// Parses a `--dmabuf` value: `on` or `off` (case-insensitive).
+///
+/// `on` (the default) advertises the `zwp_linux_dmabuf_v1` global; `off` makes
+/// the runtime SHM-only — an escape hatch for a client or graphics driver that
+/// crashes on a DMA-BUF import.
+///
+/// # Errors
+///
+/// Returns a human-readable message for any other value.
+pub fn parse_dmabuf(value: &str) -> std::result::Result<bool, String> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "on" => Ok(true),
+        "off" => Ok(false),
+        other => Err(format!(
+            "invalid dmabuf mode `{other}`: expected `on` or `off`"
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,6 +485,39 @@ mod tests {
                 "`{error}` should list the accepted modes"
             );
         }
+    }
+
+    #[test]
+    fn parse_dmabuf_is_case_insensitive() {
+        assert_eq!(parse_dmabuf("on"), Ok(true));
+        assert_eq!(parse_dmabuf("ON"), Ok(true));
+        assert_eq!(parse_dmabuf(" off "), Ok(false));
+        assert_eq!(parse_dmabuf("Off"), Ok(false));
+    }
+
+    #[test]
+    fn parse_dmabuf_rejects_unknown_modes() {
+        for value in ["", "auto", "yes", "true"] {
+            let error = parse_dmabuf(value).expect_err(value);
+            assert!(
+                error.contains("on") && error.contains("off"),
+                "`{error}` should list the accepted modes"
+            );
+        }
+    }
+
+    #[test]
+    fn with_dmabuf_toggles_the_compositor_global() {
+        let baseline = ServerConfig::new("/tmp/test.sock", CompositorConfig::default());
+        assert!(
+            baseline.compositor.dmabuf,
+            "the baseline keeps the compositor default (dmabuf on)"
+        );
+        assert!(!baseline.with_dmabuf(false).compositor.dmabuf);
+
+        let disabled =
+            ServerConfig::new("/tmp/test.sock", CompositorConfig::default()).with_dmabuf(false);
+        assert!(disabled.with_dmabuf(true).compositor.dmabuf);
     }
 
     #[test]
