@@ -255,6 +255,19 @@ capability list) plus one documented escape hatch.
   letterbox/pillarbox bar is dropped (not clamped); scroll reuses the last pointer
   position, with the widget center as fallback. The frame view is focused up front
   (and re-focused on click) so typing works immediately.
+- **Pointer input is per-event, unthrottled and ungated.** `frame_view` sends one
+  `InputCommand::Move` per GTK `EventControllerMotion::motion` and one
+  `InputCommand::Button` per press/release (decided by `PointerState`), with no
+  rate limit and no gate on keyboard focus, control ownership or connection state;
+  the only gate is `normalize`/`display_rect` returning `None` (no decoded frame
+  yet, i.e. `dimensions == (0,0)`, or a collapsed widget), which drops motion and
+  clicks alike. So the *only* way a click is dropped mid-desktop is landing outside
+  the displayed image (a letterbox bar), while motion there is clamped and still
+  delivered — motion and click fail differently. A `Button` command carries its own
+  normalized `(x,y)`, so no separate `pointer_move` precedes a button (a click with
+  no prior motion is correct); the server warps the pointer to that position before
+  pressing (`crates/adesk-server/src/viewer/backend.rs`). GTK coalesces motion
+  before the app sees it, but that cannot drop a click (each carries its position).
 - **The event loop takes one widget bundle.** `Widgets` carries the frame view, task
   bar, launcher, notice line, banner, recording control and help model into
   `event_loop_fn(events, widgets)`, so adding a control never grows the loop's
@@ -410,6 +423,34 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   accessor), so that race is absorbed by the optimistic prune + state reconcile
   rather than shown as a notice. Failures the client does report (a write/transport
   failure) are surfaced in the notice line and the row is restored.
+- **Input is fire-and-forget with no delivery confirmation, and only keyboard
+  input is control-gated.** `set_control(ControlOwner::Human)` is sent once on
+  connect (`bridge.rs`); there is no local control-ownership state, so
+  `Move`/`Button`/`Scroll` are written to the socket unconditionally and only the
+  keyboard path is gated — by the frame view's GTK focus (`focused` cell fed to
+  `KeyRouter::press`/`release`, which return `Pass` when unfocused), never by the
+  advisory control handshake. The worker applies commands one at a time in its
+  `select!` loop and awaits `request_state`/`request_recording` round trips inline,
+  so a slow server head-of-line-blocks queued input (it is buffered in an unbounded
+  channel, never dropped); a transport failure of an input message surfaces only as
+  a log-only `UiEvent::Notice`, and a runtime *rejection* (`invalid_request`,
+  `unknown_window`, …) is invisible to the GUI because the client's input methods
+  are fire-and-forget and its error broadcast has no public accessor.
+- **A cancelled click forwards a press but no release.** `frame_view` connects only
+  `GestureClick::pressed`/`released` (per button); it does not handle the gesture's
+  `cancel`/`stopped`, so a press whose sequence GTK cancels is never matched by a
+  forwarded `Button` release and the remote button can stay down until the next
+  click. `pointer::PointerState` pairs only events that actually arrive.
+- **The drawn remote pointer only moves when a frame is pushed.** `FrameView::set_frame`
+  stores the frame's `CursorState` and `cursor::overlay_position` paints it; the view
+  never moves the pointer optimistically on local motion. The runtime pushes a frame
+  only on a *desktop change* (`is_desktop_change` in
+  `crates/adesk-server/src/viewer/backend.rs` counts commits/activation/window/title
+  changes; no pointer-move event kind exists and `CursorTracker::set` emits nothing), so
+  a pointer move over an otherwise-static desktop updates only the runtime's tracker and
+  the overlay stays frozen until an unrelated commit arrives — an *applied* motion can
+  look dropped. Clicks still carry their own coordinates, so they land where clicked
+  regardless of the drawn cursor.
 - **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
   client vocabulary is `request_frame`, `request_state`, `set_control`,
   `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
