@@ -1,0 +1,5 @@
+# Use the `mold` linker on Linux to cut link time (the workspace's dominant
+# compile cost). `-fuse-ld=mold` is understood by both gcc and clang; the
+# `mold` binary is supplied by the Nix dev shell / package (see flake.nix).
+[target.'cfg(target_os = "linux")']
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
