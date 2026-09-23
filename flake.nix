@@ -61,7 +61,9 @@
             # Use the workspace lockfile directly; no hand-maintained vendorHash.
             cargoLock.lockFile = ./Cargo.lock;
 
-            nativeBuildInputs = with pkgs; [ pkg-config cmake ];
+            # `.cargo/config.toml` requests `-fuse-ld=mold`, so `mold` must be
+            # on PATH wherever cargo links — the package build and the dev shell.
+            nativeBuildInputs = with pkgs; [ pkg-config cmake mold ];
             # Wayland-sys/xkbcommon build scripts find the libraries below via
             # the `pkg-config` setup hook's PKG_CONFIG_PATH; the Nix linker
             # wrapper records them in the binaries' RUNPATH (several are also
@@ -118,6 +120,7 @@
               rustfmt
               rust-analyzer
               cmake
+              mold
             ];
             buildInputs = libs ++ guiLibs;
             shellHook = ''

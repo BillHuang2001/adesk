@@ -48,6 +48,9 @@ against:
 ./scripts/dev.sh cargo run -p adesk-server
 ```
 
+Linking uses the `mold` linker: `.cargo/config.toml` requests `-fuse-ld=mold` and the dev
+shell/package supply `mold` on `PATH`.
+
 The `adesk-server` binary accepts:
 
 | Flag | Default | Meaning |
