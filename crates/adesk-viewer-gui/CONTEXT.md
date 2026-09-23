@@ -255,6 +255,19 @@ capability list) plus one documented escape hatch.
   letterbox/pillarbox bar is dropped (not clamped); scroll reuses the last pointer
   position, with the widget center as fallback. The frame view is focused up front
   (and re-focused on click) so typing works immediately.
+- **Pointer input is per-event, unthrottled and ungated.** `frame_view` sends one
+  `InputCommand::Move` per GTK `EventControllerMotion::motion` and one
+  `InputCommand::Button` per press/release (decided by `PointerState`), with no
+  rate limit and no gate on keyboard focus, control ownership or connection state;
+  the only gate is `normalize`/`display_rect` returning `None` (no decoded frame
+  yet, i.e. `dimensions == (0,0)`, or a collapsed widget), which drops motion and
+  clicks alike. So the *only* way a click is dropped mid-desktop is landing outside
+  the displayed image (a letterbox bar), while motion there is clamped and still
+  delivered — motion and click fail differently. A `Button` command carries its own
+  normalized `(x,y)`, so no separate `pointer_move` precedes a button (a click with
+  no prior motion is correct); the server warps the pointer to that position before
+  pressing (`crates/adesk-server/src/viewer/backend.rs`). GTK coalesces motion
+  before the app sees it, but that cannot drop a click (each carries its position).
 - **The event loop takes one widget bundle.** `Widgets` carries the frame view, task
   bar, launcher, notice line, banner, recording control and help model into
   `event_loop_fn(events, widgets)`, so adding a control never grows the loop's
