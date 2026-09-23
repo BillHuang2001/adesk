@@ -452,4 +452,26 @@ mod tests {
         assert_eq!(RELEASE_ACTION, "win.release-control");
         assert!(keystroke::ESCAPE_ACCELERATOR.ends_with(keystroke::ESCAPE_KEY));
     }
+
+    #[test]
+    fn the_help_markup_is_valid_pango() {
+        // `HelpUi` hands this string to `gtk::Label::set_markup`: malformed markup
+        // would leave the help panel empty (GTK bails out on the parse), which is
+        // the invisible-affordance failure this front-end exists to avoid. Parsing
+        // needs no display, and the plain text it returns proves the escaping is
+        // render-exact.
+        let mut help = Help::new("unix:/run/user/1000/adesk-viewer.sock");
+        help.set_state(ConnectionState::Connected);
+        help.set_window(Some("a <weird> & window title".to_owned()));
+
+        let (_, text, _) =
+            gtk::pango::parse_markup(&help.markup(), '\0').expect("valid Pango markup");
+
+        assert!(
+            text.contains("Endpoint unix:/run/user/1000/adesk-viewer.sock"),
+            "{text}"
+        );
+        assert!(text.contains("a <weird> & window title"), "{text}");
+        assert!(text.contains(keystroke::ESCAPE_LABEL), "{text}");
+    }
 }
