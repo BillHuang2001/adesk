@@ -77,7 +77,7 @@ Integration tests in `./tests/`, no display/GPU/network/socket; run with `./scri
 ## Notes for Agents
 - The framing (NDJSON, one object per line, 32 MiB cap) belongs to the transport, not this crate; `encode_*` return line-ready strings without a trailing newline (mirror `adesk-proto::encode_frame`).
 - Do not add `ImageFormat`-style closed enums without a catch-all: the viewer must stay forward-compatible.
-- `ViewerHello.client` is `#[serde(default)]`; every other handshake/frame/state field is required on the wire (the optional `id`/`x`/`y`/`bye.reason` are omitted when `None`, never `null`, as are `RecordingStatus`'s `path`/`encoder`/`error` and the `start_recording`/`stop_recording`/`request_recording`/`recording` `id`).
+- `ViewerHello.client` is `#[serde(default)]`; every other handshake/frame/state field is required on the wire (the optional `id`/`x`/`y`/`bye.reason`/`query` are omitted when `None`, never `null`, as are `RecordingStatus`'s `path`/`encoder`/`error`, `AppEntry`'s `icon`, `LaunchOutcome`'s `action_id`/`window_id`, and the `start_recording`/`stop_recording`/`request_recording`/`recording`/`list_apps`/`launch_app`/`apps`/`launch_result` `id`).
 
 ## Known Issues
 - Two `ViewerProtoError` variants are unreachable in the whole workspace: `Json` (every decode path maps a JSON failure to `Malformed`, and no crate `?`s a `serde_json::Error` into this type) and `Unknown` (constructed only by `./tests/codec.rs`); `dead_code` never fires on a public enum variant, so nothing flags them.
