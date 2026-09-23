@@ -260,6 +260,9 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
+- Injected pointer input has two delivery gaps the suites do not cover (both leave a `wl_pointer` bug invisible to the harness, whose recorder stores each event in the dispatch body rather than buffering to a frame).
+  `InputInjector::pointer_motion`/`pointer_button` (`src/input/injector.rs`) never call `PointerHandle::frame`, so no `wl_pointer.frame` follows an injected motion or button — only `pointer_axis` frames — a wl_pointer v5+ protocol deviation ("A wl_pointer.frame event is sent for every logical event group") that clients which only act on a completed frame may honour by dropping the motion/button.
+  `State::inject_pointer_button` (`src/state.rs`) never moves the pointer first, and Smithay's default grab delivers a button only to the surface already in `PointerInternal::focus` (`PointerInnerHandle::button` sends only `if let Some((focused, _)) = self.inner.focus`), so a button injected before any `PointerMove` (or after the focus was cleared) is silently dropped, and a button injected after a window switch is delivered to the *previous* window's surface because `State::apply_activate` moves keyboard and data-device focus but never the pointer focus.
 
 ## Dependencies
 
