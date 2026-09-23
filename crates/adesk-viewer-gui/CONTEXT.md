@@ -23,8 +23,14 @@ text use the normal seat input path.
     public function.
   - Public, GTK-free, unit-testable modules:
     - `pub mod cli` — `Cli` (clap: `--unix <PATH>`, `--tcp <HOST:PORT>`,
-      `--log <FILTER>`/`ADESK_LOG`), `Cli::target()`, `default_socket_path()`,
-      `socket_path_from()`.
+      `--log <FILTER>`/`ADESK_LOG`), `Cli::target()`, `default_socket_path()`.
+      The Unix socket path is `adesk_viewer::resolve_socket_path` (explicit
+      `--unix` → `$ADESK_VIEWER_SOCKET` → the sibling of the server's default
+      AGP socket), so the GUI's default equals the server's viewer endpoint.
+    - `pub mod address` — failure-message composition that names the dialed
+      endpoint (headless-viewer wording) plus `agp_socket_hint`, which fires
+      only when the dialed path's file name is `adesk.sock` (the AGP socket)
+      and names the viewer sibling to try instead.
     - `pub mod error` — `GuiError { Config, Client, Image }`, `pub type Result<T>`.
     - `pub mod image` — `DecodedImage { width, height, rgba8 }`, `decode(&ImagePayload)`
       → tightly packed RGBA8.
@@ -72,10 +78,15 @@ text use the normal seat input path.
 
 ## Design Decisions
 - **GTK-free core, then GTK glue.** All pure logic (CLI, error, image decode,
-  letterbox math, task-bar model, keystroke routing, recording control) lives in
-  display-free modules with unit tests; the GTK layer
+  letterbox math, task-bar model, keystroke routing, recording control, address
+  diagnostics) lives in display-free modules with unit tests; the GTK layer
   (`app`/`frame_view`/`task_bar_view`) only wires widgets to those helpers and
   reuses them (no duplicated math).
+- **One resolver for every VAP client.** The GUI derives its default Unix socket
+  with `adesk_viewer::resolve_socket_path` — the same function the headless
+  `adesk-viewer` uses and the exact mirror of the server's bind derivation — so
+  the GUI default can never drift from (or omit) the server's viewer endpoint
+  the way a GUI-local `$XDG_RUNTIME_DIR/adesk-viewer.sock` guess could.
 - **tokio ↔ GLib bridge.** `ViewerClient` is tokio-based while GTK runs a glib main
   loop. `bridge` spawns one named OS thread running a single-thread tokio runtime
   that owns the client; the two threads exchange plain `tokio::sync::mpsc`
@@ -140,9 +151,15 @@ text use the normal seat input path.
 
 ## Test Strategy
 No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` →
-**49 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
-- `cli` (7): `--unix`/`--tcp` parsing, conflict rejection, bad address →
-  `GuiError::Config`, default target, `socket_path_from` for `None`/empty/set.
+**63 passed / 0 failed** (all in the lib target; 0 in the bin target, 0 doctests).
+- `cli` (9): `--unix`/`--tcp` parsing, conflict rejection, bad address →
+  `GuiError::Config`, default target = `resolve_socket_path(None)`, explicit
+  `--unix` beats the environment, default follows `$ADESK_VIEWER_SOCKET` and the
+  `$ADESK_SOCKET` sibling.
+- `address` (10): the AGP-file-name hint fires only for `adesk.sock` (sibling
+  named, prefix/suffix matches and file-name-less paths do not), connect-failure
+  and unexpected-close wording naming the path, hint appended on the AGP path,
+  TCP composes without a hint.
 - `mapping` (8): identity, pillarbox, letterbox, corners, center, out-of-rect
   clamping, zero-sized/non-finite → `None`, zero-size-rect guard.
 - `taskbar` (7): label from title/app_id/fallback/empty, active flag, `set_active`,
@@ -179,8 +196,9 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   texture is correct.
 
 ## Known Issues
-- The connection is one-shot: a dropped connection shows a "Connection lost" banner
-  but there is no reconnect affordance (a restart re-connects).
+- The connection is one-shot: a dropped connection shows a banner naming the
+  viewer socket (with an AGP-misdirection hint when the path's file name is
+  `adesk.sock`) but there is no reconnect affordance (a restart re-connects).
 - The recording toggle always starts with the crate-default `RecordRequest` (a
   runtime-chosen path, 30 fps, `auto` encoder); there is no UI to choose a path,
   frame rate or encoder. A runtime that does not support recording answers with
@@ -189,7 +207,10 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
 ## Status
 Implemented and green: `run()`, the GTK application (frame view, task bar,
 recording toggle + status line, status banner), the tokio↔GLib bridge, the CLI,
-and every pure module with unit tests.
+and every pure module with unit tests. Socket resolution goes through
+`adesk_viewer::resolve_socket_path` (server-parity default) and connect/disconnect
+failures name the dialed endpoint, with an AGP-socket hint when the file name is
+`adesk.sock` (`crates/adesk-viewer-gui/src/address.rs`).
 Gates all pass through `./scripts/dev.sh`: `cargo build -p adesk-viewer-gui`;
 `cargo test -p adesk-viewer-gui` (49 passed); `cargo clippy -p adesk-viewer-gui
 --all-targets --no-deps -- -D warnings`; `cargo fmt --all --check`;

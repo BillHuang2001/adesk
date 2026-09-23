@@ -16,6 +16,8 @@
 //! - [`image`] — decoding VAP image payloads to tightly packed RGBA8.
 //! - [`mapping`] — the pure widget ↔ normalized coordinate letterbox math.
 //! - [`taskbar`] — the pure task-bar view model derived from a desktop state.
+//! - [`address`] — failure-message composition that names the dialed endpoint,
+//!   with a targeted hint when the path looks like the AGP socket.
 //!
 //! The GTK-facing modules are crate-private: `keystroke` (the pure keystroke
 //! routing state machine), `record` (the pure recording-control state machine),
@@ -25,6 +27,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+pub mod address;
 pub mod cli;
 pub mod error;
 pub mod image;

@@ -196,9 +196,14 @@ async fn event_loop_fn(
                     record_status.set_visible(true);
                 }
             },
+            UiEvent::ConnectFailed(message) => {
+                tracing::warn!(%message, "viewer connection failed");
+                banner.set_title(&message);
+                banner.set_revealed(true);
+            }
             UiEvent::Disconnected(message) => {
                 tracing::warn!(%message, "viewer disconnected");
-                banner.set_title(&format!("Connection lost: {message}"));
+                banner.set_title(&message);
                 banner.set_revealed(true);
             }
             UiEvent::Notice(message) => {
