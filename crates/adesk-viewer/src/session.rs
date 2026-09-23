@@ -15,14 +15,17 @@
 //! No pixel payload or message body is ever logged; only message types and
 //! counts at `debug`/`trace`.
 
+use std::collections::VecDeque;
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
 use adesk_core::ErrorCode;
 use adesk_viewer_proto::{
     check_version, decode_client, encode_server, AppEntry, ClientMessage, LaunchOutcome,
-    ServerMessage, ViewerHello,
+    RecordingStatus, ServerMessage, ViewerHello,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 use tokio::time::Instant;
@@ -30,7 +33,7 @@ use tokio::time::Instant;
 use crate::backend::{RecordRequest, ViewerBackend, ViewerInput};
 use crate::error::{Result, ViewerError};
 use crate::server::{PeerInfo, ViewerServerConfig};
-use crate::transport::{read_line, read_line_into, write_line};
+use crate::transport::{read_line, write_line, LineReader};
 
 /// Runs one viewer connection to completion (`docs/viewer.md` §2–§6).
 ///
@@ -103,12 +106,32 @@ where
     let mut last_sent: Option<Instant> = None;
     // A desktop change arrived while the pacing interval had not yet elapsed.
     let mut pending = false;
-    // One inbound line buffer reused for the whole connection: the select loop
-    // passes it to `read_line_into`, which clears and refills it each iteration,
-    // so steady-state message handling never allocates for a line.
-    let mut line_buf: Vec<u8> = Vec::new();
+    // The read-only requests received but not served yet, in submission order
+    // (see [`ReadRequest`]): they are handed to [`serve_read`] one at a time, off
+    // this loop, so the input messages behind them are read and applied without
+    // waiting for a render or a state query.
+    let mut queued: VecDeque<ReadRequest> = VecDeque::new();
+    // The one read-only request currently being served; its reply is written here
+    // once it is ready. Keeping it out of the read arm is what stops a slow
+    // render/state query from delaying the input messages queued behind it.
+    let mut deferred: Option<Deferred> = None;
+    // One inbound buffer reused for the whole connection. It lives inside the
+    // reader, so an arm of this `select!` that wins mid-line leaves a
+    // partially-read line intact for the next iteration instead of dropping its
+    // prefix (the reader's own docs spell out why a `buf.clear()`-style read
+    // cannot be used here).
+    let mut lines = LineReader::new(read, config.max_frame_len);
 
     loop {
+        // Start the next queued read-only request as soon as the previous one has
+        // been answered, so at most one of them is in flight and their replies keep
+        // their submission order.
+        if deferred.is_none() {
+            if let Some(request) = queued.pop_front() {
+                let serving: Deferred = Box::pin(serve_read(Arc::clone(backend), request));
+                deferred = Some(serving);
+            }
+        }
         // The pacing arm is armed only while a change is pending; otherwise it is
         // a never-resolving future so the loop only wakes on input or a change.
         // `pending`, `last_sent` and `interval` are `Copy`, so this copies them.
@@ -122,13 +145,14 @@ where
         };
 
         tokio::select! {
-            inbound = read_line_into(&mut read, &mut line_buf, config.max_frame_len) => {
+            inbound = lines.read_line() => {
                 match inbound {
                     // Clean EOF: the viewer went away (§5).
                     Ok(false) => return Ok(()),
                     Ok(true) => {}
                     // Framing corruption (over-cap line or invalid UTF-8) is a
-                    // protocol error that closes the connection (§6).
+                    // protocol error that closes the connection (§6). A partial
+                    // line is never reported as corruption: the reader keeps it.
                     Err(ViewerError::Transport(_)) => {
                         send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
                         return Ok(());
@@ -136,10 +160,10 @@ where
                     Err(error) => return Err(error),
                 }
 
-                let line = match std::str::from_utf8(&line_buf) {
+                let line = match std::str::from_utf8(lines.line()) {
                     Ok(line) => line,
-                    // Unreachable: `read_line_into` already rejected invalid
-                    // UTF-8; handled like any other malformed message.
+                    // Unreachable: the reader already rejected invalid UTF-8;
+                    // handled like any other malformed message.
                     Err(_) => {
                         send_error(&mut write, ErrorCode::InvalidRequest, "malformed message").await?;
                         return Ok(());
@@ -154,10 +178,34 @@ where
                     }
                 };
 
-                match handle_message(backend, &mut write, message).await? {
-                    Disposition::Continue => {}
-                    Disposition::Close => return Ok(()),
+                // A read-only request is queued for [`serve_read`], so the input
+                // messages behind it are read and applied without waiting for the
+                // backend (`docs/viewer.md` §5 orders *input*, mirroring
+                // `docs/protocol.md` §5.5, where every other request is
+                // dispatched concurrently and answered in completion order).
+                // Everything else — input, window management, control, recording
+                // transitions, app launches and the lifecycle messages — is
+                // applied here, in submission order.
+                match ReadRequest::of(&message) {
+                    Some(request) => queued.push_back(request),
+                    None => match handle_message(backend, &mut write, message).await? {
+                        Disposition::Continue => {}
+                        Disposition::Close => return Ok(()),
+                    },
                 }
+            }
+            reply = async {
+                match deferred.as_mut() {
+                    Some(serving) => serving.await,
+                    // No read-only request in flight: this arm never resolves.
+                    None => std::future::pending::<ServerMessage>().await,
+                }
+            } => {
+                // The slot is free again; the reply is written here, so the loop
+                // stays the one writer and read replies keep their submission
+                // order.
+                deferred = None;
+                send(&mut write, &reply).await?;
             }
             () = change.changed() => {
                 // A desktop change: push a frame now if pacing allows, else
@@ -189,6 +237,76 @@ enum Disposition {
     Continue,
     /// Close the connection with a successful session result.
     Close,
+}
+
+/// A read-only viewer request the session serves off its read loop
+/// (`docs/viewer.md` §4, §5).
+///
+/// `request_frame`, `request_state`, `request_recording` and `list_apps` change
+/// no runtime state — their only effect is the reply. Serving one on its own
+/// future lets the read loop keep reading and applying the *input* messages
+/// behind it, so a slow render or state query cannot starve pointer or keyboard
+/// input. `docs/viewer.md` §5's ordering rule is the input ordering of
+/// `docs/protocol.md` §5.5, where every non-input request is dispatched
+/// concurrently and answered in completion order.
+///
+/// These requests are held in submission order and served **one at a time**, and
+/// the loop writes each reply itself, so read replies stay in submission order
+/// and the session keeps its single writer.
+enum ReadRequest {
+    /// `request_frame`: render the current desktop.
+    Frame,
+    /// `request_state`: report the current desktop metadata.
+    State,
+    /// `request_recording`: report the recording status.
+    Recording { id: Option<u64> },
+    /// `list_apps`: report the launchable applications.
+    Apps {
+        id: Option<u64>,
+        query: Option<String>,
+    },
+}
+
+impl ReadRequest {
+    /// The read-only request `message` carries, or `None` for every other message
+    /// (those are applied inline, in submission order).
+    fn of(message: &ClientMessage) -> Option<ReadRequest> {
+        match message {
+            ClientMessage::RequestFrame { .. } => Some(ReadRequest::Frame),
+            ClientMessage::RequestState { .. } => Some(ReadRequest::State),
+            ClientMessage::RequestRecording { id } => Some(ReadRequest::Recording { id: *id }),
+            ClientMessage::ListApps { id, query } => Some(ReadRequest::Apps {
+                id: *id,
+                query: query.clone(),
+            }),
+            _ => None,
+        }
+    }
+}
+
+/// A read-only request in flight: a boxed future that resolves to the reply the
+/// session writes.
+type Deferred = Pin<Box<dyn Future<Output = ServerMessage> + Send>>;
+
+/// Serves one read-only request and returns the reply to write
+/// (`docs/viewer.md` §4, §5, §6).
+///
+/// The reply is built with the same helpers the inline path uses, so the wire
+/// bytes and the backend-error mapping are identical; only *when* it is written
+/// differs.
+async fn serve_read<B: ViewerBackend>(backend: Arc<B>, request: ReadRequest) -> ServerMessage {
+    match request {
+        ReadRequest::Frame => match backend.render_frame().await {
+            Ok(frame) => ServerMessage::Frame(frame),
+            Err(error) => error_reply(ErrorCode::RenderFailed, error.to_string(), None),
+        },
+        ReadRequest::State => match backend.desktop_state().await {
+            Ok(state) => ServerMessage::State(state),
+            Err(error) => error_reply(ErrorCode::Internal, error.to_string(), None),
+        },
+        ReadRequest::Recording { id } => recording_reply(id, backend.recording_status().await),
+        ReadRequest::Apps { id, query } => apps_reply(id, backend.list_apps(query).await),
+    }
 }
 
 /// Reads and validates the handshake, answering a refused viewer
@@ -453,58 +571,69 @@ where
     Ok(Disposition::Continue)
 }
 
-/// Answers a recording control message with the backend's status, exporting a
-/// backend failure as a VAP `error` that echoes the request id
-/// (`docs/viewer.md` §4, §6).
+/// Builds the VAP `error` message for a failed backend call, echoing the
+/// request's client `id` (`docs/viewer.md` §6).
+///
+/// This is the one place a backend failure becomes a wire error, so the AGP code
+/// the backend classified travels to the viewer unchanged — `unknown_window` for
+/// an unknown window, `not_supported` for an unavailable encoder or a runtime
+/// without app control, `render_failed` for a failed render.
+fn error_reply(code: ErrorCode, message: impl Into<String>, id: Option<u64>) -> ServerMessage {
+    ServerMessage::Error {
+        code,
+        message: message.into(),
+        id,
+    }
+}
+
+/// The `recording` reply for a recording status result, or the `error` that
+/// replaces it (`docs/viewer.md` §4, §6).
 ///
 /// The status is sent as `recording`; the failure keeps its AGP code
 /// (`not_supported` for an unavailable encoder, `invalid_request` for a
 /// conflicting transition), so the viewer can distinguish them.
+fn recording_reply(id: Option<u64>, result: Result<RecordingStatus>) -> ServerMessage {
+    match result {
+        Ok(status) => ServerMessage::Recording { id, status },
+        Err(error) => error_reply(error.code_or(ErrorCode::Internal), error.to_string(), id),
+    }
+}
+
+/// The `apps` reply for a registry listing result, or the `error` that replaces
+/// it (`docs/viewer.md` §4, §6).
+///
+/// The entries are sent as `apps`; the failure keeps its AGP code
+/// (`not_supported` for a runtime without an app registry), so the viewer can
+/// distinguish an empty registry from an unsupported one.
+fn apps_reply(id: Option<u64>, result: Result<Vec<AppEntry>>) -> ServerMessage {
+    match result {
+        Ok(apps) => ServerMessage::Apps { id, apps },
+        Err(error) => error_reply(error.code_or(ErrorCode::Internal), error.to_string(), id),
+    }
+}
+
+/// Answers a recording control message with the backend's status, exporting a
+/// backend failure as a VAP `error` that echoes the request id
+/// (`docs/viewer.md` §4, §6).
 async fn answer_recording<W>(
     write: &mut W,
     id: Option<u64>,
-    result: Result<adesk_viewer_proto::RecordingStatus>,
+    result: Result<RecordingStatus>,
 ) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    match result {
-        Ok(status) => send(write, &ServerMessage::Recording { id, status }).await,
-        Err(error) => {
-            send_error_id(
-                write,
-                error.code_or(ErrorCode::Internal),
-                error.to_string(),
-                id,
-            )
-            .await
-        }
-    }
+    send(write, &recording_reply(id, result)).await
 }
 
 /// Answers a `list_apps` request with the backend's registry entries, exporting
 /// a backend failure as a VAP `error` that echoes the request id
 /// (`docs/viewer.md` §4, §6).
-///
-/// The entries are sent as `apps`; the failure keeps its AGP code
-/// (`not_supported` for a runtime without an app registry), so the viewer can
-/// distinguish an empty registry from an unsupported one.
 async fn answer_apps<W>(write: &mut W, id: Option<u64>, result: Result<Vec<AppEntry>>) -> Result<()>
 where
     W: AsyncWrite + Unpin,
 {
-    match result {
-        Ok(apps) => send(write, &ServerMessage::Apps { id, apps }).await,
-        Err(error) => {
-            send_error_id(
-                write,
-                error.code_or(ErrorCode::Internal),
-                error.to_string(),
-                id,
-            )
-            .await
-        }
-    }
+    send(write, &apps_reply(id, result)).await
 }
 
 /// Answers a `launch_app` request with the backend's launch outcome, exporting a
@@ -572,12 +701,7 @@ async fn send_error_id<W: AsyncWrite + Unpin>(
     message: impl Into<String>,
     id: Option<u64>,
 ) -> Result<()> {
-    let message = ServerMessage::Error {
-        code,
-        message: message.into(),
-        id,
-    };
-    send(write, &message).await
+    send(write, &error_reply(code, message, id)).await
 }
 
 /// Whether `error` reports that the peer is already gone — a broken pipe or a

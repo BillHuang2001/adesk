@@ -28,7 +28,9 @@ use adesk_viewer_proto::{
     KeyAction, LaunchOutcome, RecordingEncoder, RecordingStatus, ServerHello, ServerMessage,
     ViewerFrame, ViewerHello, PROTOCOL_VERSION,
 };
-use tokio::io::{AsyncBufRead, AsyncWrite, BufReader, DuplexStream, ReadHalf, WriteHalf};
+use tokio::io::{
+    AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream, ReadHalf, WriteHalf,
+};
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
@@ -505,6 +507,118 @@ async fn bye_is_echoed_and_closes_the_connection() {
     finish(handle).await;
 }
 
+/// §1/§5: a line that arrives in two pieces is reassembled and applied, even when
+/// the frame push wins the `select!` while the line is half-read.
+///
+/// This is the regression guard for the session's reader. A reader that clears its
+/// buffer on every call is not cancellation-safe: when another arm resolves while a
+/// line is half-read, the bytes already consumed from the stream are dropped, the
+/// rest of the line then decodes as a fragment and the session answers
+/// `error malformed message` and closes — silently desynchronizing the stream.
+#[tokio::test]
+async fn a_line_split_by_a_frame_push_is_reassembled_and_applied() {
+    let backend = backend();
+    let (handle, mut reader, mut writer) = connected(backend.clone()).await;
+
+    let line = encode_client(&ClientMessage::PointerMove { x: 0.5, y: 0.25 });
+    let (head, tail) = line.split_at(line.len() / 2);
+
+    // Send the first half only (no terminator): the session's read arm consumes
+    // those bytes and then parks waiting for the rest of the line.
+    writer.write_all(head.as_bytes()).await.unwrap();
+    writer.flush().await.unwrap();
+    // Give the session task a chance to take those bytes off the stream before the
+    // change below takes it out of its read arm. Without the change this test would
+    // pass even with an unsafe reader, so the sleep is what makes it a guard.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // The desktop change wins the `select!` mid-line, pushing a frame and dropping
+    // the parked read.
+    backend.change.notify();
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(_) => {}
+        other => panic!("expected a pushed frame, got {other:?}"),
+    }
+
+    // The rest of the line arrives: the input is applied and acknowledged, so the
+    // stream is still aligned on message boundaries.
+    writer.write_all(tail.as_bytes()).await.unwrap();
+    writer.write_all(b"\n").await.unwrap();
+    writer.flush().await.unwrap();
+
+    match recv_some(&mut reader).await {
+        ServerMessage::InputAck { id, action_id } => {
+            assert_eq!(id, None);
+            assert_eq!(action_id, ActionId(7));
+        }
+        other => panic!("expected an input_ack for the split line, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_inputs(),
+        vec![ViewerInput::PointerMove { x: 0.5, y: 0.25 }]
+    );
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
+/// §5: pointer input behind an in-flight read-only request is still applied.
+///
+/// `request_frame` parks inside the backend, so an inline `await` on it would
+/// leave the input that follows unread — and unacknowledged — until the render
+/// finished. The ack must arrive first, and the frame reply only once the render
+/// is released.
+#[tokio::test]
+async fn input_is_applied_while_a_frame_request_is_in_flight() {
+    let backend = Arc::new(GatedBackend::new());
+    let server = ViewerServer::new(Arc::clone(&backend));
+    let (server_stream, client_stream) = tokio::io::duplex(CAPACITY);
+    let handle = tokio::spawn(async move {
+        server
+            .serve(server_stream, PeerInfo::Other("gated".to_owned()))
+            .await
+    });
+    let (mut reader, mut writer) = split(client_stream);
+    match handshake(&mut reader, &mut writer, ViewerHello::new()).await {
+        ServerMessage::Hello(_) => {}
+        other => panic!("expected the server hello, got {other:?}"),
+    }
+
+    // The render parks, so no frame reply can be written yet.
+    let rendering = backend.rendering();
+    send(&mut writer, &ClientMessage::RequestFrame { id: None }).await;
+    timeout(REPLY_TIMEOUT, rendering)
+        .await
+        .expect("the render must start");
+
+    // Input sent while the request is in flight is read, applied and acknowledged.
+    send(
+        &mut writer,
+        &ClientMessage::PointerMove { x: 0.25, y: 0.75 },
+    )
+    .await;
+    match recv_some(&mut reader).await {
+        ServerMessage::InputAck { id, action_id } => {
+            assert_eq!(id, None);
+            assert_eq!(action_id, ActionId(7));
+        }
+        other => panic!("expected an input_ack while the render is in flight, got {other:?}"),
+    }
+    assert_eq!(
+        backend.recorded_inputs(),
+        vec![ViewerInput::PointerMove { x: 0.25, y: 0.75 }]
+    );
+
+    // Releasing the render answers the frame request — still in submission order,
+    // so after the input ack that came from a later message.
+    backend.release_render();
+    match recv_some(&mut reader).await {
+        ServerMessage::Frame(_) => {}
+        other => panic!("expected the frame once the render completes, got {other:?}"),
+    }
+
+    bye_and_finish(handle, &mut writer).await;
+}
+
 /// §6: a malformed line is answered with `error` and then closes the
 /// connection.
 #[tokio::test]
@@ -908,6 +1022,90 @@ async fn the_default_app_methods_refuse_with_not_supported() {
     }
 
     bye_and_finish(handle, &mut writer).await;
+}
+
+/// A backend whose `render_frame` parks until the test releases it, so the suite
+/// can prove that a slow read-only request does not block the input behind it.
+///
+/// It lives here rather than in `common` because only this suite needs it.
+struct GatedBackend {
+    /// Signalled by `render_frame` once a render has been entered.
+    started: tokio::sync::Notify,
+    /// One permit per render the test allows to finish; starts empty, so every
+    /// render parks.
+    release: tokio::sync::Semaphore,
+    /// Inputs `apply_input` received, in submission order.
+    inputs: std::sync::Mutex<Vec<ViewerInput>>,
+}
+
+impl GatedBackend {
+    /// A backend whose renders all park.
+    fn new() -> GatedBackend {
+        GatedBackend {
+            started: tokio::sync::Notify::new(),
+            release: tokio::sync::Semaphore::new(0),
+            inputs: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Resolves once a `render_frame` call has been entered (a `notify_one` that
+    /// arrived first is remembered, so this cannot miss it).
+    async fn rendering(&self) {
+        self.started.notified().await;
+    }
+
+    /// Lets one parked `render_frame` finish.
+    fn release_render(&self) {
+        self.release.add_permits(1);
+    }
+
+    /// The inputs recorded so far, in submission order.
+    fn recorded_inputs(&self) -> Vec<ViewerInput> {
+        self.inputs.lock().expect("inputs lock").clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ViewerBackend for GatedBackend {
+    fn display(&self) -> ServerHello {
+        ServerHello {
+            protocol_version: PROTOCOL_VERSION,
+            runtime_version: "gated".to_owned(),
+            output: Size::new(8, 4),
+            renderer: RendererKind::Pixman,
+            cursor: CursorState::hidden(),
+            control: ControlOwner::Ai,
+        }
+    }
+
+    async fn render_frame(&self) -> adesk_viewer::Result<ViewerFrame> {
+        self.started.notify_one();
+        let permit = self
+            .release
+            .acquire()
+            .await
+            .expect("the release semaphore is never closed");
+        permit.forget();
+        Ok(ViewerFrame {
+            seq: 1,
+            ts_ms: 0,
+            image: ImagePayload::from_rgba8(1, 1, &[0, 0, 0, 255], 1.0).expect("a valid payload"),
+            cursor: CursorState::hidden(),
+            active_window_id: None,
+        })
+    }
+
+    async fn desktop_state(&self) -> adesk_viewer::Result<DesktopState> {
+        Ok(DesktopState {
+            active_window_id: None,
+            windows: Vec::new(),
+        })
+    }
+
+    async fn apply_input(&self, input: ViewerInput) -> adesk_viewer::Result<Option<ActionId>> {
+        self.inputs.lock().expect("inputs lock").push(input);
+        Ok(Some(ActionId(7)))
+    }
 }
 
 /// A backend that implements only the required [`ViewerBackend`] methods, leaving

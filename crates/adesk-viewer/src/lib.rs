@@ -50,4 +50,4 @@ pub use socket::{resolve_socket_path, viewer_socket_sibling, VIEWER_SOCKET_FILE_
 // stream exactly the way the session and the client do. Hidden from the docs
 // because they are not part of the supported public surface.
 #[doc(hidden)]
-pub use transport::{read_line, read_line_into, write_line};
+pub use transport::{read_line, write_line};
