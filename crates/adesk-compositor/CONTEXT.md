@@ -219,6 +219,7 @@ Unit tests (colocated `#[cfg(test)]`; 99 tests pass):
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
 - Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
+- `protocols::dmabuf`: the pre-import guard over real `Dmabuf`s built from temp-file fds — a well-formed single- and multi-plane descriptor is accepted; `offset >= fd size`, `offset + stride > fd size`, zero stride, degenerate size, an unreadable plane fd, and a linear single-plane buffer larger than its fd are each rejected without panicking; a **non-linear-modifier** single-plane buffer smaller than `stride * height` is accepted (only the per-plane checks apply); the telemetry description carries format/modifier/plane/offset/stride/fd-size and no pixel data.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
 - `snapshot`: lookup/helpers, frame size.
