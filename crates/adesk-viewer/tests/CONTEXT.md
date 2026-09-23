@@ -7,7 +7,7 @@ No display, GPU or real network: tests use a fake `ViewerBackend` plus either an
 ## Files
 - `common/mod.rs` (332 lines) — the ONE shared, configurable `FakeBackend` (`with_display` / `with_desktop` / `with_action` / `with_ts_ms` / `with_recording_status` / `with_apps` / `with_launch`, plus `set_fail_recording` / `set_fail_state` / `set_fail_apps` / `set_fail_launch`, the `recorded_inputs` / `recorded_controls` / `recorded_recording` / `recorded_app_queries` / `recorded_launches` accessors and a `pub change: ChangeSignal`), used by both integration targets below. The `set_fail_*` knobs make one backend method fail so a test can drive the matching `error` reply path; `launch_app` reports the requested `app_id` with the rest of the canned `LaunchOutcome` (the runtime reports the app it actually launched).
 - `client.rs` (738 lines) — 19 `#[tokio::test]` tests driving a real `ViewerClient` against a real `ViewerServer` over a real Unix socket in a tempdir.
-- `session.rs` (952 lines) — 22 `#[tokio::test]` tests driving `ViewerServer::serve` over an in-memory duplex stream.
+- `session.rs` (~1150 lines) — 24 `#[tokio::test]` tests driving `ViewerServer::serve` over an in-memory duplex stream.
 - `script.rs` (333 lines) — 16 tests for the input-script grammar and error line numbers.
 
 ## Constraints
@@ -17,7 +17,7 @@ No display, GPU or real network: tests use a fake `ViewerBackend` plus either an
 
 ## Test Environment
 - No real TCP bind / port anywhere: the only listeners are `tokio::net::UnixListener::bind` in tempdirs, so there is no CI port-collision risk.
-- No wall-clock `sleep` in any integration target; every wait is a bounded `tokio::time::timeout`. Whole suite is fast.
+- Waits are bounded `tokio::time::timeout`s, except one deliberate 50 ms `tokio::time::sleep` in `session.rs::a_line_split_by_a_frame_push_is_reassembled_and_applied`: it lets the session take the first half of a line off the stream *before* the frame push takes it out of its read arm, which is what makes that test a guard for reader cancellation safety (the sleep can only weaken the regression detection, never the new-code assertion). Whole suite is fast.
 - 0 `#[ignore]`, 0 benches/examples, no doctests.
 
 ## Known Redundancy / Gaps
