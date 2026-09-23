@@ -48,9 +48,12 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
   client tree risks an 8 MiB stack overflow; an ordinary client cannot reach it.
 - The workspace's only production `unsafe` is the surfaceless-EGL bootstrap in `headless.rs`
   (`create_gl`: `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`); the pixman path
-  contains no `unsafe`. A SIGSEGV on the software renderer faults inside libpixman
-  (Smithay `PixmanRenderer::render_texture_from_to` → `composite32` over the source image's mapped
-  pointer), not in this module's own code.
+  contains no `unsafe`. A SIGSEGV observed while a client streams DMA-BUFs is **not** producible by
+  this module's own code: every failure path is a `Result`, element collection has no unchecked
+  indexing, and the walks are bounded. The unsafe work sits in the dependency/backend layer this
+  module calls — Smithay's `PixmanRenderer`/`Dmabuf` (raw `mmap` pointer + client stride handed to
+  libpixman `composite32`) or, on the GL path, the EGL/Mesa import-and-cleanup code. See
+  `crates/adesk-compositor/CONTEXT.md` "DMA-BUF crash triage".
 
 ## Routing Table
 
