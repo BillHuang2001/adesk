@@ -13,6 +13,11 @@
 //! `docs/viewer.md`. The crate is transport-agnostic: [`ViewerServer::serve`]
 //! takes an already-connected stream and [`ViewerClient`] dials one; binding a
 //! listener and implementing [`ViewerBackend`] are `adesk-server`'s job.
+//!
+//! Which Unix socket the viewer endpoint lives on is decided once, in
+//! [`resolve_socket_path`] — the single source of truth every VAP client
+//! (this binary, and a GUI front-end) shares, mirroring the server's bind
+//! logic so a default-configured client and server always meet.
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
@@ -23,6 +28,7 @@ mod error;
 mod script;
 mod server;
 mod session;
+mod socket;
 #[cfg(test)]
 mod test_support;
 mod transport;
@@ -36,6 +42,7 @@ pub use client::{
 pub use error::{Result, ViewerError};
 pub use script::{parse_script, ScriptCommand, ScriptError};
 pub use server::{PeerInfo, ViewerServer, ViewerServerConfig};
+pub use socket::{resolve_socket_path, viewer_socket_sibling, VIEWER_SOCKET_FILE_NAME};
 
 // The NDJSON framing helpers are `pub` so the crate's integration tests (which
 // live outside the crate and cannot see a private module) can frame a duplex

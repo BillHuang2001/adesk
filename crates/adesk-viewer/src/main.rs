@@ -16,6 +16,12 @@
 //! a PNG and input is script-driven. Message bodies and pixel payloads are never
 //! logged.
 //!
+//! Without `--unix` the viewer socket is resolved by
+//! [`adesk_viewer::resolve_socket_path`]: `$ADESK_VIEWER_SOCKET`, else the
+//! sibling of the server's default AGP socket — where a default-configured
+//! `adesk-server` binds its viewer endpoint. This is *not* the AGP socket;
+//! dialing the AGP socket gets the connection closed as an undecodable frame.
+//!
 //! Exit codes: `0` success; `1` on a runtime failure (a `ViewerError` or an I/O
 //! error while connecting, streaming or capturing); `2` on a CLI/config error (a
 //! bad mode combination, a missing `--out-dir`, an unparseable `--tcp`, an
@@ -35,8 +41,8 @@ use futures::StreamExt;
 
 use adesk_core::{ButtonState, OverlayKind, WindowId};
 use adesk_viewer::{
-    parse_script, save_frame_png, ConnectOptions, FrameWriter, RecordRequest, ScriptCommand,
-    ViewerClient, ViewerError, ViewerTarget,
+    parse_script, resolve_socket_path, save_frame_png, ConnectOptions, FrameWriter, RecordRequest,
+    ScriptCommand, ViewerClient, ViewerError, ViewerTarget,
 };
 use adesk_viewer_proto::{RecordingEncoder, DEFAULT_RECORD_FPS};
 
@@ -49,15 +55,12 @@ const EXIT_USAGE: u8 = 2;
 /// The viewer name sent in the handshake `hello` (`docs/viewer.md` §2).
 const CLIENT_NAME: &str = "adesk-viewer";
 
-/// The Unix socket file name used under `$XDG_RUNTIME_DIR` (`docs/viewer.md` §1).
-const SOCKET_FILE_NAME: &str = "adesk-viewer.sock";
-
 /// `adesk-viewer` — headless Viewer Attachment Protocol client.
 ///
-/// Connects to an ADesk runtime, then captures one frame (`--capture`), streams
-/// frames to a directory (`--follow`), runs an input script (`--input` /
-/// `--input-stdin`) or records the output (`--record`). Exactly one of those
-/// modes is required.
+/// Connects to an ADesk runtime's **viewer (VAP) endpoint** — not the AGP
+/// socket — then captures one frame (`--capture`), streams frames to a
+/// directory (`--follow`), runs an input script (`--input` / `--input-stdin`)
+/// or records the output (`--record`). Exactly one of those modes is required.
 #[derive(Debug, Parser)]
 #[command(name = "adesk-viewer", version, long_about = None)]
 #[command(group(
@@ -67,12 +70,16 @@ const SOCKET_FILE_NAME: &str = "adesk-viewer.sock";
         .args(["capture", "follow", "input", "input_stdin", "record"])
 ))]
 struct Cli {
-    /// Connect over a Unix domain socket at PATH (default:
-    /// `$XDG_RUNTIME_DIR/adesk-viewer.sock`, else `<temp_dir>/adesk-viewer.sock`).
+    /// VAP viewer Unix socket to connect to — the server's viewer endpoint,
+    /// e.g. $XDG_RUNTIME_DIR/adesk-viewer.sock — NOT the AGP socket
+    /// (adesk.sock; a connection there is closed as an undecodable frame).
+    /// Default: $ADESK_VIEWER_SOCKET, else the sibling of the server's default
+    /// AGP socket.
     #[arg(long, value_name = "PATH")]
     unix: Option<PathBuf>,
 
-    /// Connect over TCP instead of Unix, to `HOST:PORT`.
+    /// Connect over TCP instead of Unix, to `HOST:PORT` (a `--viewer-tcp`
+    /// listener of the runtime, not its AGP TCP endpoint).
     #[arg(long, value_name = "HOST:PORT", conflicts_with = "unix")]
     tcp: Option<String>,
 
@@ -136,6 +143,13 @@ struct Cli {
 enum Failure {
     /// A runtime failure (`ViewerError` or an I/O error on the wire): exit code `1`.
     Runtime(ViewerError),
+    /// A runtime failure with a path-bearing message already composed (a connect
+    /// failure, an unexpected close): exit code `1`.
+    ///
+    /// The message carries the resolved viewer-socket path so the operator can
+    /// see *which* endpoint failed — the AGP-vs-VAP mix-up this binary exists to
+    /// avoid must be visible on the command line.
+    RuntimeMessage(String),
     /// A CLI/config error: exit code `2`.
     Config(String),
 }
@@ -150,7 +164,7 @@ impl std::fmt::Display for Failure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Failure::Runtime(error) => write!(f, "{error}"),
-            Failure::Config(message) => f.write_str(message),
+            Failure::RuntimeMessage(message) | Failure::Config(message) => f.write_str(message),
         }
     }
 }
@@ -160,7 +174,7 @@ impl Failure {
     /// failure, `2` for a CLI/config error.
     fn exit_code(&self) -> u8 {
         match self {
-            Failure::Runtime(_) => EXIT_FAILURE,
+            Failure::Runtime(_) | Failure::RuntimeMessage(_) => EXIT_FAILURE,
             Failure::Config(_) => EXIT_USAGE,
         }
     }
@@ -222,17 +236,20 @@ fn init_tracing(filter: &str) {
 }
 
 /// Resolves the connection target, builds the options, selects a mode and runs it.
+///
+/// A mid-run connection close is rewritten to name the viewer socket it happened
+/// on ([`with_socket_context`]); every other failure keeps its own message.
 async fn run(cli: &Cli) -> Result<(), Failure> {
     let target = resolve_target(cli)?;
-    let options = build_options(cli, target)?;
-    match select_mode(cli)? {
-        Mode::Capture(path) => capture_once(&options, &path).await,
+    let options = build_options(cli, target.clone())?;
+    let result = match select_mode(cli)? {
+        Mode::Capture(path) => capture_once(&options, &target, &path).await,
         Mode::Follow {
             dir,
             max_frames,
             duration_ms,
-        } => follow(&options, &dir, max_frames, duration_ms).await,
-        Mode::Script { commands } => apply_script(&options, commands).await,
+        } => follow(&options, &target, &dir, max_frames, duration_ms).await,
+        Mode::Script { commands } => apply_script(&options, &target, commands).await,
         Mode::Record {
             file,
             fps,
@@ -243,33 +260,59 @@ async fn run(cli: &Cli) -> Result<(), Failure> {
                 .with_path(file)
                 .with_fps(fps)
                 .with_encoder(encoder);
-            record(&options, request, duration_ms).await
+            record(&options, &target, request, duration_ms).await
         }
-    }
+    };
+    result.map_err(|failure| with_socket_context(failure, &target))
 }
 
 /// Resolves the viewer endpoint from `--unix`/`--tcp`, defaulting to the
-/// runtime-derived Unix socket path when neither is given.
+/// runtime-derived viewer socket ([`adesk_viewer::resolve_socket_path`]) when
+/// neither is given.
 fn resolve_target(cli: &Cli) -> Result<ViewerTarget, Failure> {
-    if let Some(path) = &cli.unix {
-        return Ok(ViewerTarget::Unix(path.clone()));
-    }
     if let Some(address) = &cli.tcp {
         let address = address.parse::<SocketAddr>().map_err(|error| {
             Failure::Config(format!("invalid --tcp address `{address}`: {error}"))
         })?;
         return Ok(ViewerTarget::Tcp(address));
     }
-    Ok(ViewerTarget::Unix(default_socket_path()))
+    Ok(ViewerTarget::Unix(resolve_socket_path(cli.unix.clone())))
 }
 
-/// The default Unix socket path: `$XDG_RUNTIME_DIR/adesk-viewer.sock` when the
-/// variable is set and non-empty, otherwise `<temp_dir>/adesk-viewer.sock`.
-fn default_socket_path() -> PathBuf {
-    match std::env::var_os("XDG_RUNTIME_DIR") {
-        Some(dir) if !dir.is_empty() => PathBuf::from(dir).join(SOCKET_FILE_NAME),
-        _ => std::env::temp_dir().join(SOCKET_FILE_NAME),
+/// Connects to the viewer endpoint, mapping a failure to a path-bearing runtime
+/// error so the operator sees which socket was dialed (`--unix` value or the
+/// resolved default).
+async fn connect(options: &ConnectOptions, target: &ViewerTarget) -> Result<ViewerClient, Failure> {
+    ViewerClient::connect_with(options.clone())
+        .await
+        .map_err(|error| Failure::RuntimeMessage(connect_failure(target, &error)))
+}
+
+/// Formats the message printed when the viewer endpoint cannot be reached: the
+/// resolved socket path plus the underlying cause.
+fn connect_failure(target: &ViewerTarget, cause: &ViewerError) -> String {
+    format!("cannot connect to viewer socket {target}: {cause}")
+}
+
+/// Rewrites the one mid-run failure that unambiguously means the connection
+/// ended — [`ViewerError::Closed`] — to name the viewer socket it happened on.
+/// Everything else keeps its own message: a backend failure is the runtime's own
+/// classification, and an I/O error may be a local file write (`--capture`'s
+/// PNG, a `--follow` frame) rather than a socket failure, so relabeling it would
+/// lie about the cause.
+fn with_socket_context(failure: Failure, target: &ViewerTarget) -> Failure {
+    match failure {
+        Failure::Runtime(ViewerError::Closed) => unexpected_close(target, &ViewerError::Closed),
+        failure => failure,
     }
+}
+
+/// Formats the message printed when the server (or the connection) ends before
+/// the run completed: the resolved socket path plus the stream failure.
+fn unexpected_close(target: &ViewerTarget, cause: &ViewerError) -> Failure {
+    Failure::RuntimeMessage(format!(
+        "connection closed by server (viewer socket {target}): {cause}"
+    ))
 }
 
 /// Builds the `ConnectOptions` from the CLI flags.
@@ -366,8 +409,12 @@ fn read_script_source(cli: &Cli) -> Result<String, Failure> {
 }
 
 /// Connects, requests exactly one frame, writes it to `path`, then closes.
-async fn capture_once(options: &ConnectOptions, path: &Path) -> Result<(), Failure> {
-    let client = ViewerClient::connect_with(options.clone()).await?;
+async fn capture_once(
+    options: &ConnectOptions,
+    target: &ViewerTarget,
+    path: &Path,
+) -> Result<(), Failure> {
+    let client = connect(options, target).await?;
     let frame = client.request_frame().await?;
     save_frame_png(&frame.image, path)?;
     client.close().await?;
@@ -378,11 +425,12 @@ async fn capture_once(options: &ConnectOptions, path: &Path) -> Result<(), Failu
 /// frame stream ends.
 async fn follow(
     options: &ConnectOptions,
+    target: &ViewerTarget,
     dir: &Path,
     max_frames: Option<u64>,
     duration_ms: Option<u64>,
 ) -> Result<(), Failure> {
-    let client = ViewerClient::connect_with(options.clone()).await?;
+    let client = connect(options, target).await?;
     let writer = FrameWriter::new(dir);
     let mut frames = std::pin::pin!(client.frames());
     let deadline = duration_ms.map(|ms| Instant::now() + Duration::from_millis(ms));
@@ -409,7 +457,7 @@ async fn follow(
                 writer.write(&frame)?;
                 written += 1;
             }
-            Some(Err(error)) => return Err(Failure::Runtime(error)),
+            Some(Err(error)) => return Err(error.into()),
             None => break,
         }
     }
@@ -427,10 +475,11 @@ async fn follow(
 /// use, which are logged here.
 async fn record(
     options: &ConnectOptions,
+    target: &ViewerTarget,
     request: RecordRequest,
     duration_ms: Option<u64>,
 ) -> Result<(), Failure> {
-    let client = ViewerClient::connect_with(options.clone()).await?;
+    let client = connect(options, target).await?;
     let started = client.start_recording(request).await?;
     tracing::info!(
         recording = started.recording,
@@ -482,9 +531,10 @@ async fn wait_for_recording_stop(duration_ms: Option<u64>) {
 /// Connects and executes a parsed input script in order, then closes.
 async fn apply_script(
     options: &ConnectOptions,
+    target: &ViewerTarget,
     commands: Vec<ScriptCommand>,
 ) -> Result<(), Failure> {
-    let client = ViewerClient::connect_with(options.clone()).await?;
+    let client = connect(options, target).await?;
     for command in commands {
         apply(&client, command).await?;
     }
@@ -537,11 +587,63 @@ async fn apply(client: &ViewerClient, command: ScriptCommand) -> Result<(), View
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsString;
+    use std::sync::{Mutex, MutexGuard};
+
+    use adesk_viewer::VIEWER_SOCKET_FILE_NAME;
+
     use super::*;
 
     /// Parses `args` (with the program name first) as the CLI.
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(args)
+    }
+
+    /// Serializes the tests that resolve a default target: the resolver reads the
+    /// process-global environment, and the test binary's tests run in parallel.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Holds [`ENV_LOCK`] for the test body. Poisoning is tolerated: a failing
+    /// test has already reported its own assertion, and the others must still run.
+    fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Overrides a set of environment variables for the test body, restoring
+    /// their prior state (present or absent) on drop.
+    struct EnvGuard {
+        previous: Vec<(&'static str, Option<OsString>)>,
+    }
+
+    impl EnvGuard {
+        /// Sets every `name` to `value`, or removes it when `value` is `None`,
+        /// remembering the prior state.
+        fn set(vars: &[(&'static str, Option<&str>)]) -> EnvGuard {
+            let mut previous = Vec::with_capacity(vars.len());
+            for (name, _) in vars {
+                previous.push((*name, std::env::var_os(name)));
+            }
+            for (name, value) in vars {
+                match value {
+                    Some(value) => std::env::set_var(name, value),
+                    None => std::env::remove_var(name),
+                }
+            }
+            EnvGuard { previous }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            for (name, previous) in self.previous.drain(..) {
+                match previous {
+                    Some(previous) => std::env::set_var(name, previous),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
     }
 
     #[test]
@@ -654,6 +756,86 @@ mod tests {
         assert_eq!(
             resolve_target(&cli).unwrap(),
             ViewerTarget::Tcp("127.0.0.1:7100".parse().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_target_unix_flag_beats_the_viewer_socket_env() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[("ADESK_VIEWER_SOCKET", Some("/env/viewer.sock"))]);
+        let cli = parse(&[
+            "adesk-viewer",
+            "--unix",
+            "/flag/viewer.sock",
+            "--capture",
+            "f.png",
+        ])
+        .unwrap();
+        assert_eq!(
+            resolve_target(&cli).unwrap(),
+            ViewerTarget::Unix(PathBuf::from("/flag/viewer.sock"))
+        );
+    }
+
+    #[test]
+    fn resolve_target_default_uses_the_viewer_socket_env() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", Some("/env/viewer.sock")),
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", Some("/env/xdg")),
+        ]);
+        let cli = parse(&["adesk-viewer", "--capture", "f.png"]).unwrap();
+        assert_eq!(
+            resolve_target(&cli).unwrap(),
+            ViewerTarget::Unix(PathBuf::from("/env/viewer.sock"))
+        );
+    }
+
+    #[test]
+    fn resolve_target_default_follows_the_xdg_runtime_dir() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", None),
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+        ]);
+        let cli = parse(&["adesk-viewer", "--capture", "f.png"]).unwrap();
+        assert_eq!(
+            resolve_target(&cli).unwrap(),
+            ViewerTarget::Unix(PathBuf::from("/run/user/1000/adesk-viewer.sock"))
+        );
+    }
+
+    #[test]
+    fn resolve_target_default_falls_back_to_the_temp_dir() {
+        let _lock = lock_env();
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", None),
+            ("ADESK_SOCKET", None),
+            ("XDG_RUNTIME_DIR", None),
+        ]);
+        let cli = parse(&["adesk-viewer", "--capture", "f.png"]).unwrap();
+        assert_eq!(
+            resolve_target(&cli).unwrap(),
+            ViewerTarget::Unix(std::env::temp_dir().join(VIEWER_SOCKET_FILE_NAME))
+        );
+    }
+
+    #[test]
+    fn resolve_target_default_follows_a_custom_agp_socket_to_its_sibling() {
+        let _lock = lock_env();
+        // A custom `$ADESK_SOCKET` moves the server's viewer endpoint to that
+        // socket's sibling — the parity case a plain XDG fallback would miss.
+        let _env = EnvGuard::set(&[
+            ("ADESK_VIEWER_SOCKET", None),
+            ("ADESK_SOCKET", Some("/run/custom/agp.sock")),
+            ("XDG_RUNTIME_DIR", Some("/run/user/1000")),
+        ]);
+        let cli = parse(&["adesk-viewer", "--capture", "f.png"]).unwrap();
+        assert_eq!(
+            resolve_target(&cli).unwrap(),
+            ViewerTarget::Unix(PathBuf::from("/run/custom/agp-viewer.sock"))
         );
     }
 
@@ -863,5 +1045,94 @@ mod tests {
             Failure::Config("bad flag".to_owned()).to_string(),
             "bad flag"
         );
+    }
+
+    #[test]
+    fn failure_exit_codes_treat_a_composed_runtime_message_as_a_runtime_failure() {
+        assert_eq!(
+            Failure::RuntimeMessage("boom".to_owned()).exit_code(),
+            EXIT_FAILURE
+        );
+        assert_eq!(
+            Failure::RuntimeMessage("boom".to_owned()).to_string(),
+            "boom"
+        );
+    }
+
+    #[test]
+    fn connect_failure_names_the_resolved_socket_path() {
+        let target = ViewerTarget::Unix(PathBuf::from("/run/user/1000/adesk-viewer.sock"));
+        let cause = ViewerError::Io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        let message = connect_failure(&target, &cause);
+        assert!(
+            message.contains("/run/user/1000/adesk-viewer.sock"),
+            "{message}"
+        );
+        assert!(
+            message.starts_with("cannot connect to viewer socket"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_failure_message_carries_a_missing_socket_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = ViewerTarget::Unix(dir.path().join("absent.sock"));
+        let options = ConnectOptions::new(target.clone());
+        let failure = match connect(&options, &target).await {
+            Ok(_) => panic!("connecting to a missing socket must fail"),
+            Err(failure) => failure,
+        };
+        let message = failure.to_string();
+        assert_eq!(failure.exit_code(), EXIT_FAILURE);
+        assert!(
+            message.contains(dir.path().join("absent.sock").to_str().unwrap()),
+            "{message}"
+        );
+        assert!(
+            message.starts_with("cannot connect to viewer socket"),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unexpected_close_names_the_resolved_socket_path() {
+        let target = ViewerTarget::Unix(PathBuf::from("/run/user/1000/adesk-viewer.sock"));
+        let failure = unexpected_close(&target, &ViewerError::Closed);
+        assert_eq!(failure.exit_code(), EXIT_FAILURE);
+        assert!(
+            failure
+                .to_string()
+                .contains("/run/user/1000/adesk-viewer.sock"),
+            "{}",
+            failure
+        );
+        assert!(
+            failure
+                .to_string()
+                .starts_with("connection closed by server (viewer socket "),
+            "{}",
+            failure
+        );
+    }
+
+    #[test]
+    fn a_mid_run_close_is_rewritten_with_the_socket_path_and_other_errors_are_not() {
+        let target = ViewerTarget::Unix(PathBuf::from("/run/user/1000/adesk-viewer.sock"));
+
+        let rewritten = with_socket_context(Failure::Runtime(ViewerError::Closed), &target);
+        assert!(
+            rewritten.to_string().starts_with(
+                "connection closed by server (viewer socket unix:/run/user/1000/adesk-viewer.sock)"
+            ),
+            "{}",
+            rewritten
+        );
+
+        // A backend failure is the runtime's own classification: it keeps its
+        // message (and its code) untouched.
+        let backend = ViewerError::backend(adesk_core::ErrorCode::NotSupported, "no encoder");
+        let kept = with_socket_context(Failure::Runtime(backend), &target);
+        assert_eq!(kept.to_string(), "backend error: no encoder");
     }
 }
