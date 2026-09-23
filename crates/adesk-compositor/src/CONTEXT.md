@@ -53,17 +53,22 @@ Nothing is exported here directly; `lib.rs` re-exports the public surface
   is indexed only up to the fixed 2 element names (`level_modifier_names`).
 - `protocols/dmabuf.rs` handles a failed renderer import by design and without
   panicking: `notify` logs a WARN and calls `notifier.failed()` on `Err`, and consumes
-  the `ImportNotifier` exactly once. A DMA-BUF import failure (e.g. Smithay's
-  `Dmabuf::map_plane` mmap returning EPERM) cannot panic in this crate.
+  the `ImportNotifier` exactly once. Before the renderer sees a buffer, `validate_dmabuf`
+  rejects a malformed descriptor (zero/degenerate size, zero stride, `offset` outside the
+  plane fd, a plane too short for one row, and — for a linear/implicit **single-plane**
+  buffer only — a whole buffer that does not fit) and logs the full descriptor; see the
+  crate root CONTEXT.md for the triage. `CompositorConfig::dmabuf == false` creates no
+  `zwp_linux_dmabuf_v1` global at all.
 - `protocols/shm.rs` `buffer_destroyed` only sweeps the concrete backend's texture
   cache and logs a failed sweep; it sends nothing and never panics.
 
 ## Known Issues
 
-- `WmBridge::destroy_toplevel` (`wm.rs`) does not purge `popup_handles` for popups that
-  die with their owner: `SurfaceRegistry::unbind_toplevel` already removed the popup
-  records, so the `self.surfaces.popup(key)` filter matches nothing and the stale keys
-  are never removed. A later `popup_removed` also returns early (record gone) and does
-  not remove the handle. The `popup_handles` map therefore retains one `PopupSurface`
-  handle per popup that outlived its owner — bounded by popups-per-window, but never
-  reclaimed until `WmBridge` drops. Bookkeeping only; no crash.
+- DMA-BUF handling is unit-tested only at the descriptor level (`protocols/dmabuf.rs`): the sandbox has
+  no DRM render node, so nothing performs a real `import_dmabuf` of a synthetic dma-buf, and a true
+  "no `zwp_linux_dmabuf_v1` global when `CompositorConfig::dmabuf == false`" proof needs a client-side
+  registry view (`wayland-server` exposes none in-crate), so the switch is covered by a config-level
+  unit test plus a construction smoke test.
+- `WmBridge`'s popup-handle reap on owner destroy is covered indirectly, through the `SurfaceRegistry`
+  seam it uses: `popup_handles` can only be populated via `WmBridge::popup_added(&PopupSurface)` and
+  `PopupSurface` has no test constructor, so no in-crate test asserts `popup_handles` emptiness directly.

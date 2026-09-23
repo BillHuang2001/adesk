@@ -11,7 +11,9 @@
 //! [`PointerState`] therefore owns both decisions: a press is forwarded only
 //! when it lands on the displayed image, and is remembered; a release is
 //! forwarded whenever its press was (with a clamped position) and dropped
-//! otherwise. The GTK layer only supplies the already-mapped geometry.
+//! otherwise. A `stopped`/cancelled gesture is treated as a release through
+//! [`PointerState::cancel`], so a sequence GTK gives up on can never leave the
+//! remote button held. The GTK layer only supplies the already-mapped geometry.
 
 use adesk_core::Button;
 
@@ -70,6 +72,18 @@ impl PointerState {
             }
             None => Delivery::Drop,
         }
+    }
+
+    /// Decides a cancelled or stopped gesture for `button`: the gesture was given
+    /// up on, so release the button iff a press was forwarded for it and not yet
+    /// released.
+    ///
+    /// This shares [`PointerState::release`]'s pairing, so it is idempotent: a
+    /// `stopped` and a `cancel` firing for one press (or a cancel arriving after
+    /// the normal release) lifts the button exactly once and every later call is
+    /// dropped.
+    pub(crate) fn cancel(&mut self, button: Button) -> Delivery {
+        self.release(button)
     }
 }
 
@@ -132,5 +146,50 @@ mod tests {
         let mut state = PointerState::new();
         assert_eq!(state.release(Button::Side), Delivery::Drop);
         assert_eq!(state.release(Button::Extra), Delivery::Drop);
+    }
+
+    #[test]
+    fn a_cancel_releases_a_held_button_once() {
+        let mut state = PointerState::new();
+        state.press(Button::Left, true);
+        assert_eq!(state.cancel(Button::Left), Delivery::Forward);
+        // A second cancel (or the `stopped`/`cancel` pair) must not double-send.
+        assert_eq!(state.cancel(Button::Left), Delivery::Drop);
+    }
+
+    #[test]
+    fn a_cancel_with_nothing_held_is_dropped() {
+        let mut state = PointerState::new();
+        assert_eq!(state.cancel(Button::Left), Delivery::Drop);
+    }
+
+    #[test]
+    fn a_cancel_pairs_with_a_press_dropped_in_the_bars() {
+        // The press in a letterbox bar was never forwarded, so cancelling its
+        // gesture must not forward a release either.
+        let mut state = PointerState::new();
+        assert_eq!(state.press(Button::Right, false), Delivery::Drop);
+        assert_eq!(state.cancel(Button::Right), Delivery::Drop);
+    }
+
+    #[test]
+    fn a_cancel_after_a_normal_release_does_not_double_send() {
+        let mut state = PointerState::new();
+        state.press(Button::Middle, true);
+        assert_eq!(state.release(Button::Middle), Delivery::Forward);
+        // `stopped` may fire after the paired release; it must be a no-op.
+        assert_eq!(state.cancel(Button::Middle), Delivery::Drop);
+    }
+
+    #[test]
+    fn a_press_without_its_release_is_lifted_by_cancel_exactly_once() {
+        // The gesture was cancelled after a forwarded press, so the normal
+        // release never arrived: cancel lifts the button, and any following
+        // release/cancel does nothing more.
+        let mut state = PointerState::new();
+        state.press(Button::Left, true);
+        assert_eq!(state.cancel(Button::Left), Delivery::Forward);
+        assert_eq!(state.release(Button::Left), Delivery::Drop);
+        assert_eq!(state.cancel(Button::Left), Delivery::Drop);
     }
 }

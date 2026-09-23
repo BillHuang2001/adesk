@@ -327,7 +327,8 @@ impl AppRegistry {
     ///    `not_supported` when there is no usable `Exec` line;
     /// 4. `args` are appended after expansion;
     /// 5. `Terminal=true` wraps the command with [`TerminalSpec`];
-    /// 6. [`LaunchEnv::overrides`] is applied to the command's environment;
+    /// 6. [`LaunchEnv::removals`] and [`LaunchEnv::overrides`] are applied to the
+    ///    command's environment;
     /// 7. the launch id is allocated (monotonic from 1, consumed even on failure)
     ///    and `started_at_ms` is read from the clock;
     /// 8. [`ProcessSpawner::spawn`] runs the command; OS failures →
@@ -401,11 +402,14 @@ impl AppRegistry {
                 program: program.clone(),
                 args: rest.to_vec(),
                 env: Vec::new(),
+                env_remove: Vec::new(),
             }
         };
 
-        // 6. Environment overrides are layered on the inherited environment.
+        // 6. Environment removals and overrides are applied to the inherited
+        //    environment (overrides win for a key that is both set and removed).
         command.env = env.overrides();
+        command.env_remove = env.removals().to_vec();
 
         // 7. The id is allocated even when the spawn fails, so ids are never
         //    reused; the timestamp comes from the injected clock.

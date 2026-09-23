@@ -25,7 +25,8 @@ Entry point:
 - `ReadyInfo { display_name: String, renderer: RendererName, output_size: Size }`.
 
 Config:
-- `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`.
+- `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096), dmabuf: bool (true) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`, `with_dmabuf`, `without_dmabuf`.
+- `dmabuf: false` makes `State::new` create **no** `zwp_linux_dmabuf_v1` global (SHM-only clients; the renderer itself is still created and `DmabufState` is still kept for the handler) — an operator escape hatch for a client/driver that crashes the graphics stack. No `adesk-server` flag exposes it yet (see Notes for Agents).
 - `RendererKind { Auto, Gl, Pixman }` — `Auto` tries surfaceless EGL and falls back to pixman with a warning; `Gl` fails startup when EGL is unavailable.
 - `RendererName { Gl, Pixman }` — `as_str()` → `"gl"`/`"pixman"` (AGP `ping`), `Display`.
 - `XkbSettings { rules, model, layout, variant, options }` — defaults `evdev`/`pc105`/`us`/empty/`None`; `us()`, `to_xkb_config() -> smithay::input::keyboard::XkbConfig<'_>`.
@@ -178,6 +179,7 @@ Event loop:
 - `src/dispatch.rs` is declared from `src/run.rs` with `#[path = "dispatch.rs"] pub(crate) mod dispatch;` (module path `crate::run::dispatch`).
 - `src/wm_tests.rs` holds the `wm` unit tests, included from `src/wm.rs` via `#[cfg(test)] #[path = "wm_tests.rs"] mod tests;`, and `SurfaceRegistry`/its record types/`key_hash` live in `src/wm/registry.rs` (`mod registry;`) — both splits keep `wm.rs` under the size threshold.
 - `wl_output` physical size is reported in **millimetres** (96 DPI-derived, minimum 1mm) because `PhysicalProperties.size` is mm; the pixel size is the `Mode`.
+- DMA-BUF imports are gated by a local descriptor guard (`validate_dmabuf` in `src/protocols/dmabuf.rs`) that runs before the renderer: it rejects zero/degenerate size, zero stride, `offset` outside the plane fd, a plane too short for one row, and — for a linear/implicit single-plane buffer only — a whole buffer that does not fit (the strict rule is skipped for tiled/compressed/vendor modifiers, whose plane-allocation geometry is driver-defined, so a real GPU buffer is never false-rejected). `describe_dmabuf` logs format/modifier/plane-count/size and per-plane offset/stride/fd-size (never pixels) at WARN on failure and DEBUG on success; the plane fd size is `lseek(fd, END)` on a dup'd fd (no `unsafe`) — one extra dup+lseek per plane on the import path.
 - `EventSink` emits the eight compositor-owned `RuntimeEvent` variants; `AppLaunched` is emitted by the server/app-registry side, never here.
 - One `#[allow(dead_code)]` site remains: `State::xdg_decoration_state` (owns the `GlobalId`, whose removal is explicit via `DisplayHandle::remove_global`, not `Drop`). No crate-level allow attributes.
 
@@ -206,7 +208,7 @@ Event loop:
 
 ## Test Strategy
 
-Unit tests (colocated `#[cfg(test)]`; 80 tests pass):
+Unit tests (colocated `#[cfg(test)]`; 99 tests pass):
 - `config`: defaults match the contract, builder overrides, xkb config borrowing, mm conversion (1280x800 → 339x212mm, ≥1mm floor).
 - `events`: `seq` globally monotonic across variants, `ts_ms` never decreasing, payload fields preserved, reserved seqs increase without emitting, emitting without subscribers is not an error.
 - `handle`: `CompositorHandle: Clone + Send + Sync`, wire renderer names.
@@ -218,6 +220,7 @@ Unit tests (colocated `#[cfg(test)]`; 80 tests pass):
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
 - Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
+- `protocols::dmabuf`: the pre-import guard over real `Dmabuf`s built from temp-file fds — a well-formed single- and multi-plane descriptor is accepted; `offset >= fd size`, `offset + stride > fd size`, zero stride, degenerate size, an unreadable plane fd, and a linear single-plane buffer larger than its fd are each rejected without panicking; a **non-linear-modifier** single-plane buffer smaller than `stride * height` is accepted (only the per-plane checks apply); the telemetry description carries format/modifier/plane/offset/stride/fd-size and no pixel data.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
 - `socket`: bind honours the configured name, structured errors (environment-aware when `XDG_RUNTIME_DIR` is not writable).
 - `snapshot`: lookup/helpers, frame size.
@@ -241,7 +244,7 @@ Integration tests (driven through the `adesk-testkit` dev-dependency on a real i
 Validation recipe (all workspace members have manifests, so the crate builds in-tree):
 - `./scripts/dev.sh cargo check -p adesk-compositor --all-targets` (warning-free)
 - `./scripts/dev.sh cargo clippy -p adesk-compositor --all-targets` (warning-free)
-- `./scripts/dev.sh cargo test -p adesk-compositor` (80 lib + 20 integration + 3 smoke + 1 doc-test pass, 1 ignored doc-fence)
+- `./scripts/dev.sh cargo test -p adesk-compositor` (99 lib + 20 integration + 3 smoke + 1 doc-test pass, 1 ignored doc-fence)
 - `./scripts/dev.sh cargo doc -p adesk-compositor --no-deps` (warning-free)
 - `ADESK_TEST_GL=1 ./scripts/dev.sh cargo test -p adesk-compositor --lib` (runs the GL clear-frame test on llvmpipe)
 - `./scripts/dev.sh cargo check --workspace --all-targets` (confirms the public API still satisfies server/testkit)
@@ -259,13 +262,21 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
 
 ## Known Issues
 
-- A client that streams DMA-BUF buffers (e.g. a GTK4/OpenGL app) whose import the backend rejects
-  (`Dmabuf::map_plane` mmap returns `EPERM`) is handled cleanly — the protocol handler logs
-  `dmabuf import failed` and answers `notifier.failed()`, and the render-time element walk drops the
-  element — so no crate code panics or dereferences a bad pointer on that path. A SIGSEGV seen
-  alongside those repeated failures therefore originates in the unsafe dependency/backend layer
-  (Smithay's pixman `import_dmabuf` handing a raw mmap pointer + client stride to libpixman, or the
-  EGL/Mesa import path on GL), not in this crate. See the triage note in `src/CONTEXT.md`.
+- A SIGSEGV can be triggered by an OpenGL client (observed: ghostty) streaming DMA-BUF buffers under
+  the GL renderer: the server logs repeated `dmabuf import failed … Operation not permitted` and then
+  dies with SIGSEGV while the client reports a lost connection. This crate is **not** the crash site
+  (verified): the protocol handler is non-panicking, the render-time element walk drops an unimportable
+  element, and the GL import path never mmaps in Smithay — `Dmabuf::map_plane` has exactly one Smithay
+  caller, `PixmanRenderer::import_dmabuf` — so the `mmap`/EPERM text must be emitted inside Mesa's
+  `eglCreateImageKHR`/`EGL_LINUX_DMA_BUF_EXT` import on llvmpipe. Restricting the advertised
+  formats/modifiers is **not** a fix: the advertised set already *is* the active renderer's own
+  (`GlesRenderer` reports the EGL display's `dmabuf_texture_formats`, pixman its static single-plane
+  `Linear` set; Smithay's `has_dmabuf_format` is the same expression), and the client streams a format
+  the display itself claimed. What is in place: a pre-import descriptor guard + telemetry in
+  `src/protocols/dmabuf.rs` (`validate_dmabuf`/`describe_dmabuf`), the `--renderer pixman` fallback
+  (pixman validates plane count, modifier, format and `stride * height <= mapping length` *before*
+  handing a pointer to libpixman), and a `CompositorConfig::dmabuf == false` SHM-only escape hatch
+  (not yet surfaced by `adesk-server`). See `src/CONTEXT.md` and `src/render/CONTEXT.md`.
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
 - `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
@@ -297,3 +308,4 @@ Hazards:
 - Smithay's default grab installs a `ClickGrab` on a button *press* (`DefaultGrab::button`) that pins the pointer focus to the press-time surface until every button is released; a `PointerMove` during the grab ignores the injected focus and is delivered to that pinned surface, not the newly active one. The grab is discarded when its frozen surface is no longer alive (`PointerInternal::with_grab`), so a stale grab on a destroyed window self-heals but a grab on a mapped-but-inactive window persists.
 - `inject_pointer_move`/`inject_pointer_button` send no terminating `wl_pointer.frame` (only `inject_pointer_axis` does), so `wl_pointer.enter`/`motion`/`button` reach the client without an enclosing frame; toolkits that gate pointer processing on `frame` are unverified here.
 - The compositor must never grow quiet/timer semantics: observation belongs to `adesk-observer`, which the server feeds.
+- A SIGSEGV from a DMA-BUF client is not a Rust panic, so `RUST_BACKTRACE=full` produces no trace: run under `gdb` (`gdb --args ./adesk-server --renderer gl …`, then `bt full`, `info registers`, `x/i $pc`, `info sharedlibrary`, `thread apply all bt full`) or `coredumpctl gdb adesk-server`. A frame in `libEGL`/`libgallium`/`swrast_dri.so`/`libpixman-1.so` identifies the C stack; the innermost Rust frame below it is the call site — `gles::import_dmabuf` → `EGLDisplay::create_image_from_dmabuf` is the EGL/Mesa import path, `pixman::import_dmabuf` → `Dmabuf::map_plane` is mmap + libpixman.

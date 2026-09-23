@@ -85,6 +85,20 @@ pub fn widget_to_normalized(point: (f64, f64), display: &DisplayRect) -> (f64, f
     (x.clamp(0.0, 1.0), y.clamp(0.0, 1.0))
 }
 
+/// Whether `point` (widget-local pixels) lies within `display` (edges
+/// inclusive).
+///
+/// A click on the displayed desktop image is delivered to the runtime, while one
+/// in the letterbox/pillarbox bars has no desktop target and is dropped — unlike
+/// pointer motion, which [`widget_to_normalized`] clamps to the nearest edge.
+#[must_use]
+pub fn contains(display: &DisplayRect, point: (f64, f64)) -> bool {
+    point.0 >= display.x
+        && point.0 <= display.x + display.w
+        && point.1 >= display.y
+        && point.1 <= display.y + display.h
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -187,5 +201,57 @@ mod tests {
         let (x, y) = widget_to_normalized((10.0, 10.0), &display);
         close(x, 0.0);
         close(y, 0.0);
+    }
+
+    /// An arbitrary displayed-image rectangle.
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> DisplayRect {
+        DisplayRect { x, y, w, h }
+    }
+
+    #[test]
+    fn a_point_inside_the_display_rect_is_contained() {
+        assert!(contains(&rect(100.0, 50.0, 200.0, 100.0), (200.0, 100.0)));
+    }
+
+    #[test]
+    fn the_edges_of_the_display_rect_are_inclusive() {
+        let display = rect(100.0, 50.0, 200.0, 100.0);
+        // The four corners.
+        assert!(contains(&display, (100.0, 50.0)));
+        assert!(contains(&display, (300.0, 150.0)));
+        // A point on each edge.
+        assert!(contains(&display, (100.0, 100.0)));
+        assert!(contains(&display, (300.0, 100.0)));
+        assert!(contains(&display, (200.0, 50.0)));
+        assert!(contains(&display, (200.0, 150.0)));
+    }
+
+    #[test]
+    fn a_point_just_outside_on_each_side_is_not_contained() {
+        let display = rect(100.0, 50.0, 200.0, 100.0);
+        assert!(!contains(&display, (99.999, 100.0)));
+        assert!(!contains(&display, (300.001, 100.0)));
+        assert!(!contains(&display, (200.0, 49.999)));
+        assert!(!contains(&display, (200.0, 150.001)));
+    }
+
+    #[test]
+    fn a_click_in_the_letterbox_bars_is_not_contained() {
+        // A wide widget (1600x600) showing an 800x600 image: the image sits at
+        // x = 400, so anything in a side bar is outside it.
+        let display = letterbox((1600.0, 600.0), (800, 600)).unwrap();
+        assert!(contains(&display, (display.x, display.y)));
+        assert!(contains(
+            &display,
+            (display.x + display.w, display.y + display.h)
+        ));
+        assert!(!contains(&display, (0.0, 300.0)));
+    }
+
+    #[test]
+    fn a_zero_size_rect_contains_only_its_origin() {
+        let display = rect(10.0, 10.0, 0.0, 0.0);
+        assert!(contains(&display, (10.0, 10.0)));
+        assert!(!contains(&display, (10.001, 10.0)));
     }
 }

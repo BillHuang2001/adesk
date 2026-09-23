@@ -74,8 +74,9 @@ impl TerminalSpec {
 
     /// Builds the spawn command that runs `command` inside the terminal.
     ///
-    /// Returns `None` when `command` is empty. The returned command's `env` is
-    /// empty; [`crate::AppRegistry::launch`] applies [`crate::LaunchEnv`] to it.
+    /// Returns `None` when `command` is empty. The returned command's `env` and
+    /// `env_remove` are empty; [`crate::AppRegistry::launch`] applies
+    /// [`crate::LaunchEnv`] to it.
     pub fn wrap(&self, command: &[String]) -> Option<SpawnCommand> {
         if command.is_empty() {
             return None;
@@ -87,6 +88,7 @@ impl TerminalSpec {
             program: self.program.clone(),
             args,
             env: Vec::new(),
+            env_remove: Vec::new(),
         })
     }
 }
@@ -219,6 +221,7 @@ mod tests {
                 program: "kitty".to_string(),
                 args: owned(&["-e", "htop"]),
                 env: Vec::new(),
+                env_remove: Vec::new(),
             })
         );
     }
@@ -232,6 +235,7 @@ mod tests {
                 program: "kitty".to_string(),
                 args: owned(&["--single-instance", "-e", "vim", "/tmp/a b"]),
                 env: Vec::new(),
+                env_remove: Vec::new(),
             })
         );
     }
@@ -245,6 +249,7 @@ mod tests {
                 program: "foot".to_string(),
                 args: owned(&["sh", "-c", "echo hi"]),
                 env: Vec::new(),
+                env_remove: Vec::new(),
             })
         );
     }
@@ -267,6 +272,7 @@ mod tests {
                 program: "kitty".to_string(),
                 args: owned(&["-e", "cmd", ""]),
                 env: Vec::new(),
+                env_remove: Vec::new(),
             })
         );
     }

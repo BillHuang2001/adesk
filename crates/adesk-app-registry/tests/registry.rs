@@ -457,6 +457,33 @@ fn launch_expands_field_codes_and_appends_args() {
 }
 
 #[test]
+fn launch_applies_launch_env_removals_to_the_spawn_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let harness = Harness::entry(&dir, "app.desktop", "Name=Example\nExec=/usr/bin/example\n");
+    let env = LaunchEnv::new()
+        .with_wayland_display("wayland-5")
+        .without("DISPLAY")
+        .without("XAUTHORITY");
+
+    harness
+        .registry
+        .launch(&app_id("app"), &[], &env)
+        .expect("launch");
+
+    let command = harness.spawner.last().expect("a command was recorded");
+    assert_eq!(command.env, env.overrides());
+    assert_eq!(command.env_remove, env.removals());
+    // A plain launch records no removals.
+    harness.launch("app").expect("launch without env");
+    assert!(harness
+        .spawner
+        .last()
+        .expect("a command was recorded")
+        .env_remove
+        .is_empty());
+}
+
+#[test]
 fn launch_wraps_terminal_entries() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_entry(

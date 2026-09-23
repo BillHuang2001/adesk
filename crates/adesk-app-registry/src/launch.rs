@@ -34,6 +34,12 @@ pub struct LaunchRecord {
 /// `None` fields mean "inherit the runtime's environment" (the server passes what
 /// the compositor actually uses). Applications must see the runtime's Wayland
 /// socket, so `WAYLAND_DISPLAY`/`XDG_RUNTIME_DIR` are the first overrides.
+///
+/// Besides overriding values, the set can also [`without`](LaunchEnv::without)
+/// variables: a removal deletes the variable from the child's inherited
+/// environment, which is the only way to neutralize a parent value the launcher
+/// does not want to leak (e.g. a host `DISPLAY` that would make a toolkit prefer
+/// X11). An explicit override for the same key wins over its removal.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LaunchEnv {
     /// Value for `WAYLAND_DISPLAY`; `None` inherits.
@@ -42,6 +48,8 @@ pub struct LaunchEnv {
     pub xdg_runtime_dir: Option<String>,
     /// Additional overrides, applied after the Wayland variables (later wins).
     pub extra: Vec<(String, String)>,
+    /// Keys to delete from the child's inherited environment, in insertion order.
+    pub removals: Vec<String>,
 }
 
 impl LaunchEnv {
@@ -68,6 +76,15 @@ impl LaunchEnv {
         self
     }
 
+    /// Marks `key` for removal from the child's inherited environment.
+    ///
+    /// Removal is applied before the overrides, so an explicit `with_var` for the
+    /// same key still wins.
+    pub fn without(mut self, key: impl Into<String>) -> LaunchEnv {
+        self.removals.push(key.into());
+        self
+    }
+
     /// Flattens the overrides in application order: `WAYLAND_DISPLAY`,
     /// `XDG_RUNTIME_DIR`, then `extra` in insertion order.
     pub fn overrides(&self) -> Vec<(String, String)> {
@@ -81,6 +98,11 @@ impl LaunchEnv {
         overrides.extend(self.extra.iter().cloned());
         overrides
     }
+
+    /// The keys marked for removal, in insertion order.
+    pub fn removals(&self) -> &[String] {
+        &self.removals
+    }
 }
 /// A fully resolved process to spawn.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,15 +113,18 @@ pub struct SpawnCommand {
     pub args: Vec<String>,
     /// Environment overrides layered on top of the inherited environment.
     pub env: Vec<(String, String)>,
+    /// Keys deleted from the inherited environment (see [`CommandSpawner`]).
+    pub env_remove: Vec<String>,
 }
 
 impl SpawnCommand {
-    /// A command with no arguments and no environment overrides.
+    /// A command with no arguments and no environment changes.
     pub fn new(program: impl Into<String>) -> SpawnCommand {
         SpawnCommand {
             program: program.into(),
             args: Vec::new(),
             env: Vec::new(),
+            env_remove: Vec::new(),
         }
     }
 
@@ -112,6 +137,12 @@ impl SpawnCommand {
     /// Appends one environment override.
     pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> SpawnCommand {
         self.env.push((key.into(), value.into()));
+        self
+    }
+
+    /// Marks one inherited environment variable for removal.
+    pub fn with_env_remove(mut self, key: impl Into<String>) -> SpawnCommand {
+        self.env_remove.push(key.into());
         self
     }
 }
@@ -159,9 +190,10 @@ pub trait ProcessSpawner: Send + Sync + std::fmt::Debug {
 
 /// Production spawner backed by [`std::process::Command`].
 ///
-/// Inherits the runtime's environment and applies [`SpawnCommand::env`] on top.
-/// It does **not** wait for or reap the child: the returned process is expected to
-/// outlive the launch call. `adesk-server` owns child reaping (see `CONTEXT.md`).
+/// Inherits the runtime's environment, deletes [`SpawnCommand::env_remove`], then
+/// applies [`SpawnCommand::env`] on top. It does **not** wait for or reap the
+/// child: the returned process is expected to outlive the launch call.
+/// `adesk-server` owns child reaping (see `CONTEXT.md`).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct CommandSpawner;
 
@@ -189,12 +221,16 @@ impl ProcessSpawner for CommandSpawner {
 /// Builds the `std::process::Command` for `command` without spawning it.
 ///
 /// The child inherits the runtime's environment (no `env_clear`), with
-/// [`SpawnCommand::env`] layered on top in order — a repeated key therefore keeps
-/// the last value. The program is executed directly, never through a shell, and
-/// the arguments are passed verbatim (no word splitting or globbing).
+/// [`SpawnCommand::env_remove`] deleted first and [`SpawnCommand::env`] then
+/// layered on top in order — a repeated key therefore keeps the last value, and an
+/// override of a removed key wins. The program is executed directly, never through
+/// a shell, and the arguments are passed verbatim (no word splitting or globbing).
 pub(crate) fn build_command(command: &SpawnCommand) -> std::process::Command {
     let mut process = std::process::Command::new(&command.program);
     process.args(&command.args);
+    for key in &command.env_remove {
+        process.env_remove(key);
+    }
     for (key, value) in &command.env {
         process.env(key, value);
     }
@@ -312,11 +348,53 @@ mod tests {
     }
 
     #[test]
+    fn launch_env_without_records_removals_in_order() {
+        let env = LaunchEnv::new()
+            .without("DISPLAY")
+            .without("XAUTHORITY")
+            .without("DISPLAY");
+
+        assert_eq!(
+            env.removals(),
+            [
+                "DISPLAY".to_string(),
+                "XAUTHORITY".to_string(),
+                "DISPLAY".to_string()
+            ]
+        );
+        // Removals do not leak into the additive overrides.
+        assert!(env.overrides().is_empty());
+    }
+
+    #[test]
+    fn launch_env_new_has_no_removals() {
+        assert!(LaunchEnv::new().removals().is_empty());
+    }
+
+    #[test]
+    fn launch_env_removals_and_overrides_are_independent() {
+        let env = LaunchEnv::new()
+            .with_wayland_display("wayland-3")
+            .with_var("GDK_BACKEND", "wayland")
+            .without("DISPLAY");
+
+        assert_eq!(
+            env.overrides(),
+            vec![
+                ("WAYLAND_DISPLAY".to_string(), "wayland-3".to_string()),
+                ("GDK_BACKEND".to_string(), "wayland".to_string()),
+            ]
+        );
+        assert_eq!(env.removals(), ["DISPLAY".to_string()]);
+    }
+
+    #[test]
     fn spawn_command_new_has_no_args_or_env() {
         let command = SpawnCommand::new("/usr/bin/firefox");
         assert_eq!(command.program, "/usr/bin/firefox");
         assert!(command.args.is_empty());
         assert!(command.env.is_empty());
+        assert!(command.env_remove.is_empty());
     }
 
     #[test]
@@ -325,7 +403,9 @@ mod tests {
             .with_arg("-e")
             .with_arg("htop")
             .with_env("A", "1")
-            .with_env("B", "2");
+            .with_env("B", "2")
+            .with_env_remove("DISPLAY")
+            .with_env_remove("XAUTHORITY");
 
         assert_eq!(command.program, "kitty");
         assert_eq!(command.args, vec!["-e".to_string(), "htop".to_string()]);
@@ -336,8 +416,11 @@ mod tests {
                 ("B".to_string(), "2".to_string())
             ]
         );
+        assert_eq!(
+            command.env_remove,
+            vec!["DISPLAY".to_string(), "XAUTHORITY".to_string()]
+        );
     }
-
     #[test]
     fn build_command_sets_program_and_args_verbatim() {
         // Metacharacters must survive untouched: no shell, no splitting, no globbing.
@@ -387,6 +470,7 @@ mod tests {
             program: "app".to_string(),
             args: vec![],
             env: env.overrides(),
+            env_remove: env.removals().to_vec(),
         };
 
         assert_eq!(
@@ -399,6 +483,76 @@ mod tests {
                 ),
                 ("GDK_BACKEND".to_string(), Some("wayland".to_string())),
             ])
+        );
+    }
+    #[test]
+    fn build_command_removes_variables_that_the_parent_has_set() {
+        // `PATH` is set in this process's environment by the test runner, so a
+        // `None` entry proves a removal, not a no-op on an unset key.
+        assert!(std::env::var_os("PATH").is_some());
+        let command = SpawnCommand::new("app")
+            .with_env_remove("PATH")
+            .with_env_remove("DISPLAY");
+
+        // `get_envs` reports a removal as a key mapped to `None`.
+        assert_eq!(
+            env_map(&build_command(&command)),
+            std::collections::BTreeMap::from([
+                ("PATH".to_string(), None),
+                ("DISPLAY".to_string(), None),
+            ])
+        );
+    }
+
+    #[test]
+    fn build_command_override_wins_over_a_removal_of_the_same_key() {
+        let command = SpawnCommand::new("app")
+            .with_env_remove("DISPLAY")
+            .with_env("DISPLAY", ":99");
+
+        assert_eq!(
+            env_map(&build_command(&command)),
+            std::collections::BTreeMap::from([("DISPLAY".to_string(), Some(":99".to_string()))])
+        );
+    }
+
+    /// A variable the test runner sets and a shell does not synthesize, so its
+    /// removal can be observed from a spawned child.
+    fn inherited_probe_var() -> &'static str {
+        ["HOME", "USER", "LANG", "TERM", "LOGNAME"]
+            .into_iter()
+            .find(|key| std::env::var_os(key).is_some())
+            .expect("the test runner provides at least one of HOME/USER/LANG/TERM/LOGNAME")
+    }
+
+    /// `sh -c 'printf %s "${KEY+SET}"'` — a shell builtin, so the probe needs no
+    /// `PATH` of its own. `/bin/sh` is the POSIX shell of every platform this
+    /// Linux-only crate targets.
+    fn probe_command(key: &str, remove: bool) -> std::process::Command {
+        let script = format!("printf %s \"${{{key}+SET}}\"");
+        let command = SpawnCommand::new("/bin/sh").with_arg("-c").with_arg(script);
+        let command = if remove {
+            command.with_env_remove(key)
+        } else {
+            command
+        };
+        build_command(&command)
+    }
+
+    #[test]
+    fn spawned_child_loses_removed_variables_and_keeps_inherited_ones() {
+        let key = inherited_probe_var();
+
+        // Control: an untouched variable is inherited by the child.
+        let inherited = probe_command(key, false).output().expect("spawn /bin/sh");
+        assert_eq!(String::from_utf8_lossy(&inherited.stdout), "SET");
+
+        // The removed variable is really gone from the spawned child.
+        let removed = probe_command(key, true).output().expect("spawn /bin/sh");
+        assert_eq!(
+            String::from_utf8_lossy(&removed.stdout),
+            "",
+            "{key} must not reach the child after with_env_remove({key:?})"
         );
     }
     #[test]
