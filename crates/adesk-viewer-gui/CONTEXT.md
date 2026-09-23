@@ -423,6 +423,24 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   accessor), so that race is absorbed by the optimistic prune + state reconcile
   rather than shown as a notice. Failures the client does report (a write/transport
   failure) are surfaced in the notice line and the row is restored.
+- **Input is fire-and-forget with no delivery confirmation, and only keyboard
+  input is control-gated.** `set_control(ControlOwner::Human)` is sent once on
+  connect (`bridge.rs`); there is no local control-ownership state, so
+  `Move`/`Button`/`Scroll` are written to the socket unconditionally and only the
+  keyboard path is gated — by the frame view's GTK focus (`focused` cell fed to
+  `KeyRouter::press`/`release`, which return `Pass` when unfocused), never by the
+  advisory control handshake. The worker applies commands one at a time in its
+  `select!` loop and awaits `request_state`/`request_recording` round trips inline,
+  so a slow server head-of-line-blocks queued input (it is buffered in an unbounded
+  channel, never dropped); a transport failure of an input message surfaces only as
+  a log-only `UiEvent::Notice`, and a runtime *rejection* (`invalid_request`,
+  `unknown_window`, …) is invisible to the GUI because the client's input methods
+  are fire-and-forget and its error broadcast has no public accessor.
+- **A cancelled click forwards a press but no release.** `frame_view` connects only
+  `GestureClick::pressed`/`released` (per button); it does not handle the gesture's
+  `cancel`/`stopped`, so a press whose sequence GTK cancels is never matched by a
+  forwarded `Button` release and the remote button can stay down until the next
+  click. `pointer::PointerState` pairs only events that actually arrive.
 - **VAP capability boundary.** The GUI's only runtime channel is VAP, and VAP's
   client vocabulary is `request_frame`, `request_state`, `set_control`,
   `pointer_move`, `pointer_button`, `scroll`, `key`, `text`, `activate_window`,
