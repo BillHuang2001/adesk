@@ -203,6 +203,18 @@ No display, GPU or network. `./scripts/dev.sh cargo test -p adesk-viewer-gui` �
   runtime-chosen path, 30 fps, `auto` encoder); there is no UI to choose a path,
   frame rate or encoder. A runtime that does not support recording answers with
   an `error`, surfaced as a `recording failed: …` status line.
+- **VAP capability boundary (why there is no app menu).** The GUI's only runtime
+  channel is VAP, and VAP's entire client vocabulary is `request_frame`,
+  `request_state`, `set_control`, `pointer_move`, `pointer_button`, `scroll`,
+  `key`, `text`, `activate_window`, `start_recording`, `stop_recording`,
+  `request_recording`, `bye` (`docs/viewer.md` §4). There is **no** VAP message
+  to list installed apps, launch an app, or close a window — app discovery/launch
+  (§5.1/§5.2) and window close live in AGP only. So the UI cannot offer those
+  operations without a protocol/ARCH change; `DesktopState` carries windows only.
+- No menus, toolbar entries or `gio` keyboard accelerators exist: the header bar
+  holds a single Record/Stop toggle, the bottom bar is the window task bar, and
+  all pointer/keyboard/text input is implicit on the frame view (no on-screen
+  control or hint for it).
 
 ## Status
 Implemented and green: `run()`, the GTK application (frame view, task bar,
