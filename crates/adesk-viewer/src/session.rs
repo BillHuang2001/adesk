@@ -21,7 +21,8 @@ use std::time::Duration;
 
 use adesk_core::ErrorCode;
 use adesk_viewer_proto::{
-    check_version, decode_client, encode_server, ClientMessage, ServerMessage, ViewerHello,
+    check_version, decode_client, encode_server, AppEntry, ClientMessage, LaunchOutcome,
+    ServerMessage, ViewerHello,
 };
 use tokio::io::{AsyncBufRead, AsyncRead, AsyncWrite, BufReader};
 use tokio::time::Instant;
@@ -324,6 +325,11 @@ where
         ClientMessage::ActivateWindow { window_id } => {
             apply_input(backend, write, ViewerInput::ActivateWindow { window_id }).await
         }
+        // Runtime-native window management (§5), ordered and acknowledged exactly
+        // like input and never synthesized input.
+        ClientMessage::CloseWindow { window_id } => {
+            apply_input(backend, write, ViewerInput::CloseWindow { window_id }).await
+        }
         // Advisory control handshake (§5).
         ClientMessage::SetControl { owner } => {
             match backend.set_control(owner).await {
@@ -358,6 +364,18 @@ where
         ClientMessage::RequestRecording { id } => {
             let result = backend.recording_status().await;
             answer_recording(write, id, result).await?;
+            Ok(Disposition::Continue)
+        }
+        // Application discovery and launch (§4, §5). Like the recording controls
+        // each reply echoes the request id, so the viewer can correlate it.
+        ClientMessage::ListApps { id, query } => {
+            let result = backend.list_apps(query).await;
+            answer_apps(write, id, result).await?;
+            Ok(Disposition::Continue)
+        }
+        ClientMessage::LaunchApp { id, app_id } => {
+            let result = backend.launch_app(app_id).await;
+            answer_launch(write, id, result).await?;
             Ok(Disposition::Continue)
         }
         // The viewer is leaving: acknowledge with `bye` and close (§4).
@@ -452,6 +470,60 @@ where
 {
     match result {
         Ok(status) => send(write, &ServerMessage::Recording { id, status }).await,
+        Err(error) => {
+            send_error_id(
+                write,
+                error.code_or(ErrorCode::Internal),
+                error.to_string(),
+                id,
+            )
+            .await
+        }
+    }
+}
+
+/// Answers a `list_apps` request with the backend's registry entries, exporting
+/// a backend failure as a VAP `error` that echoes the request id
+/// (`docs/viewer.md` §4, §6).
+///
+/// The entries are sent as `apps`; the failure keeps its AGP code
+/// (`not_supported` for a runtime without an app registry), so the viewer can
+/// distinguish an empty registry from an unsupported one.
+async fn answer_apps<W>(write: &mut W, id: Option<u64>, result: Result<Vec<AppEntry>>) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match result {
+        Ok(apps) => send(write, &ServerMessage::Apps { id, apps }).await,
+        Err(error) => {
+            send_error_id(
+                write,
+                error.code_or(ErrorCode::Internal),
+                error.to_string(),
+                id,
+            )
+            .await
+        }
+    }
+}
+
+/// Answers a `launch_app` request with the backend's launch outcome, exporting a
+/// backend failure as a VAP `error` that echoes the request id
+/// (`docs/viewer.md` §4, §6).
+///
+/// The outcome is sent as `launch_result`; the failure keeps its AGP code, so an
+/// unknown application id stays distinguishable from a runtime that cannot launch
+/// applications at all.
+async fn answer_launch<W>(
+    write: &mut W,
+    id: Option<u64>,
+    result: Result<LaunchOutcome>,
+) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    match result {
+        Ok(result) => send(write, &ServerMessage::LaunchResult { id, result }).await,
         Err(error) => {
             send_error_id(
                 write,

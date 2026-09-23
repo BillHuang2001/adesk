@@ -284,9 +284,10 @@ enum RawLineKind {
 /// VAP messages (`adesk-viewer-proto`) are flat JSON objects discriminated by a
 /// string `"type"` field; the VAP client tags are `hello`, `request_frame`,
 /// `request_state`, `pointer_move`, `pointer_button`, `scroll`, `key`, `text`,
-/// `activate_window`, `set_control`, `bye`, `start_recording`,
-/// `stop_recording` and `request_recording` — and even an *unknown* tag keeps
-/// the `"type"` string. AGP frames are discriminated by `method`/`event`/`id`
+/// `activate_window`, `close_window`, `set_control`, `bye`, `start_recording`,
+/// `stop_recording`, `request_recording`, `list_apps` and `launch_app` — and even
+/// an *unknown* tag keeps the `"type"` string. AGP frames are discriminated by
+/// `method`/`event`/`id`
 /// (`adesk_proto::Frame::from_value`) and never carry `"type"`, so a string
 /// `"type"` on an otherwise unusable line is a viewer's signature. The line is
 /// not required to be a *valid* VAP message (a real viewer's first line always
@@ -493,11 +494,14 @@ mod tests {
             "key",
             "text",
             "activate_window",
+            "close_window",
             "set_control",
             "bye",
             "start_recording",
             "stop_recording",
             "request_recording",
+            "list_apps",
+            "launch_app",
         ] {
             let line = format!(r#"{{"type":"{tag}"}}"#);
             assert_eq!(classify_raw_line(&line), RawLineKind::Viewer, "tag: {tag}");

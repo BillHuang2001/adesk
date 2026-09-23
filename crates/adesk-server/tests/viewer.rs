@@ -11,6 +11,9 @@
 //! | [`viewer_input_reaches_the_active_toplevel_through_the_seat`] | §4/§5 the important one: with a real `WaylandTestClient` toplevel activated over AGP, a viewer `pointer_button` and `key` each answer an `input_ack` with a real `ActionId`, and the *client* observes the delivered input in its own `wl_pointer`/`wl_keyboard` history (the AGP §5.5 seat path, no viewer-only shortcut) |
 //! | [`viewer_activate_window_switches_the_active_toplevel`] | §4/§5 `activate_window` is runtime-native: with two real toplevels mapped, activating the non-active one answers an `input_ack` with a real `ActionId` and the next `state` reports it as the active window (the AGP §5.3 path, not synthesized input) |
 //! | [`viewer_activate_unknown_window_answers_an_error_and_keeps_the_connection`] | §4/§5/§6 activating an unknown id answers a VAP `error` with code `unknown_window` (the AGP code survives) and the connection stays usable |
+//! | [`viewer_list_apps_filters_registry_entries_and_launch_app_reports_the_launch`] | §4/§5 `list_apps` projects the registry (id/name/icon/categories, case-insensitive query filter, `include_hidden=false`) and `launch_app` spawns a fixture by registry id and reports a real `launch_id` with no observer action and no window id at reply time (`unknown_app` for an unknown id) |
+//! | [`viewer_launch_app_window_is_discovered_through_state`] | §4/§5 the launched app's window (`window_id: null` at reply time) is discovered by polling `state`, never by a fabricated id |
+//! | [`viewer_close_window_is_runtime_native_and_unknown_ids_are_unknown_window`] | §4/§5/§6 `close_window` answers an `input_ack` with a real `ActionId` (the AGP §5.3 path, no viewer-only shortcut), and an unknown id answers a VAP `error` carrying `unknown_window` while the connection stays usable |
 //! | [`without_viewer_keeps_the_agp_endpoint_and_binds_no_viewer_socket`] | `without_viewer()`: `viewer_socket_path()` is `None`, no viewer socket file exists beside the AGP socket, AGP still serves and the runtime shuts down cleanly |
 //! | [`shutdown_removes_the_viewer_socket_and_a_new_runtime_can_rebind_the_path`] | teardown removes the viewer *and* AGP socket files, and a fresh runtime binds the very same viewer path (`with_viewer_socket`) |
 //! | [`input_without_a_toplevel_answers_a_vap_error_and_keeps_the_connection`] | §6 an input with no active window is answered with a VAP `error` (`invalid_request`) — not a disconnect — and the connection stays usable |
@@ -42,19 +45,22 @@ mod common;
 use std::time::Duration;
 
 use adesk_client::Client;
-use adesk_core::{Button, ButtonState, ErrorCode, Size, WindowId};
+use adesk_core::{AppId, Button, ButtonState, ErrorCode, Size, WindowId};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_testkit::{
     ButtonState as RecordedButtonState, FillPattern, KeyState as RecordedKeyState, KeyboardEvent,
     PointerEvent, ToplevelSpec, WaylandTestClient, BTN_LEFT, KEY_C, KEY_LEFTCTRL,
 };
-use adesk_viewer::{RecordRequest, ViewerError};
+use adesk_viewer::{RecordRequest, ViewerClient, ViewerError};
 use adesk_viewer_proto::{
-    encode_client, ClientMessage, KeyAction, RecordingEncoder, ViewerHello, PROTOCOL_VERSION,
+    encode_client, AppEntry, ClientMessage, KeyAction, RecordingEncoder, ViewerHello,
+    PROTOCOL_VERSION,
 };
 use futures::StreamExt;
 
-use common::{expect_ok, output_size, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH};
+use common::{
+    expect_ok, output_size, write_desktop_entry, TestRuntime, OUTPUT_HEIGHT, OUTPUT_WIDTH,
+};
 
 /// Every bounded wait and deadline in this file.
 const DEADLINE: Duration = Duration::from_secs(10);
@@ -64,6 +70,34 @@ const APP_ID: &str = "org.example.adesk.viewer";
 
 /// `app_id` of the second toplevel the `activate_window` test maps.
 const SECOND_APP_ID: &str = "org.example.adesk.viewer.second";
+
+/// `app_id` of the fixture the app/launch cases list and launch, and of the
+/// toplevel whose window those cases discover through `state`.
+const LAUNCH_APP_ID: &str = "org.example.adesk.viewer.launch";
+
+/// A second listable fixture id, so the `list_apps` query has an entry to exclude.
+const OTHER_APP_ID: &str = "org.example.adesk.viewer.other";
+
+/// The launched fixture entry: listable, launchable (`Exec=true` spawns `true`
+/// from `PATH`, so no application needs to be installed) and carrying every
+/// field `list_apps` projects.
+const LAUNCH_ENTRY: &str = "\
+[Desktop Entry]
+Type=Application
+Name=Viewer Launch Fixture
+Exec=true
+Icon=viewer-launch
+Categories=Utility;Viewer;
+";
+
+/// The second listable fixture entry (no icon, a single category).
+const OTHER_ENTRY: &str = "\
+[Desktop Entry]
+Type=Application
+Name=Viewer Other Fixture
+Exec=true
+Categories=Utility;
+";
 
 /// The normalized output centre a viewer input targets (the window is tiled to
 /// fill the output, so an output fraction always lands inside it).
@@ -974,4 +1008,332 @@ fn recording_gpu_encoder_without_hardware_is_not_supported() {
     runtime
         .block_on_timeout(observer.close())
         .expect("the observer connection closes cleanly");
+}
+
+/// The ids of `apps`, in the order the runtime returned them.
+fn app_ids(apps: &[AppEntry]) -> Vec<&str> {
+    apps.iter().map(|app| app.id.as_str()).collect()
+}
+
+/// Polls the viewer's `request_state` until a window owned by `app_id` appears,
+/// returning its id.
+///
+/// A mapped toplevel is registered asynchronously with respect to the server's
+/// bookkeeping, so the id is awaited rather than assumed; the poll is
+/// deadline-bounded ([`common::eventually`]), never a sleep.
+///
+/// # Panics
+///
+/// Panics when no such window was observed before [`DEADLINE`].
+fn wait_for_state_window(runtime: &TestRuntime, viewer: &ViewerClient, app_id: &AppId) -> WindowId {
+    let mut found: Option<WindowId> = None;
+    let appeared = common::eventually(DEADLINE, || {
+        let state = runtime
+            .block_on_timeout(viewer.request_state())
+            .expect("request_state is answered while the runtime serves");
+        found = state
+            .windows
+            .iter()
+            .find(|window| window.app_id.as_ref() == Some(app_id))
+            .map(|window| window.id);
+        found.is_some()
+    });
+    assert!(
+        appeared,
+        "the viewer must observe a window with app id `{}` through `state`",
+        app_id.as_str()
+    );
+    found.expect("`appeared` is only true once a window was found")
+}
+
+/// §4/§5 application discovery and launch: `list_apps` projects the registry the
+/// viewer asks for, and `launch_app` starts a fixture by registry id.
+///
+/// No application is installed: the fixture's `Exec=true` spawns `true` from
+/// `PATH` through the real AGP §5.2 launch path.
+#[test]
+fn viewer_list_apps_filters_registry_entries_and_launch_app_reports_the_launch() {
+    let dir = tempfile::TempDir::new().expect("create the fixture temp dir");
+    write_desktop_entry(
+        dir.path(),
+        "org.example.adesk.viewer.launch.desktop",
+        LAUNCH_ENTRY,
+    );
+    write_desktop_entry(
+        dir.path(),
+        "org.example.adesk.viewer.other.desktop",
+        OTHER_ENTRY,
+    );
+    let runtime = TestRuntime::start_with_app_dirs(vec![dir.path().to_path_buf()]);
+    let client = runtime.connect_viewer();
+
+    // Unfiltered: both fixture entries, sorted by id, every field projected.
+    let all = runtime
+        .block_on_timeout(client.list_apps(None))
+        .expect("the runtime answers list_apps");
+    assert_eq!(
+        app_ids(&all),
+        vec![LAUNCH_APP_ID, OTHER_APP_ID],
+        "list_apps returns the listable fixture entries, sorted by id"
+    );
+    assert_eq!(all[0].name, "Viewer Launch Fixture", "the entry name");
+    assert_eq!(
+        all[0].icon.as_deref(),
+        Some("viewer-launch"),
+        "the entry icon"
+    );
+    assert_eq!(
+        all[0].categories,
+        vec!["Utility".to_owned(), "Viewer".to_owned()],
+        "the raw Categories entries"
+    );
+    assert_eq!(
+        all[1].icon, None,
+        "an entry without an Icon projects `None`"
+    );
+
+    // Filtered: the query matches an entry's id *or* name, case-insensitively.
+    let filtered = runtime
+        .block_on_timeout(client.list_apps(Some("OTHER".to_owned())))
+        .expect("the runtime answers a filtered list_apps");
+    assert_eq!(
+        app_ids(&filtered),
+        vec![OTHER_APP_ID],
+        "the query narrows the registry to the matching entry"
+    );
+    assert_eq!(
+        filtered[0].name, "Viewer Other Fixture",
+        "the filtered entry is fully projected"
+    );
+
+    let none = runtime
+        .block_on_timeout(client.list_apps(Some("zzz-no-match".to_owned())))
+        .expect("the runtime answers a non-matching list_apps");
+    assert!(none.is_empty(), "a non-matching query returns no entries");
+
+    // Launch by registry id: a real launch id, and nothing the runtime did not do.
+    let app_id = AppId::from(LAUNCH_APP_ID);
+    let outcome = runtime
+        .block_on_timeout(client.launch_app(app_id.clone()))
+        .expect("the runtime launches the fixture app");
+    assert_eq!(
+        outcome.app_id, app_id,
+        "the outcome echoes the launched app"
+    );
+    assert!(
+        outcome.launch_id.0 > 0,
+        "a launch records a real launch id: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.action_id, None,
+        "the launch path records no observer action, so none is reported: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.window_id, None,
+        "launch_app returns before the window maps, so no window id is fabricated: {outcome:?}"
+    );
+
+    // An id the registry does not know keeps its AGP `unknown_app` code.
+    let missing = runtime
+        .block_on_timeout(client.launch_app(AppId::from("org.example.adesk.viewer.absent")))
+        .expect_err("launching an unknown app is an error");
+    assert_backend_code(
+        &missing,
+        ErrorCode::UnknownApp,
+        "launch_app on an unknown id",
+    );
+
+    runtime
+        .block_on_timeout(client.close())
+        .expect("the viewer connection closes cleanly");
+}
+
+/// §4/§5 the launched window is discovered through `state`.
+///
+/// `launch_app` answers before the launched window maps (`window_id: null`), so
+/// the viewer must learn about that window from `request_state`/`state`. A
+/// display-free test cannot make the spawned fixture render a toplevel, so the
+/// window is mapped by the in-repo Wayland test client under the launched app's
+/// id — the runtime-side discovery (never a fabricated id) is what is asserted.
+#[test]
+fn viewer_launch_app_window_is_discovered_through_state() {
+    let dir = tempfile::TempDir::new().expect("create the fixture temp dir");
+    write_desktop_entry(
+        dir.path(),
+        "org.example.adesk.viewer.launch.desktop",
+        LAUNCH_ENTRY,
+    );
+    let mut runtime = TestRuntime::start_with_app_dirs(vec![dir.path().to_path_buf()]);
+    let display = runtime
+        .wayland_display_name()
+        .expect("Server::start awaits compositor readiness, so the display name is known");
+    let wayland = WaylandTestClient::connect_in(runtime.runtime_dir(), &display)
+        .unwrap_or_else(|error| panic!("connect the Wayland test client to `{display}`: {error}"));
+
+    let viewer = runtime.connect_viewer();
+    let before = runtime
+        .block_on_timeout(viewer.request_state())
+        .expect("request_state is answered on a fresh runtime");
+    assert!(
+        before.windows.is_empty(),
+        "no window exists before the launch: {before:?}"
+    );
+
+    let app_id = AppId::from(LAUNCH_APP_ID);
+    let outcome = runtime
+        .block_on_timeout(viewer.launch_app(app_id.clone()))
+        .expect("the runtime launches the fixture app");
+    assert!(
+        outcome.launch_id.0 > 0,
+        "the launch is recorded: {outcome:?}"
+    );
+    assert_eq!(
+        outcome.window_id, None,
+        "the reply carries no window id: the launch returns before the window maps"
+    );
+
+    // The window the viewer discovers: mapped after the launch, under the
+    // launched app's id.
+    let window = wayland
+        .create_toplevel(ToplevelSpec::new(
+            LAUNCH_APP_ID,
+            "Launched fixture",
+            Size::new(320, 200),
+        ))
+        .expect("the runtime accepts a toplevel");
+    window
+        .wait_for_configure(DEADLINE)
+        .expect("the tiling policy configures the mapped toplevel");
+    window
+        .apply_configure()
+        .expect("the configure is acknowledged");
+    window
+        .commit_frame(FillPattern::default())
+        .expect("the toplevel commits a buffer");
+
+    let window_id = wait_for_state_window(&runtime, &viewer, &app_id);
+    let state = runtime
+        .block_on_timeout(viewer.request_state())
+        .expect("request_state is answered after the window appears");
+    assert_eq!(
+        state.windows.len(),
+        1,
+        "the viewer sees exactly the launched window: {state:?}"
+    );
+    assert_eq!(
+        state.active_window_id,
+        Some(window_id),
+        "the single visible toplevel is the active window: {state:?}"
+    );
+
+    runtime
+        .block_on_timeout(viewer.close())
+        .expect("the viewer connection closes cleanly");
+    runtime
+        .block_on(wayland.close())
+        .expect("the Wayland test client closes cleanly");
+    runtime.shutdown().expect("the runtime shuts down cleanly");
+}
+
+/// §4/§5/§6 `close_window` is runtime-native — it closes a real window through
+/// the AGP §5.3 path (the client observes the `xdg_toplevel.close`) — and an
+/// unknown id answers a VAP `error` carrying `unknown_window` while the
+/// connection stays usable.
+#[test]
+fn viewer_close_window_is_runtime_native_and_unknown_ids_are_unknown_window() {
+    let mut runtime = TestRuntime::start();
+    let display = runtime
+        .wayland_display_name()
+        .expect("Server::start awaits compositor readiness, so the display name is known");
+    let wayland = WaylandTestClient::connect_in(runtime.runtime_dir(), &display)
+        .unwrap_or_else(|error| panic!("connect the Wayland test client to `{display}`: {error}"));
+
+    let window = wayland
+        .create_toplevel(ToplevelSpec::new(
+            APP_ID,
+            "Viewer close",
+            Size::new(320, 200),
+        ))
+        .expect("the runtime accepts a toplevel");
+    window
+        .wait_for_configure(DEADLINE)
+        .expect("the tiling policy configures the mapped toplevel");
+    window
+        .apply_configure()
+        .expect("the configure is acknowledged");
+    window
+        .commit_frame(FillPattern::default())
+        .expect("the toplevel commits a buffer");
+
+    let viewer = runtime.connect_viewer();
+    let window_id = wait_for_state_window(&runtime, &viewer, &AppId::from(APP_ID));
+
+    // Input is fire-and-forget and the ack fan-out is a broadcast channel, so the
+    // ack stream is subscribed *before* the message is sent.
+    let (ack_id, action) = runtime
+        .block_on_timeout(async {
+            // `input_ack()` returns a non-`Unpin` stream, so it is boxed to poll it.
+            let mut acks = Box::pin(viewer.input_ack());
+            viewer
+                .close_window(window_id)
+                .await
+                .expect("the viewer close_window is written");
+            acks.next().await
+        })
+        .expect("the runtime acknowledges the viewer close_window");
+    assert_eq!(ack_id, None, "VAP input carries no client id");
+    assert!(
+        action.0 > 0,
+        "a runtime-native close records a real AGP action id, got {action:?}"
+    );
+    // The delivery proof: the *client* observes the close request, so the call
+    // really went through the compositor's window path.
+    assert!(
+        common::eventually(DEADLINE, || window.close_requested()),
+        "the client observes the viewer's close_window as an xdg_toplevel.close"
+    );
+
+    // An unknown id keeps its AGP `unknown_window` code and the connection open.
+    let mut raw = runtime.connect_viewer_raw();
+    runtime
+        .block_on_timeout(raw.send_line(&encode_client(&ClientMessage::Hello(ViewerHello::new()))));
+    let hello = runtime.block_on_timeout(raw.expect_json(DEADLINE));
+    assert_eq!(
+        hello["type"], "hello",
+        "the handshake is answered before anything else: {hello}"
+    );
+
+    runtime.block_on_timeout(raw.send_line(&encode_client(&ClientMessage::CloseWindow {
+        window_id: WindowId(999_999),
+    })));
+    let error = runtime
+        .block_on_timeout(raw.expect_json_matching(DEADLINE, |value| value["type"] == "error"));
+    assert_eq!(
+        error["code"], "unknown_window",
+        "closing an unknown id keeps its AGP `unknown_window` code: {error}"
+    );
+    assert!(
+        error["message"]
+            .as_str()
+            .is_some_and(|message| !message.is_empty()),
+        "the error carries a human-readable message: {error}"
+    );
+
+    // The connection is still usable: the next request is answered normally.
+    runtime
+        .block_on_timeout(raw.send_line(&encode_client(&ClientMessage::RequestState { id: None })));
+    let state = runtime
+        .block_on_timeout(raw.expect_json_matching(DEADLINE, |value| value["type"] == "state"));
+    assert!(
+        state["windows"].is_array(),
+        "the refused viewer's connection stays usable: {state}"
+    );
+
+    runtime
+        .block_on_timeout(viewer.close())
+        .expect("the viewer connection closes cleanly");
+    runtime
+        .block_on(wayland.close())
+        .expect("the Wayland test client closes cleanly");
+    runtime.shutdown().expect("the runtime shuts down cleanly");
 }

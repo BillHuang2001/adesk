@@ -3,18 +3,20 @@
 
 mod common;
 
-use adesk_core::{Button, ButtonState, ErrorCode, OverlayKind, Size, WindowId};
+use adesk_core::{AppId, Button, ButtonState, ErrorCode, LaunchId, OverlayKind, Size, WindowId};
 use adesk_proto::{ImageFormat, ImagePayload, KeySpec, RendererKind};
 use adesk_viewer_proto::{
-    check_version, is_compatible_version, ClientMessage, ControlOwner, CursorState, KeyAction,
-    RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, ViewerFrame, ViewerHello,
-    ViewerProtoError, DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS, DEFAULT_RECORD_FPS,
-    PROTOCOL_VERSION,
+    check_version, is_compatible_version, AppEntry, ClientMessage, ControlOwner, CursorState,
+    KeyAction, LaunchOutcome, RecordingEncoder, RecordingStatus, ServerHello, ServerMessage,
+    ViewerFrame, ViewerHello, ViewerProtoError, DEFAULT_MIN_INTERVAL_MS, DEFAULT_OVERLAYS,
+    DEFAULT_RECORD_FPS, PROTOCOL_VERSION,
 };
 use common::{
-    activate_window_message, bye_message, bye_server_message, bye_without_reason, client,
-    control_message, error_message, frame_message, hello_message, input_ack_with_id,
-    input_ack_without_id, key_tap_message, pointer_button_pressed, pointer_move_message,
+    activate_window_message, apps_empty, apps_message, bye_message, bye_server_message,
+    bye_without_reason, client, close_window_message, control_message, error_message,
+    frame_message, hello_message, input_ack_with_id, input_ack_without_id, key_tap_message,
+    launch_app_message, launch_app_without_id, launch_result_message, launch_result_pending,
+    list_apps_message, list_apps_unfiltered, pointer_button_pressed, pointer_move_message,
     recording_idle, recording_message, request_frame_with_id, request_frame_without_id,
     request_recording_message, request_state_with_id, request_state_without_id, scroll_message,
     server, server_hello_message, set_control_message, start_recording_message,
@@ -254,6 +256,36 @@ fn client_stop_and_request_recording_golden() {
 }
 
 #[test]
+fn client_list_launch_and_close_golden() {
+    // `list_apps`: the optional `query` is omitted when absent.
+    assert_eq!(
+        client(&list_apps_message()),
+        json!({"type": "list_apps", "id": 1, "query": "fire"})
+    );
+    let value = client(&list_apps_unfiltered());
+    assert_eq!(value, json!({"type": "list_apps"}));
+    assert!(value.get("id").is_none(), "no `id` when absent");
+    assert!(value.get("query").is_none(), "no `query` when absent");
+
+    // `launch_app`: the required `app_id` beside the optional `id`.
+    assert_eq!(
+        client(&launch_app_message()),
+        json!({"type": "launch_app", "id": 2, "app_id": "org.example.Editor"})
+    );
+    let value = client(&launch_app_without_id());
+    assert_eq!(
+        value,
+        json!({"type": "launch_app", "app_id": "org.example.Editor"})
+    );
+    assert!(value.get("id").is_none(), "no `id` when absent");
+
+    // `close_window`: a flat object with exactly the one `window_id` field.
+    let value = client(&close_window_message());
+    assert_eq!(value, json!({"type": "close_window", "window_id": 17}));
+    assert!(value.get("id").is_none(), "close_window carries no `id`");
+}
+
+#[test]
 fn client_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "x": 1});
     assert_eq!(client(&unknown_client_message()), value);
@@ -297,6 +329,9 @@ fn client_message_type_tags() {
         (start_recording_minimal(), "start_recording"),
         (stop_recording_message(), "stop_recording"),
         (request_recording_message(), "request_recording"),
+        (list_apps_unfiltered(), "list_apps"),
+        (launch_app_without_id(), "launch_app"),
+        (close_window_message(), "close_window"),
         (
             ClientMessage::Unknown {
                 message_type: "mystery".to_owned(),
@@ -472,6 +507,107 @@ fn server_recording_golden() {
 }
 
 #[test]
+fn server_apps_golden() {
+    // `AppEntry` with an icon: `id`/`name`/`icon`/`categories` all present.
+    assert_eq!(
+        server(&apps_message()),
+        json!({
+            "type": "apps",
+            "id": 1,
+            "apps": [{
+                "id": "org.mozilla.firefox",
+                "name": "Firefox",
+                "icon": "firefox",
+                "categories": ["Network"]
+            }]
+        })
+    );
+
+    // `AppEntry` without an icon: the `icon` field is omitted, never null.
+    let entry = AppEntry {
+        id: AppId::from("org.example.Editor"),
+        name: "Editor".to_owned(),
+        icon: None,
+        categories: vec!["Utility".to_owned(), "TextEditor".to_owned()],
+    };
+    let value = server(&ServerMessage::Apps {
+        id: None,
+        apps: vec![entry],
+    });
+    assert_eq!(
+        value,
+        json!({
+            "type": "apps",
+            "apps": [{
+                "id": "org.example.Editor",
+                "name": "Editor",
+                "categories": ["Utility", "TextEditor"]
+            }]
+        })
+    );
+    assert!(value.get("id").is_none(), "no `id` when absent");
+    assert!(
+        value["apps"][0].get("icon").is_none(),
+        "`icon` omitted, never null"
+    );
+
+    // An empty result is still a valid `apps` message.
+    assert_eq!(server(&apps_empty()), json!({"type": "apps", "apps": []}));
+}
+
+#[test]
+fn server_launch_result_golden() {
+    // Flattened: the outcome fields sit at the top level beside `id`.
+    assert_eq!(
+        server(&launch_result_message()),
+        json!({
+            "type": "launch_result",
+            "id": 2,
+            "app_id": "org.example.Editor",
+            "launch_id": 3,
+            "action_id": 582,
+            "window_id": 17
+        })
+    );
+
+    // Absent optional outcome fields are omitted, never null; so is `id`.
+    let value = server(&launch_result_pending());
+    assert_eq!(
+        value,
+        json!({
+            "type": "launch_result",
+            "app_id": "org.example.Editor",
+            "launch_id": 3
+        })
+    );
+    assert!(value.get("id").is_none(), "no `id` when absent");
+    assert!(
+        value.get("action_id").is_none(),
+        "no `action_id` when absent"
+    );
+    assert!(
+        value.get("window_id").is_none(),
+        "no `window_id` when absent"
+    );
+
+    // `LaunchOutcome` with only `window_id` set (an action id is not always known).
+    assert_eq!(
+        serde_json::to_value(&LaunchOutcome {
+            app_id: AppId::from("org.example.Editor"),
+            launch_id: LaunchId(3),
+            action_id: None,
+            window_id: Some(WindowId(17)),
+        })
+        .unwrap(),
+        json!({
+            "app_id": "org.example.Editor",
+            "launch_id": 3,
+            "window_id": 17
+        })
+    );
+}
+
+#[test]
 fn server_unknown_is_emitted_verbatim() {
     let value = json!({"type": "future_thing", "y": true});
     assert_eq!(server(&unknown_server_message()), value);
@@ -523,6 +659,8 @@ fn server_message_type_tags() {
             "error",
         ),
         (recording_idle(), "recording"),
+        (apps_empty(), "apps"),
+        (launch_result_pending(), "launch_result"),
         (
             ServerMessage::Bye {
                 reason: "x".to_owned(),

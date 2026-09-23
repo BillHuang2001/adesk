@@ -17,7 +17,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use adesk_core::{
-    ActionId, AppId, Button, ButtonState, ErrorCode, Rect, Size, WindowId, WindowInfo, WindowState,
+    ActionId, AppId, Button, ButtonState, ErrorCode, LaunchId, Rect, Size, WindowId, WindowInfo,
+    WindowState,
 };
 use adesk_proto::{KeySpec, RendererKind};
 use adesk_viewer::Result as ViewerResult;
@@ -26,8 +27,8 @@ use adesk_viewer::{
     ViewerTarget,
 };
 use adesk_viewer_proto::{
-    encode_server, ControlOwner, CursorState, DesktopState, KeyAction, RecordingEncoder,
-    RecordingStatus, ServerHello, ServerMessage, PROTOCOL_VERSION,
+    encode_server, AppEntry, ControlOwner, CursorState, DesktopState, KeyAction, LaunchOutcome,
+    RecordingEncoder, RecordingStatus, ServerHello, ServerMessage, PROTOCOL_VERSION,
 };
 use futures::pin_mut;
 use futures::StreamExt;
@@ -102,20 +103,44 @@ fn recording_status() -> RecordingStatus {
         .with_counts(12, 400)
 }
 
+/// The registry entry the client suite's fake reports and the tests expect back.
+fn app_entry() -> AppEntry {
+    AppEntry {
+        id: AppId::from("org.example.Fake"),
+        name: "Fake App".to_owned(),
+        icon: Some("fake".to_owned()),
+        categories: vec!["Utility".to_owned()],
+    }
+}
+
+/// The launch outcome the client suite's fake reports for `app_id` (the canned
+/// outcome the harness installs, with the runtime's window/action attached).
+fn launch_outcome(app_id: AppId) -> LaunchOutcome {
+    LaunchOutcome {
+        app_id,
+        launch_id: LaunchId(4),
+        action_id: Some(ACTION),
+        window_id: Some(WindowId(7)),
+    }
+}
+
 /// Binds a Unix socket in a fresh temp dir and spawns an accept-and-serve task.
 fn start_server() -> Harness {
     let dir = tempfile::tempdir().expect("a temp dir");
     let path = dir.path().join("viewer.sock");
     let listener = UnixListener::bind(&path).expect("bind the unix socket");
     // The client suite's fake: an 800×600 desktop with one active window, an
-    // advancing `ts_ms` and `ACTION` recorded for every applied input.
+    // advancing `ts_ms`, `ACTION` recorded for every applied input, one launchable
+    // application and a canned launch outcome.
     let backend = Arc::new(
         FakeBackend::default()
             .with_display(server_hello())
             .with_desktop(desktop_state())
             .with_action(ACTION)
             .with_ts_ms(None)
-            .with_recording_status(recording_status()),
+            .with_recording_status(recording_status())
+            .with_apps(vec![app_entry()])
+            .with_launch(launch_outcome(app_entry().id)),
     );
     let server_backend = Arc::clone(&backend);
     let peer_path = path.clone();
@@ -584,4 +609,130 @@ async fn connect_with_version_verification_disabled_still_completes() {
     assert_eq!(client.hello().output, Size::new(800, 600));
     assert_eq!(client.target(), &ViewerTarget::Unix(harness.path.clone()));
     assert_eq!(client.socket_path(), Some(harness.path.as_path()));
+}
+
+/// §4/§5: `list_apps` and `launch_app` round trip against the runtime, and both
+/// requests reach the backend (the query verbatim, the launch by app id).
+#[tokio::test]
+async fn app_methods_round_trip() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    let apps = tokio::time::timeout(STEP_TIMEOUT, client.list_apps(Some("fake".to_owned())))
+        .await
+        .expect("list_apps must not hang")
+        .expect("list_apps must succeed");
+    assert_eq!(apps, vec![app_entry()]);
+
+    let app_id = AppId::from("org.example.Fake");
+    let outcome = tokio::time::timeout(STEP_TIMEOUT, client.launch_app(app_id.clone()))
+        .await
+        .expect("launch_app must not hang")
+        .expect("launch_app must succeed");
+    assert_eq!(outcome, launch_outcome(app_id.clone()));
+    assert_eq!(outcome.action_id, Some(ACTION));
+
+    // An unfiltered request is answered the same way.
+    let all = tokio::time::timeout(STEP_TIMEOUT, client.list_apps(None))
+        .await
+        .expect("list_apps must not hang")
+        .expect("list_apps must succeed");
+    assert_eq!(all, vec![app_entry()]);
+
+    assert_eq!(
+        harness.backend.recorded_app_queries(),
+        vec![Some("fake".to_owned()), None]
+    );
+    assert_eq!(harness.backend.recorded_launches(), vec![app_id]);
+}
+
+/// §4/§5: `close_window` is runtime-native window management; it reaches the
+/// backend as [`ViewerInput::CloseWindow`] and is acknowledged like input.
+#[tokio::test]
+async fn close_window_reaches_the_backend_and_is_acknowledged() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // Subscribe *before* sending so the ack cannot be missed.
+    let acks = client.input_ack();
+    pin_mut!(acks);
+
+    client
+        .close_window(WindowId(9))
+        .await
+        .expect("close_window");
+
+    let ack = tokio::time::timeout(STEP_TIMEOUT, acks.next())
+        .await
+        .expect("input_ack must not hang")
+        .expect("the ack stream must stay open");
+    assert_eq!(ack, (None, ACTION));
+
+    assert_eq!(
+        harness.backend.recorded_inputs(),
+        vec![ViewerInput::CloseWindow {
+            window_id: WindowId(9)
+        }]
+    );
+}
+
+/// Regression: a `list_apps` request the server rejects with a VAP `error` must
+/// consume its own reply-FIFO registration. A stale waiter left at the head of
+/// the FIFO would swallow the *next* `apps` reply, so the second request on the
+/// same connection would hang forever. Driving both requests through one
+/// connection is the guard.
+#[tokio::test]
+async fn a_rejected_list_apps_request_does_not_swallow_the_next_reply() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // The first request is answered with a VAP `error` (no `apps` reply).
+    harness.backend.set_fail_apps(true);
+    let error = tokio::time::timeout(STEP_TIMEOUT, client.list_apps(None))
+        .await
+        .expect("the rejected request must not hang")
+        .expect_err("an unsupported registry must fail");
+    match error {
+        ViewerError::Backend { code, .. } => assert_eq!(code, ErrorCode::NotSupported),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+
+    // The second request is accepted: it must resolve within the timeout rather
+    // than be swallowed by a stale waiter from the first.
+    harness.backend.set_fail_apps(false);
+    let apps = tokio::time::timeout(STEP_TIMEOUT, client.list_apps(None))
+        .await
+        .expect("a request after a rejected one must not hang")
+        .expect("the accepted request must succeed");
+    assert_eq!(apps, vec![app_entry()]);
+}
+
+/// The same regression for the `launch_app`/`launch_result` reply path: a launch
+/// the server rejects with a VAP `error` must consume its own FIFO registration
+/// so the next launch still resolves.
+#[tokio::test]
+async fn a_rejected_launch_request_does_not_swallow_the_next_reply() {
+    let harness = start_server();
+    let client = connect(&harness).await;
+
+    // The first request is answered with a VAP `error` (no `launch_result`).
+    harness.backend.set_fail_launch(true);
+    let app_id = AppId::from("org.example.Fake");
+    let error = tokio::time::timeout(STEP_TIMEOUT, client.launch_app(app_id.clone()))
+        .await
+        .expect("the rejected request must not hang")
+        .expect_err("a failed launch must fail");
+    match error {
+        ViewerError::Backend { code, .. } => assert_eq!(code, ErrorCode::Internal),
+        other => panic!("expected a backend error, got {other:?}"),
+    }
+
+    // The second request is accepted: it must resolve within the timeout rather
+    // than be swallowed by a stale waiter from the first.
+    harness.backend.set_fail_launch(false);
+    let outcome = tokio::time::timeout(STEP_TIMEOUT, client.launch_app(app_id.clone()))
+        .await
+        .expect("a request after a rejected one must not hang")
+        .expect("the accepted request must succeed");
+    assert_eq!(outcome, launch_outcome(app_id));
 }
