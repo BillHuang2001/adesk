@@ -24,6 +24,9 @@ and one selected rendered frame).
   directly; only genuine application input goes through the Wayland seat.
 - Rendering is on demand: buffers are retained as state, and a readback happens only
   when an observation or inspection frame is requested.
+- Beyond pixels, the runtime is a **programmable event source** and a **text sensor**: an
+  agent can idle on a notification/event inbox and read a window's toolkit accessibility
+  tree, and a human can watch and record the desktop over the VAP viewer protocol.
 
 ## What it is for
 
@@ -52,13 +55,19 @@ The `adesk-server` binary accepts:
 | `--socket <PATH>` | see below | AGP Unix socket path |
 | `--output <WxH>` | `1280x800` | Virtual output size |
 | `--renderer auto\|gl\|pixman` | `auto` | `pixman` forces the software path (GPU-less containers) |
+| `--accessibility auto\|off` | `auto` | Accessibility backend; `off` never touches D-Bus |
+| `--viewer-socket <PATH>` | AGP sibling | Viewer (VAP) Unix socket |
+| `--viewer-tcp <HOST:PORT>` | — | Opt-in TCP transport for the viewer |
+| `--no-viewer` | — | Disable the viewer (VAP) endpoint |
+| `--recordings-dir <DIR>` | `<socket dir>/adesk-recordings` | Directory for default-named recordings |
 | `--apps-dir <DIR>` | — | Extra `.desktop` search dirs (repeatable) |
 | `--log <FILTER>` | `info` | `tracing-subscriber` env-filter directive |
 | `--xkb-layout/-variant/-model/-rules` | — | Keyboard setup |
 
 Every flag has an `ADESK_*` environment fallback (`ADESK_SOCKET`, `ADESK_OUTPUT`,
-`ADESK_RENDERER`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`), so the binary is
-service/container friendly. Example invocations:
+`ADESK_RENDERER`, `ADESK_ACCESSIBILITY`, `ADESK_VIEWER_SOCKET`, `ADESK_VIEWER_TCP`,
+`ADESK_RECORDINGS_DIR`, `ADESK_APPS_DIR`, `ADESK_LOG`, `ADESK_XKB_*`), so the binary
+is service/container friendly. Example invocations:
 
 ```sh
 # Software-only, custom output and socket.
@@ -80,13 +89,18 @@ The default AGP socket path is resolved identically by server and client:
 **Transport.** AGP is plain NDJSON over a local Unix socket — no TLS and no
 authentication; isolation comes from filesystem permissions on the socket path. The
 client speaks first. `ping` returns the runtime and protocol version, the renderer in
-use, and the output size.
+use, and the output size. The server dispatcher is total over the 37 methods of
+`docs/protocol.md`; clients must not invent methods or fields outside it.
 
 **Rust client SDK** (`adesk-client`, async/tokio). Connect with
 `Client::connect_default().await?` or `Client::connect("/tmp/adesk.sock").await?`, then
 call typed async methods such as `list_apps`, `launch_app`, `list_windows`,
-`activate_window`, `observe`, `wait_for_quiet`, `click` and `type_text`. For a stream of
-typed `RuntimeEvent`s use `subscribe_events(EventFilter)`, which returns an `EventStream`.
+`activate_window`, `observe`, `wait_for_quiet`, `click` and `type_text`, the notification
+methods (`post_notification`, `list_notifications`, `close_notification`,
+`invoke_notification_action`), the idle primitive `wait_for_events`, and the
+accessibility view (`accessibility_tree`, `find_accessible`, `invoke_accessible_action`).
+For a stream of typed `RuntimeEvent`s use `subscribe_events(EventFilter)`, which returns
+an `EventStream`.
 
 ```rust
 use adesk_client::{ClickRequest, Client, EventFilter, ObserveRequest};
@@ -147,6 +161,54 @@ reads `ADESK_AGENT_PROVIDER`, `ADESK_AGENT_MODEL`, `ADESK_AGENT_BASE_URL` and
 `ADESK_AGENT_API_KEY` (falling back to `OPENAI_API_KEY`). The `openai` provider speaks
 any OpenAI-compatible `/chat/completions` endpoint; `mock` is the network-free default.
 
+**Watch mode.** `--watch` turns the agent into an idle listener: it validates the runtime
+once, then loops `wait_for_events` → feeds the wake events into the LLM context → runs the
+standing `--task` body → back to idle, so it parks on the runtime's event inbox instead of
+polling or sleeping. It is bounded by `--watch-timeout-ms` (a single idle wait),
+`--watch-max-wakeups` and `--watch-max-idle-waits` (`0` = unbounded).
+
+```sh
+# Stay idle and handle the notification each time one arrives.
+./scripts/dev.sh cargo run -p adesk-agent -- --provider mock \
+    --watch --task "Handle the notification" --watch-max-wakeups 5
+```
+
+## Notifications and reactive events
+
+The runtime is also a **programmable event source**, so an agent can stay idle by default
+and be woken when a notification or a runtime event (a user message, a task handoff)
+arrives. `adesk-notify` holds a synchronous notification store plus a reactive event
+inbox fed by the one event pump.
+
+- Four AGP §5.9 methods expose the store: `post_notification`, `list_notifications`,
+  `close_notification` and `invoke_notification_action`. Each mutation publishes a
+  `notification` / `notification_closed` / `notification_action` `RuntimeEvent` on the
+  compositor's broadcast, so the existing `subscribe_events` fan-out covers it.
+- `wait_for_events` (AGP §5.10) is the pull counterpart of a push subscription — one
+  request that answers once — so an idle agent parks on the inbox instead of polling or
+  sleeping. `adesk-agent --watch` (above) is the built-in consumer.
+
+Design record: `docs/notifications.md`.
+
+## Accessibility (text view)
+
+`adesk-a11y` gives the agent a **text** observation of a window alongside the pixel one.
+It is an AT-SPI2 client (the workspace's only D-Bus speaker) that reads a window's toolkit
+accessibility tree, correlates windows to accessible applications, and resolves element
+handles to `AccessibleId`s, so an agent can read what a window *contains* — labels, buttons,
+text fields, lists, menus — without looking at a pixel.
+
+- Three AGP §5.11 methods: `accessibility_tree`, `find_accessible` and
+  `invoke_accessible_action` (which actuates an element through the toolkit —
+  runtime-native actuation, not synthesized input).
+- `--accessibility auto|off` (env `ADESK_ACCESSIBILITY`) selects the backend: `auto`
+  (default) connects lazily on first use and degrades to `not_supported`; `off` never
+  touches D-Bus. With no backend, every §5.11 method answers `not_supported`.
+- The view is read strictly on request — there is no accessibility event stream — and the
+  one service lives off the compositor thread, owning no compositor state.
+
+Design record: `docs/accessibility.md`.
+
 ## Running in a container
 
 The repository does **not** ship a container image, Dockerfile or CI today, but the
@@ -174,12 +236,29 @@ RUN mkdir -p /run/adesk
 CMD ["adesk-server", "--renderer", "pixman", "--socket", "/run/adesk/adesk.sock"]
 ```
 
+While no container image or CI ships, Nix packaging does: `flake.nix` exposes
+`devShells.default` (the dev shell), `packages.<system>.{default,adesk}` (a
+`rustPlatform.buildRustPackage` that installs the `adesk-server`, `adesk-viewer`,
+`adesk-viewer-gui`, `adesk-machine` and `adesk-agent` binaries) and
+`nixosModules.{default,adesk}`, a systemd service module (`nix/adesk-module.nix`) that runs
+`adesk-server` with an optional companion agent.
+
 ## Inspecting as a human
 
 Two independent paths let a human observe the desktop.
 
-**Viewer (VAP).** The runtime serves a purpose-built viewer protocol (VAP v1) on a
-second listener, and the workspace ships a headless `adesk-viewer` client:
+**Viewer (VAP).** The runtime serves a purpose-built viewer protocol (VAP v1,
+implemented by `adesk-viewer-proto`) on a second listener. Two clients ship in the
+workspace; both are pure VAP clients, so the human ends up in the **same seat the agent
+drives** (a viewer action is never a special code path):
+
+- `adesk-viewer` — headless: it captures frames to PNG, replays a scripted input stream,
+  and records the desktop (`--record <FILE>`).
+- `adesk-viewer-gui` — the interactive GTK4/libadwaita front-end (the workspace's only GTK
+  crate): it streams the desktop into a window, adds a window task bar whose clicks switch
+  windows through the runtime-native VAP `activate_window` message, routes
+  pointer/key/scroll/text through the same seat path, and carries a record toggle in its
+  header.
 
 ```sh
 # One-shot capture of the current desktop to a PNG.
@@ -187,15 +266,26 @@ second listener, and the workspace ships a headless `adesk-viewer` client:
 
 # Follow the desktop, writing every frame, and replay a small input script.
 ./scripts/dev.sh cargo run -p adesk-viewer -- --follow --out-dir shots/ --input script.txt
+
+# Watch the desktop interactively (needs a real display).
+./scripts/dev.sh cargo run -p adesk-viewer-gui -- --unix /run/adesk/adesk-viewer.sock
 ```
 
 The viewer listener is a Unix socket by default at the AGP socket's sibling
 (`$XDG_RUNTIME_DIR/adesk-viewer.sock`); `--viewer-tcp <HOST:PORT>` exposes a TCP
 transport for a remote viewer and `--no-viewer` disables it. Viewer input (pointer,
 click, scroll, key, text) is applied through the **same seat path** as agent input and
-returns a normal AGP `action_id`. `adesk-viewer` is headless — it writes PNGs and reads
-input from a script — so a display-capable front-end is still needed to watch the
-desktop interactively. VAP is specified in `docs/viewer.md`.
+returns a normal AGP `action_id`. VAP is specified in `docs/viewer.md`.
+
+**Screen recording.** The same VAP connection can start and stop a recording of the
+desktop: the runtime adds the `start_recording` / `stop_recording` / `request_recording`
+client messages and the `recording` server message, backed by `adesk-recorder`. It
+always has a pure-Rust Motion-JPEG/AVI software backend that works headless, plus an
+optional GPU-accelerated H.264 backend that shells out to `ffmpeg` with a hardware
+encoder (selected only when one is actually available). `adesk-viewer --record <FILE>`
+records from the CLI and the GUI has a record toggle; a recording started without an
+explicit path lands in `--recordings-dir` / `ADESK_RECORDINGS_DIR`. Recording is
+runtime-scoped and captures on demand, so the on-demand-rendering invariant holds.
 
 **Inspector overlays (AGP).** Debug overlays remain AGP-only:
 
@@ -236,10 +326,17 @@ mounts/ports, approvals, trust model) is `docs/machine.md`.
 - `docs/protocol.md` — the normative AGP specification.
 - `docs/architecture.md` — threading, channels, render pipeline, observation semantics.
 - `docs/core-api.md` — the domain model (`adesk-core`).
+- `docs/viewer.md` — the normative Viewer Attachment Protocol (VAP v1), including recording.
+- `docs/machine.md` — the AI Machine runtime and host control plane.
+- `docs/notifications.md` — the notification subsystem and the agent event inbox.
+- `docs/accessibility.md` — accessibility, the agent's text view of a window's UI.
 
 ## Status
 
-Implementation-complete. All 12 crates are implemented and independently audited, with
+Implementation-complete. All 19 crates are implemented and independently audited, with
 no executable `todo!()`/`unimplemented!()` in the workspace and no crate-level `allow`
 attributes. The workspace builds cleanly and passes `clippy` (warnings denied), `fmt`
-and rustdoc (zero warnings); `cargo test --workspace` reports 1230 passed, 0 failed.
+and rustdoc (zero warnings); `cargo test --workspace --no-fail-fast` reports 1713 passed,
+0 failed, 5 ignored (the 5 ignored are doc-code fences only). The feature-gated agent
+suite (`cargo test -p adesk-agent --features test-support,e2e`) is 146 passed, and
+`adesk-testkit`'s suite is 77 passed / 3 ignored doc-fences.
