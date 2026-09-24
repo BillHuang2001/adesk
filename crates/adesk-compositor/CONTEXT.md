@@ -94,7 +94,7 @@ Code rules:
 
 `src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
 `src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions, keyboard/pointer handle getters, cached level-modifier keycodes).
-`src/render/`: `headless.rs` (`HeadlessRenderer`: create/create_with/name/software_gl/imports_dmabuf/dmabuf_formats/render_window/render_output, `is_software_rasterizer`/`detect_software_gl`),`elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`), `mod.rs` (`OutputWindow`).
+`src/render/`: `headless.rs` (`HeadlessRenderer`: create/create_with/name/software_gl/imports_dmabuf/dmabuf_formats/render_window/render_output, `is_software_rasterizer`/`detect_software_gl`), `elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`), `mod.rs` (`OutputWindow`).
 `src/wm.rs` + `src/wm/registry.rs` + `src/wm_tests.rs`: `WmBridge` (the surface↔window bridge), `SurfaceRegistry` (keyed tree bookkeeping), the `wm` unit tests.
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
