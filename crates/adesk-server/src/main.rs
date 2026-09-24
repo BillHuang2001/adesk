@@ -24,15 +24,20 @@ struct Cli {
     /// Virtual output size, e.g. `1280x800`.
     #[arg(long, env = "ADESK_OUTPUT", value_name = "WxH")]
     output: Option<String>,
-    /// Renderer: `auto`, `gl` or `pixman`.
+    /// Renderer (`ADESK_RENDERER`): `auto` (default), `gl` or `pixman`. `auto`
+    /// tries GL and falls back to pixman, and uses pixman directly when the probed
+    /// GL renderer is a software rasterizer (Mesa llvmpipe/softpipe/swrast/lavapipe);
+    /// `gl` requires GL, `pixman` forces the software renderer.
     #[arg(long, env = "ADESK_RENDERER", value_name = "KIND")]
     renderer: Option<String>,
     /// Accessibility backend: `auto` (connect lazily) or `off` (never touch D-Bus).
     #[arg(long, env = "ADESK_ACCESSIBILITY", value_name = "MODE")]
     accessibility: Option<String>,
-    /// DMA-BUF global: `on` (default) advertises `zwp_linux_dmabuf_v1`; `off` makes
-    /// the runtime SHM-only (an escape hatch for a client/driver that crashes on a
-    /// DMA-BUF import).
+    /// DMA-BUF global (`ADESK_DMABUF`): `on` (default) or `off`. The
+    /// `zwp_linux_dmabuf_v1` global is advertised only when the active renderer is
+    /// not a software GL rasterizer (Mesa llvmpipe/softpipe/swrast/lavapipe),
+    /// regardless of `on`; `off` always makes the runtime SHM-only (an escape hatch
+    /// for a client/driver that crashes on a DMA-BUF import).
     #[arg(long, env = "ADESK_DMABUF", value_name = "MODE")]
     dmabuf: Option<String>,
     /// xkb layout list (e.g. `us`, `de,us`).

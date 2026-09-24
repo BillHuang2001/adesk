@@ -138,14 +138,22 @@ impl State {
         create_output(config, display);
 
         let mut dmabuf_state = DmabufState::new();
-        if config.dmabuf {
-            dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
-        } else {
+        if !config.dmabuf {
             // Operator escape hatch: advertise no dmabuf global so only `wl_shm`
             // clients can attach buffers. The renderer is still created normally.
             tracing::info!("dmabuf global disabled: SHM-only clients");
+        } else if renderer.software_gl() {
+            // A software GL rasterizer (llvmpipe/...) can segfault on a DMA-BUF
+            // import, so no dmabuf global is advertised: clients fall back to
+            // `wl_shm` instead of streaming DMA-BUF. pixman is unaffected (its
+            // import path is mmap + validated), so this only gates software GL.
+            tracing::warn!(
+                "dmabuf global suppressed: the GL renderer is a software rasterizer; \
+                 only SHM clients can attach buffers (use `--renderer pixman` for DMA-BUF)"
+            );
+        } else {
+            dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
         }
-
         let data_device_state = DataDeviceState::new::<State>(display);
         let xdg_decoration_state = XdgDecorationState::new::<State>(display);
 

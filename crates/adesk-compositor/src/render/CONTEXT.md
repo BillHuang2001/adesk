@@ -10,11 +10,13 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 
 ## API Surface
 
-- `HeadlessRenderer` (`headless.rs`, `pub(crate)`) — enum over `Gl { renderer: Box<GlesRenderer>, pool: TargetPool<GlTarget> }` / `Pixman { renderer: PixmanRenderer, pool: TargetPool<PixmanTarget> }`:
-  `create(RendererKind)`, `name()`, `dmabuf_formats()`, `render_window(surface, …)`,
+- `HeadlessRenderer` (`headless.rs`, `pub(crate)`) — enum over `Gl { renderer: Box<GlesRenderer>, software_gl: bool, pool: TargetPool<GlTarget> }` / `Pixman { renderer: PixmanRenderer, pool: TargetPool<PixmanTarget> }`:
+  `create(RendererKind)` / `create_with(RendererKind, probe)` (the injectable-probe test seam), `name()`,
+  `software_gl()`, `dmabuf_formats()`, `render_window(surface, …)`,
   `render_output(output_size, windows, region, max_dimension)`.
   Each variant owns its backend's `adesk_render::TargetPool`, so repeated captures of the
   same size reuse the offscreen target instead of reallocating it.
+- `is_software_rasterizer(renderer, vendor) -> bool` / `detect_software_gl(&mut GlesRenderer) -> bool` — the pure software classification and the `GL_RENDERER`/`GL_VENDOR` probe (`create` passes the latter to `create_with`).
 - `OutputWindow` (`mod.rs`, `pub(crate)`) — one window as the output-composition path sees it:
   `geometry: Rect` (output coords), `surface: WlSurface` (root), `active: bool` (the visibility selector).
 - `elements.rs` (`pub(crate)`, module-private except `window_elements`/`window_scene`/`output_scene`/
@@ -25,6 +27,7 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 
 - Scene coordinates are physical pixels at `SCENE_SCALE == 1.0` (v1 has no fractional scale).
 - Renderer selection is runtime, not a Cargo feature; both backends are always compiled in.
+- `Auto` falls back to pixman both when EGL is unavailable and when the created GL renderer is a software rasterizer (`GL_VENDOR` contains `Mesa` and `GL_RENDERER` one of `llvmpipe`/`softpipe`/`swrast`/`lavapipe`, case-insensitive); `Gl` is honoured but marked, and `software_gl()` drives the `zwp_linux_dmabuf_v1` suppression in `state.rs`. A null/unknown GL string is never software.
 - `GlesRenderer` is `!Send`; the renderer never leaves the compositor thread.
 - Public API is exactly what `crates/adesk-compositor/CONTEXT.md` documents; everything here is `pub(crate)`.
 
@@ -46,13 +49,15 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
   → `PrivateSurfaceData::map` recurses once per subsurface level, and popup collection
   (`PopupNode::iter_popups_relative_to`) recurses once per nested popup — only a deliberately deep
   client tree risks an 8 MiB stack overflow; an ordinary client cannot reach it.
-- The workspace's only production `unsafe` is the surfaceless-EGL bootstrap in `headless.rs`
-  (`create_gl`: `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`); the pixman path
-  contains no `unsafe`. A SIGSEGV observed while a client streams DMA-BUFs is **not** producible by
-  this module's own code: every failure path is a `Result`, element collection has no unchecked
-  indexing, and the walks are bounded. The fault sits in the dependency/backend layer this module
-  calls — Smithay's `PixmanRenderer`/`Dmabuf` (raw `mmap` pointer + client stride handed to
-  libpixman `composite32`) or, on the GL path, Mesa's EGL import. See the next section and
+- The workspace's only production `unsafe` in this module is the surfaceless-EGL bootstrap in
+  `headless.rs` (`create_gl`: `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`)
+  plus the `glGetString` read of `GL_RENDERER`/`GL_VENDOR` in `gl_string` (a null check precedes the
+  dereference); the pixman path contains no `unsafe`. A SIGSEGV observed while a client streams
+  DMA-BUFs is **not** producible by this module's own code: every failure path is a `Result`,
+  element collection has no unchecked indexing, and the walks are bounded. The fault sits in the
+  dependency/backend layer this module calls — Smithay's `PixmanRenderer`/`Dmabuf` (raw `mmap`
+  pointer + client stride handed to libpixman `composite32`) or, on the GL path, Mesa's EGL import
+  (which is why software GL is demoted to pixman and loses DMA-BUF). See
   `crates/adesk-compositor/CONTEXT.md` "DMA-BUF crash triage".
 
 ## DMA-BUF format advertising & crash triage (verified against Smithay 0.7 source)
