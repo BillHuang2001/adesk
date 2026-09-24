@@ -136,8 +136,12 @@ enum RuntimeCommand {
 ## 5. Rendering pipeline (`adesk-render`)
 
 - Renderers: `Gles` (EGL, GPU) and `Pixman` (software). Selection: `--renderer
-  auto|gl|pixman`; `auto` tries GL (surfaceless EGL, Mesa llvmpipe in VMs) and falls
-  back to pixman with a warning. The chosen renderer is reported by `ping`.
+  auto|gl|pixman`. `auto` probes surfaceless-EGL GL first, but when the probed GL
+  renderer is a software rasterizer (Mesa llvmpipe/softpipe/swrast/lavapipe) it selects
+  the `Pixman` renderer instead of software GL: Mesa's software GL faults on the
+  compositor thread when a GL/DMA-BUF client streams buffers. `auto` also falls back to
+  `Pixman` (with a warning) when GL creation fails outright. `--renderer gl|pixman`
+  forces a specific backend. The chosen renderer is reported by `ping`.
 - Rendering is **on demand only**: `RenderWindow`/`RenderOutput` commands. There is no
   frame loop, no continuous composition, no periodic readback.
 - Screen recording reuses that same on-demand full-output render (`RenderOutput`): while
@@ -150,9 +154,9 @@ enum RuntimeCommand {
 - Damage: the compositor accumulates per-window damage from `SurfaceCommit` events
   (Smithay's surface damage tracking). `changed_regions` in observations comes from
   this accumulator, coalesced and simplified; it is independent of the renderer.
-- The software path must render SHM-backed windows fully (that is what tests use).
-  DMA-BUF windows may be unsupported by the software renderer; that must surface as a
-  structured `render_failed` error, never a panic.
+- The software path must render SHM-backed windows fully (that is what tests use), and
+  the Pixman renderer keeps DMA-BUF support. A buffer the active renderer cannot import
+  must surface as a structured `render_failed` error, never a panic.
 
 ## 6. Temporal observation (`adesk-observer`)
 
@@ -220,6 +224,10 @@ Protocols implemented in v1:
   `wl_seat` (keyboard, pointer, touch omitted), `wl_output` (one virtual output),
   `wl_data_device_manager` (clipboard basics), `zwp_linux_dmabuf` (DMA-BUF),
   `xdg-decoration` (server-side only), `wl_drm`/`zwp_linux_explicit_sync` if free.
+- The `zwp_linux_dmabuf_v1` global is advertised by default; DMA-BUF import is kept by
+  the Pixman software renderer, and the global is auto-suppressed when the active
+  renderer is a software GL rasterizer (which faults on DMA-BUF import). `--dmabuf
+  on|off` (env `ADESK_DMABUF`) overrides the default; `off` forces an SHM-only runtime.
 - Out of scope for v1: XWayland, layer-shell, foreign-toplevel, idle protocols,
   screencopy, fractional scale, multi-seat.
 
