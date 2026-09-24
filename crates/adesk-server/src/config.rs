@@ -145,6 +145,10 @@ impl ServerConfig {
     }
 
     /// Selects the renderer (`Auto` / `Gl` / `Pixman`).
+    ///
+    /// `Auto` (the default) uses the pixman software renderer when the probed GL
+    /// renderer is a software rasterizer (see [`parse_renderer`]), avoiding the
+    /// DMA-BUF crash on that path.
     pub fn with_renderer(mut self, renderer: RendererKind) -> ServerConfig {
         self.compositor = self.compositor.with_renderer(renderer);
         self
@@ -153,10 +157,12 @@ impl ServerConfig {
     /// Enables or disables the `zwp_linux_dmabuf_v1` global (SHM-only when
     /// `false`).
     ///
-    /// This is the operator escape hatch for a client or graphics driver that
+    /// `false` is the operator escape hatch for a client or graphics driver that
     /// crashes while streaming DMA-BUF buffers: the renderer is still created
     /// normally, only the global is skipped, so only `wl_shm` clients can attach
-    /// buffers.
+    /// buffers. Even with `true`, the global is suppressed automatically when the
+    /// active renderer is a software GL rasterizer (see [`parse_renderer`]); the
+    /// pixman renderer always keeps DMA-BUF.
     pub fn with_dmabuf(mut self, enabled: bool) -> ServerConfig {
         self.compositor = self.compositor.with_dmabuf(enabled);
         self
@@ -328,6 +334,12 @@ pub fn parse_size(value: &str) -> std::result::Result<Size, String> {
 
 /// Parses a `--renderer` value: `auto`, `gl` or `pixman` (case-insensitive).
 ///
+/// `auto` (the default) tries GL and falls back to pixman, and uses pixman directly
+/// when the probed GL renderer is a software rasterizer (Mesa llvmpipe/softpipe/
+/// swrast/lavapipe) — the path that otherwise crashes on a DMA-BUF client frame;
+/// `gl` requires GL (startup fails without EGL) and `pixman` forces the software
+/// renderer.
+///
 /// # Errors
 ///
 /// Returns a human-readable message for any other value.
@@ -362,9 +374,11 @@ pub fn parse_accessibility(value: &str) -> std::result::Result<AccessibilityKind
 
 /// Parses a `--dmabuf` value: `on` or `off` (case-insensitive).
 ///
-/// `on` (the default) advertises the `zwp_linux_dmabuf_v1` global; `off` makes
-/// the runtime SHM-only — an escape hatch for a client or graphics driver that
-/// crashes on a DMA-BUF import.
+/// `on` (the default) requests the `zwp_linux_dmabuf_v1` global, but it is advertised
+/// only when the active renderer is not a software GL rasterizer (Mesa llvmpipe/
+/// softpipe/swrast/lavapipe), whose DMA-BUF import is the crash site; the pixman
+/// renderer always keeps DMA-BUF. `off` always makes the runtime SHM-only — an escape
+/// hatch for a client or graphics driver that crashes on a DMA-BUF import.
 ///
 /// # Errors
 ///
