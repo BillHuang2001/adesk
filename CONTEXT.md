@@ -224,17 +224,17 @@ The workspace links with the `mold` linker on Linux: `.cargo/config.toml` adds a
 
 - The sandbox has no GPU and no system EGL on the default library path; only the dev
   shell provides them. GL rendering uses Mesa's `llvmpipe` software fallback there.
-- Mesa's software GL (`llvmpipe`) faults at raster time when a GL client (e.g. ghostty)
-  streams DMA-BUF buffers: the EGL DMA-BUF import fails (`Operation not permitted`) and
-  the process dies inside Mesa's `eglCreateImageKHR`/rasterizer, on the compositor's
-  calloop thread. No default configuration reaches that fault, because `RendererKind::Auto`
-  demotes a software GL rasterizer to pixman and the `zwp_linux_dmabuf_v1` global is
-  suppressed for a software GL renderer; every incoming dmabuf is also validated before
-  import (`crates/adesk-compositor/src/protocols/dmabuf.rs`).
-- Software-GL detection is deliberately conservative: the renderer is demoted only when
-  `GL_VENDOR` names Mesa *and* `GL_RENDERER` names llvmpipe/softpipe/swrast/lavapipe; a
-  software GL stack reporting an unrecognized identity is treated as hardware and keeps
-  the DMA-BUF global (`crates/adesk-compositor/CONTEXT.md`).
+- Client DMA-BUF import fails in this environment (`Mapping the dmabuf failed`, EPERM). A
+  failed import on the `create_immed` request is answered by the protocol with a fatal
+  error that disconnects the client, so `zwp_linux_dmabuf_v1` is advertised only for a
+  renderer that can actually import (`HeadlessRenderer::imports_dmabuf()` = hardware GL);
+  pixman and software GL are SHM-only and GTK4 falls back to `wl_shm` — no default
+  configuration can kill a client this way (`crates/adesk-compositor/CONTEXT.md`).
+- Software-GL detection and DMA-BUF capability are deliberately conservative: a software
+  GL stack is recognized only when `GL_VENDOR` names Mesa *and* `GL_RENDERER` names
+  llvmpipe/softpipe/swrast/lavapipe, and only `Gl { software_gl: false }` is trusted to
+  import; an unrecognized identity is treated as hardware and keeps the DMA-BUF global
+  (`crates/adesk-compositor/CONTEXT.md`).
 - Launched applications are forced onto adesk's Wayland socket: `adesk-server` composes
   the child environment with `DISPLAY`/`XAUTHORITY` removed and the common Wayland
   toolkit opt-ins set (`XDG_SESSION_TYPE`, `GDK_BACKEND`, `QT_QPA_PLATFORM`,
