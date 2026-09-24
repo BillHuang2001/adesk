@@ -36,9 +36,10 @@ Nothing is exported here directly; `lib.rs` re-exports the public surface
 
 ## Notes for Agents
 
-- **`unsafe` in non-test code lives in exactly one place**: `render/headless.rs`
-  `create_gl` — `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`
-  (lines 235/247/253). Called only from `HeadlessRenderer::create` inside `State::new`
+- **`unsafe` in non-test code lives in `render/headless.rs` only**: `create_gl` —
+  `EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new` — plus `gl_string`'s
+  `glGetString` read of `GL_RENDERER`/`GL_VENDOR` (a null check precedes the dereference).
+  Both run only during `HeadlessRenderer::create`/`create_with` inside `State::new`
   (startup). Not reachable from a client commit/import.
 - **Non-test `unwrap`/`expect`/`panic`/`unreachable`/`todo` sites**: only two —
   `protocols/compositor.rs:37` `client_compositor_state`'s
@@ -58,7 +59,9 @@ Nothing is exported here directly; `lib.rs` re-exports the public surface
   plane fd, a plane too short for one row, and — for a linear/implicit **single-plane**
   buffer only — a whole buffer that does not fit) and logs the full descriptor; see the
   crate root CONTEXT.md for the triage. `CompositorConfig::dmabuf == false` creates no
-  `zwp_linux_dmabuf_v1` global at all.
+  `zwp_linux_dmabuf_v1` global at all, and neither does a **software GL** renderer
+  (`HeadlessRenderer::software_gl()`), the automatic safeguard against the Mesa
+  software-import fault.
 - `protocols/shm.rs` `buffer_destroyed` only sweeps the concrete backend's texture
   cache and logs a failed sweep; it sends nothing and never panics.
 

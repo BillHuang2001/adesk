@@ -43,7 +43,14 @@
 //!
 //! Renderer selection is the documented `--renderer auto|gl|pixman` behaviour:
 //! `Gl` must succeed, `Pixman` always works headless, `Auto` prefers GL and
-//! falls back to pixman with a warning. The result is reported by `ping`.
+//! falls back to pixman with a warning. `Auto` *also* falls back when the GL it
+//! gets is a **software** rasterizer (Mesa `llvmpipe`/`swrast`/...): software GL
+//! succeeds at surfaceless EGL setup, so the failure arm alone would never fire,
+//! yet it can segfault at raster time on a DMA-BUF import failure. The detected
+//! rasterizer is logged; an explicitly requested `Gl` is still honoured but
+//! marked so its DMA-BUF global is suppressed. The result is reported by `ping`.
+
+use std::ffi::{c_char, CStr};
 
 use adesk_core::{Rect, Size};
 use adesk_render::{render_scene, RenderConfig, RenderError, Scene, TargetPool};
@@ -53,7 +60,7 @@ use smithay::{
         egl::{native::EGLSurfacelessDisplay, EGLContext, EGLDisplay},
         renderer::{
             element::RenderElement,
-            gles::{GlesRenderbuffer, GlesRenderer},
+            gles::{ffi, GlesRenderbuffer, GlesRenderer},
             pixman::PixmanRenderer,
             ExportMem, ImportAll, ImportDma, Offscreen, Renderer,
         },
@@ -90,6 +97,13 @@ pub(crate) enum HeadlessRenderer {
     Gl {
         /// The GLES renderer.
         renderer: Box<GlesRenderer>,
+        /// Whether the GLES renderer is a **software** rasterizer (`llvmpipe`, ...).
+        ///
+        /// Only `true` for an explicitly requested [`RendererKind::Gl`]; [`RendererKind::Auto`]
+        /// resolves a software GL to pixman instead of keeping it. The flag is
+        /// exposed through [`software_gl`](HeadlessRenderer::software_gl) and gates
+        /// the `zwp_linux_dmabuf_v1` global.
+        software_gl: bool,
         /// Cached offscreen targets for repeated captures of the same size.
         pool: TargetPool<GlTarget>,
     },
@@ -108,32 +122,85 @@ impl HeadlessRenderer {
     ///
     /// * [`RendererKind::Pixman`] — always succeeds headless.
     /// * [`RendererKind::Gl`] — fails startup if surfaceless EGL is unavailable.
-    /// * [`RendererKind::Auto`] — tries GL, and on failure logs
-    ///   `GL renderer unavailable, falling back to pixman` at `warn` level and
-    ///   builds the pixman renderer.
+    ///   A **software** rasterizer (Mesa `llvmpipe`, ...) is honoured, but logged
+    ///   loudly and marked via [`software_gl`](HeadlessRenderer::software_gl), which
+    ///   suppresses the DMA-BUF global.
+    /// * [`RendererKind::Auto`] — tries GL, and on *either* a GL creation failure
+    ///   *or* a software rasterizer logs a warning and builds the pixman renderer.
     pub(crate) fn create(kind: RendererKind) -> crate::Result<HeadlessRenderer> {
+        Self::create_with(kind, detect_software_gl)
+    }
+
+    /// [`create`](HeadlessRenderer::create) with an injectable GL-identity probe.
+    ///
+    /// The probe decides whether an already-created GL renderer is a software
+    /// rasterizer; production passes [`detect_software_gl`]. The seam exists so the
+    /// `Auto`→pixman and `Gl`-honoured-but-marked decisions are unit-testable
+    /// independently of which rasterizer the test machine's EGL happens to expose.
+    pub(crate) fn create_with(
+        kind: RendererKind,
+        is_software_gl: fn(&mut GlesRenderer) -> bool,
+    ) -> crate::Result<HeadlessRenderer> {
         match kind {
-            RendererKind::Pixman => Ok(HeadlessRenderer::Pixman {
-                renderer: create_pixman()?,
-                pool: TargetPool::new(),
-            }),
-            RendererKind::Gl => Ok(HeadlessRenderer::Gl {
-                renderer: Box::new(create_gl()?),
-                pool: TargetPool::new(),
-            }),
-            RendererKind::Auto => match create_gl() {
-                Ok(renderer) => Ok(HeadlessRenderer::Gl {
+            RendererKind::Pixman => Self::pixman(),
+            RendererKind::Gl => {
+                let mut renderer = create_gl()?;
+                let software_gl = is_software_gl(&mut renderer);
+                if software_gl {
+                    tracing::warn!(
+                        "GL renderer is a software rasterizer; `--renderer pixman` is \
+                         recommended — software GL can crash on DMA-BUF clients"
+                    );
+                }
+                Ok(HeadlessRenderer::Gl {
                     renderer: Box::new(renderer),
+                    software_gl,
                     pool: TargetPool::new(),
-                }),
+                })
+            }
+            RendererKind::Auto => match create_gl() {
+                Ok(mut renderer) => {
+                    if is_software_gl(&mut renderer) {
+                        tracing::warn!(
+                            "GL renderer is a software rasterizer, falling back to pixman \
+                             for stability (software GL can crash on DMA-BUF clients)"
+                        );
+                        Self::pixman()
+                    } else {
+                        Ok(HeadlessRenderer::Gl {
+                            renderer: Box::new(renderer),
+                            software_gl: false,
+                            pool: TargetPool::new(),
+                        })
+                    }
+                }
                 Err(error) => {
                     tracing::warn!(error = %error, "GL renderer unavailable, falling back to pixman");
-                    Ok(HeadlessRenderer::Pixman {
-                        renderer: create_pixman()?,
-                        pool: TargetPool::new(),
-                    })
+                    Self::pixman()
                 }
             },
+        }
+    }
+
+    /// The pixman software renderer with a fresh target pool.
+    fn pixman() -> crate::Result<HeadlessRenderer> {
+        Ok(HeadlessRenderer::Pixman {
+            renderer: create_pixman()?,
+            pool: TargetPool::new(),
+        })
+    }
+
+    /// Whether the active renderer is a **software GL** rasterizer.
+    ///
+    /// Only an explicitly requested [`RendererKind::Gl`] can be software — an
+    /// [`RendererKind::Auto`] selection resolves a software GL to pixman, and pixman
+    /// itself is never "software GL". [`State::new`](crate::state::State::new)
+    /// suppresses the `zwp_linux_dmabuf_v1` global when this is `true`, because a
+    /// software rasterizer can segfault on a DMA-BUF import.
+    pub(crate) fn software_gl(&self) -> bool {
+        match self {
+            HeadlessRenderer::Gl { software_gl, .. } => *software_gl,
+            HeadlessRenderer::Pixman { .. } => false,
         }
     }
 
@@ -183,7 +250,7 @@ impl HeadlessRenderer {
     ) -> crate::Result<RenderedFrame> {
         let config = render_config(geometry.size(), region, max_dimension);
         match self {
-            HeadlessRenderer::Gl { renderer, pool } => {
+            HeadlessRenderer::Gl { renderer, pool, .. } => {
                 render_window_gl(renderer, pool, surface, &config)
             }
             HeadlessRenderer::Pixman { renderer, pool } => {
@@ -211,7 +278,7 @@ impl HeadlessRenderer {
     ) -> crate::Result<RenderedFrame> {
         let config = render_config(output_size, region, max_dimension);
         match self {
-            HeadlessRenderer::Gl { renderer, pool } => {
+            HeadlessRenderer::Gl { renderer, pool, .. } => {
                 render_output_gl(renderer, pool, windows, &config)
             }
             HeadlessRenderer::Pixman { renderer, pool } => {
@@ -261,6 +328,65 @@ fn create_gl() -> crate::Result<GlesRenderer> {
 fn create_pixman() -> crate::Result<PixmanRenderer> {
     PixmanRenderer::new()
         .map_err(|error| CompositorError::Renderer(format!("pixman renderer: {error}")))
+}
+
+/// Software GL rasterizer names, matched as case-insensitive substrings of
+/// `GL_RENDERER`.
+const SOFTWARE_RASTERIZERS: [&str; 4] = ["llvmpipe", "softpipe", "swrast", "lavapipe"];
+
+/// Whether the GL renderer/vendor strings name a **software** rasterizer.
+///
+/// Software is trusted only when the vendor names Mesa *and* the renderer name
+/// matches one of [`SOFTWARE_RASTERIZERS`]; both checks are case-insensitive. An
+/// empty or unrecognized pair is never software — the safe default, so hardware GL
+/// (even a vendor this crate has never heard of) keeps its DMA-BUF support.
+fn is_software_rasterizer(renderer: &str, vendor: &str) -> bool {
+    let renderer = renderer.to_ascii_lowercase();
+    let vendor = vendor.to_ascii_lowercase();
+    vendor.contains("mesa")
+        && SOFTWARE_RASTERIZERS
+            .iter()
+            .any(|name| renderer.contains(name))
+}
+
+/// Probe a created GL renderer and report whether it is a software rasterizer.
+///
+/// `GlesRenderer::with_context` makes the renderer's EGL context current around the
+/// GL-string read. A failed probe (no current context) is logged at `debug` and
+/// reported as *not* software (the safe default); on success the identity is logged
+/// at `info`.
+fn detect_software_gl(renderer: &mut GlesRenderer) -> bool {
+    let (gl_renderer, gl_vendor) = match renderer.with_context(gl_identity) {
+        Ok(identity) => identity,
+        Err(error) => {
+            tracing::debug!(error = %error, "could not probe the GL renderer identity");
+            return false;
+        }
+    };
+    tracing::info!(renderer = %gl_renderer, vendor = %gl_vendor, "GL renderer identified");
+    is_software_rasterizer(&gl_renderer, &gl_vendor)
+}
+
+/// Read `GL_RENDERER` and `GL_VENDOR` from the renderer's current GL context.
+fn gl_identity(gl: &ffi::Gles2) -> (String, String) {
+    (gl_string(gl, ffi::RENDERER), gl_string(gl, ffi::VENDOR))
+}
+
+/// Read one GL string (`glGetString`), yielding an empty `String` for a null or
+/// non-UTF-8 result instead of ever dereferencing a null pointer.
+fn gl_string(gl: &ffi::Gles2, name: ffi::types::GLenum) -> String {
+    // SAFETY: `glGetString` returns a pointer to a NUL-terminated string owned by
+    // GL, or null. The null case is checked before any dereference, and the pointer
+    // is read only while the context is current (`GlesRenderer::with_context`).
+    let ptr = unsafe { gl.GetString(name) } as *const c_char;
+    if ptr.is_null() {
+        return String::new();
+    }
+    // SAFETY: `ptr` is a non-null NUL-terminated C string as returned by
+    // `glGetString`; `to_string_lossy` copies it, so nothing outlives the context.
+    unsafe { CStr::from_ptr(ptr) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Render configuration of one render source: target sized to `source`, with
@@ -437,6 +563,117 @@ mod tests {
                 None
             }
         }
+    }
+
+    /// Creates a renderer through the injectable-probe seam, skipping (with a
+    /// message) when the environment has no EGL/GLES.
+    fn create_with_or_skip(
+        kind: RendererKind,
+        probe: fn(&mut GlesRenderer) -> bool,
+    ) -> Option<HeadlessRenderer> {
+        if std::env::var("ADESK_TEST_GL").as_deref() != Ok("1") {
+            eprintln!("skipping GL test: set ADESK_TEST_GL=1 to enable it");
+            return None;
+        }
+        match HeadlessRenderer::create_with(kind, probe) {
+            Ok(renderer) => Some(renderer),
+            Err(error) => {
+                eprintln!("skipping GL test: EGL/GLES unavailable: {error}");
+                None
+            }
+        }
+    }
+
+    #[test]
+    fn software_rasterizers_are_detected_case_insensitively() {
+        for renderer in [
+            "llvmpipe (LLVM 17.0.6, 256 bits)",
+            "softpipe",
+            "Mesa SWRAST",
+            "Lavapipe",
+        ] {
+            assert!(is_software_rasterizer(renderer, "Mesa"), "{renderer}");
+            assert!(
+                is_software_rasterizer(renderer, "mesa project"),
+                "{renderer}: the vendor check is case-insensitive too"
+            );
+        }
+    }
+
+    #[test]
+    fn hardware_and_unknown_renderers_are_not_software() {
+        for renderer in [
+            "NVIDIA GeForce RTX 4090/PCIe/SSE2",
+            "AMD Radeon RX 7900 XTX (radeonsi, navi31)",
+            "Intel(R) UHD Graphics 630",
+        ] {
+            assert!(!is_software_rasterizer(renderer, "Mesa"), "{renderer}");
+            assert!(
+                !is_software_rasterizer(renderer, "NVIDIA Corporation"),
+                "{renderer}"
+            );
+        }
+        // Empty / unknown / non-Mesa strings are never software.
+        assert!(!is_software_rasterizer("", ""));
+        assert!(!is_software_rasterizer("", "Mesa"));
+        assert!(!is_software_rasterizer("unknown", "unknown"));
+        // A software name without the Mesa vendor is not trusted.
+        assert!(!is_software_rasterizer("llvmpipe", ""));
+    }
+
+    #[test]
+    fn auto_falls_back_to_pixman_for_a_software_gl() {
+        // The probe is injected, so the decision is deterministic on any machine:
+        // GL creation is real (hence the EGL gate) but the software verdict is
+        // forced, so this never depends on the test machine's rasterizer.
+        let Some(renderer) = create_with_or_skip(RendererKind::Auto, |_| true) else {
+            return;
+        };
+        assert_eq!(renderer.name(), RendererName::Pixman);
+        assert!(!renderer.software_gl());
+    }
+
+    #[test]
+    fn auto_keeps_a_hardware_gl() {
+        let Some(renderer) = create_with_or_skip(RendererKind::Auto, |_| false) else {
+            return;
+        };
+        assert_eq!(renderer.name(), RendererName::Gl);
+        assert!(!renderer.software_gl());
+    }
+
+    #[test]
+    fn explicit_gl_is_honoured_but_marked_software() {
+        let Some(renderer) = create_with_or_skip(RendererKind::Gl, |_| true) else {
+            return;
+        };
+        assert_eq!(renderer.name(), RendererName::Gl);
+        assert!(renderer.software_gl());
+    }
+
+    #[test]
+    fn auto_resolves_a_real_software_gl_to_pixman() {
+        // Cannot fail spuriously: skips when the environment has no EGL and also
+        // when the probed rasterizer is real hardware GL.
+        if std::env::var("ADESK_TEST_GL").as_deref() != Ok("1") {
+            eprintln!("skipping GL test: set ADESK_TEST_GL=1 to enable it");
+            return;
+        }
+        let mut gl_renderer = match create_gl() {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                eprintln!("skipping GL test: EGL/GLES unavailable: {error}");
+                return;
+            }
+        };
+        if !detect_software_gl(&mut gl_renderer) {
+            eprintln!("skipping: this machine exposes hardware GL, not a software rasterizer");
+            return;
+        }
+        drop(gl_renderer);
+        let resolved = HeadlessRenderer::create(RendererKind::Auto)
+            .expect("pixman must be creatable after a software-GL probe");
+        assert_eq!(resolved.name(), RendererName::Pixman);
     }
 
     /// Asserts that a frame is a uniform clear frame of the expected size.

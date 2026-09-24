@@ -26,8 +26,10 @@ Entry point:
 
 Config:
 - `CompositorConfig { output_size: Size (1280x800), renderer: RendererKind (Auto), xkb: XkbSettings (us), socket_name: Option<String> (auto), event_channel_capacity: usize (4096), dmabuf: bool (true) }`; `new()`/`default()` plus `with_output_size`, `with_renderer`, `with_xkb`, `with_socket_name`, `with_event_channel_capacity`, `with_dmabuf`, `without_dmabuf`.
-- `dmabuf: false` makes `State::new` create **no** `zwp_linux_dmabuf_v1` global (SHM-only clients; the renderer itself is still created and `DmabufState` is still kept for the handler) — an operator escape hatch for a client/driver that crashes the graphics stack. No `adesk-server` flag exposes it yet (see Notes for Agents).
-- `RendererKind { Auto, Gl, Pixman }` — `Auto` tries surfaceless EGL and falls back to pixman with a warning; `Gl` fails startup when EGL is unavailable.
+- `dmabuf: false` makes `State::new` create **no** `zwp_linux_dmabuf_v1` global (SHM-only clients; the renderer itself is still created and `DmabufState` is still kept for the handler) — an operator escape hatch for a client/driver that crashes the graphics stack, wired through `adesk-server` as `--dmabuf on|off` (default `on`) and `ADESK_DMABUF`.
+- Independently of `dmabuf`, `State::new` also suppresses the `zwp_linux_dmabuf_v1` global when the active renderer is **software GL** (`HeadlessRenderer::software_gl()`): software GL can segfault on a DMA-BUF import, so only `wl_shm` clients are served and a WARN explains the suppression.
+- `RendererKind { Auto, Gl, Pixman }` — `Auto` prefers surfaceless EGL and falls back to pixman with a warning when EGL is unavailable **or** when the created GL renderer is a software rasterizer; `Gl` fails startup when EGL is unavailable but is otherwise honoured even when software (logged loudly and marked via `software_gl()`, which suppresses the dmabuf global).
+- Software-GL detection (`is_software_rasterizer`, `detect_software_gl`) reads `GL_RENDERER`/`GL_VENDOR` through `GlesRenderer::with_context` and classifies the pair as software only when `GL_VENDOR` contains `Mesa` and `GL_RENDERER` contains `llvmpipe`/`softpipe`/`swrast`/`lavapipe` (case-insensitive); a null or unknown string is never software, so hardware GL keeps DMA-BUF.
 - `RendererName { Gl, Pixman }` — `as_str()` → `"gl"`/`"pixman"` (AGP `ping`), `Display`.
 - `XkbSettings { rules, model, layout, variant, options }` — defaults `evdev`/`pc105`/`us`/empty/`None`; `us()`, `to_xkb_config() -> smithay::input::keyboard::XkbConfig<'_>`.
 
@@ -61,7 +63,7 @@ Scope:
 
 Code rules:
 - Errors: `thiserror` enums + `Result<T>`; no panics on request/event paths (the only production `expect`s are a mutex-poison guard and an impossible `ClientState` lookup).
-- `unsafe` only for EGL construction in `src/render/headless.rs` (`EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`).
+- `unsafe` only for EGL construction in `src/render/headless.rs` (`EGLDisplay::new`, `EGLContext::make_current`, `GlesRenderer::new`) and the `glGetString` read of `GL_RENDERER`/`GL_VENDOR` there (a null check precedes the dereference).
 - `tracing` only; never log pixel payloads or clipboard contents.
 - ~1000 lines per file is the concern threshold; split along module boundaries.
 - Dependencies come from the root `[workspace.dependencies]`; never inline versions.
@@ -92,7 +94,7 @@ Code rules:
 
 `src/protocols/`: `compositor.rs` (CompositorHandler + `ClientState`/`ClientData`), `xdg_shell.rs` (XdgShellHandler), `seat.rs` (SeatHandler), `output.rs` (OutputHandler), `shm.rs` (ShmHandler + BufferHandler), `dmabuf.rs` (DmabufHandler), `data_device.rs` (DataDeviceHandler + SelectionHandler + DnD), `decoration.rs` (XdgDecorationHandler).
 `src/input/`: `keycode.rs` (public `KeyCode`/`Keysym` parsing + alias table), `keymap.rs` (`KeymapTable`: keysym → keycode + level), `injector.rs` (`InputInjector` associated functions, keyboard/pointer handle getters, cached level-modifier keycodes).
-`src/render/`: `headless.rs` (`HeadlessRenderer`: create/name/dmabuf_formats/render_window/render_output), `elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`), `mod.rs` (`OutputWindow`).
+`src/render/`: `headless.rs` (`HeadlessRenderer`: create/create_with/name/software_gl/dmabuf_formats/render_window/render_output, `is_software_rasterizer`/`detect_software_gl`), `elements.rs` (`window_elements`, `window_scene`, `output_scene`, `popup_surfaces`), `mod.rs` (`OutputWindow`).
 `src/wm.rs` + `src/wm/registry.rs` + `src/wm_tests.rs`: `WmBridge` (the surface↔window bridge), `SurfaceRegistry` (keyed tree bookkeeping), the `wm` unit tests.
 
 Sibling cross-references (read-only from this node; escalate writes to the parent):
@@ -161,6 +163,7 @@ Event loop:
 - Activation is focus-only: `policy::activate` returns `[WmAction::Activate]` and never `ConfigureWindow`, so a window is tiled exactly on map and on an output-size change (`policy::on_map`/`policy::on_output_size`) — activating an already mapped window sends no configure. `State::apply_activate` moves keyboard focus and the data-device focus together.
 - A late `xdg_toplevel.set_app_id` is written back into the window model: `WmBridge::app_id_changed` reads the toplevel metadata and delegates to `note_app_id`, which keeps the `app_ids` change detection and the launch-ledger refinement and writes a genuine change through `WindowManager::on_app_id`, so `WindowInfo.app_id`/`QueryState`/`list_windows` report the new value. Smithay applies `set_app_id` while dispatching the request (not at the next commit), so no commit is needed for the write-back to land.
 - Renderer split: the compositor constructs the renderer and collects elements; `adesk-render` owns crop/downscale/readback/encoding.
+- Software GL is treated as a reliability hazard, not a renderer choice: `Auto` resolves a software rasterizer to pixman, and an explicit `Gl` that is software keeps GL but loses the DMA-BUF global, because Mesa's software `eglCreateImageKHR` import faults at raster time (see Known Issues). Detection never guesses from a missing string — only a `Mesa` vendor plus a known software renderer name counts, so hardware GL is never mis-demoted.
 - Buffer release is Smithay's, not this crate's: no ADesk code sends `wl_buffer.release`.
   `on_commit_buffer_handler` moves each committed buffer into `RendererSurfaceState.buffer`, and the next commit that attaches a *different* buffer (or NULL) drops the old `Buffer`, whose `InnerBuffer::drop` sends `release` (`smithay-0.7.0/src/backend/renderer/utils/wayland.rs:68-77, 145-187`) — a superseded buffer is released while the superseding commit is dispatched, never at render/readback time and never deferred by on-demand rendering, and the event is flushed by `run.rs`'s `flush_clients` right after `dispatch_clients`.
   Damage-only commits (no attach) release nothing; re-attaching the same `wl_buffer` object releases nothing.
@@ -218,7 +221,7 @@ Unit tests (colocated `#[cfg(test)]`; 99 tests pass):
 - `input::injector`: logical buttons → evdev codes; the `Shift_L`/`ISO_Level3_Shift` keycodes resolve once from the keymap (an unknown keysym is `None`, never an error).
 - `render::elements`: scene nodes keep bottom-to-top order and their own rects, damage coalescing; output-composition selection (`visible_index` picks only the active candidate, and picks none when all candidates are inactive or the list is empty), and an empty scene without a visible window. The selection is proven at the selection/scene level, and pixel proof covers both render paths: `RenderWindow` (`window_lifecycle.rs` matches the committed pattern, `popups.rs` asserts the popup's own fill inside the owner's frame) and `RenderOutput` (`output_composition.rs` proves a tracked-but-inactive window is excluded from the composed frame).
 - `render::headless`: pixman/GL clear frames, GL path gated by `ADESK_TEST_GL=1`.
-- Renderer-selection coverage gap: no test constructs `RendererKind::Auto`, so the GL→pixman fallback branch is unverified; `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`.
+- Renderer-selection coverage: `is_software_rasterizer` is unit-tested directly (software names with a Mesa vendor, hardware names, empty/unknown, and case-insensitivity), and the `Auto`→pixman and `Gl`-honoured-but-marked decisions are tested through the injectable-probe seam `HeadlessRenderer::create_with` (forcing the probe makes them deterministic on any machine); the seam still needs real EGL, so those tests, the `RendererKind::Gl` clear-frame test, and a real-probe `Auto` resolution test are all `ADESK_TEST_GL=1`-gated, and the real-probe test skips when the probed rasterizer is not software.
 - `protocols::xdg_shell`: initial popup configure geometry from the positioner, unconstrained `0x0` fallback without a positioner size.
 - `protocols::dmabuf`: the pre-import guard over real `Dmabuf`s built from temp-file fds — a well-formed single- and multi-plane descriptor is accepted; `offset >= fd size`, `offset + stride > fd size`, zero stride, degenerate size, an unreadable plane fd, and a linear single-plane buffer larger than its fd are each rejected without panicking; a **non-linear-modifier** single-plane buffer smaller than `stride * height` is accepted (only the per-plane checks apply); the telemetry description carries format/modifier/plane/offset/stride/fd-size and no pixel data.
 - `run::dispatch`: method names exact and unique, shutdown outcome, outcome distinguishability.
@@ -275,10 +278,9 @@ Frequency order: (1) `State::on_surface_commit` runs on every client commit/dama
   the display itself claimed. What is in place: a pre-import descriptor guard + telemetry in
   `src/protocols/dmabuf.rs` (`validate_dmabuf`/`describe_dmabuf`), the `--renderer pixman` fallback
   (pixman validates plane count, modifier, format and `stride * height <= mapping length` *before*
-  handing a pointer to libpixman), and a `CompositorConfig::dmabuf == false` SHM-only escape hatch
-  (not yet surfaced by `adesk-server`). See `src/CONTEXT.md` and `src/render/CONTEXT.md`.
+  handing a pointer to libpixman), the `--dmabuf on|off` SHM-only escape hatch, and the automatic
+  software-GL DMA-BUF suppression. See `src/CONTEXT.md` and `src/render/CONTEXT.md`.
 - Popup grabs are recorded, not enforced (v1 semantics); an activation that invalidates a grab dismisses it with `popup_done`.
-- `RendererKind::Auto`'s GL→pixman fallback (the `Err` arm of `HeadlessRenderer::create`) has no test: reaching it requires `create_gl()` to fail, and forcing that hermetically would need a production test hook (an injectable `create_gl` or an env knob), so the branch stays read-verified only — `RendererKind::Gl` is exercised only with `ADESK_TEST_GL=1`, where EGL is available by definition.
 - The sandbox has no GPU and no system EGL on the default library path; only the dev shell provides them (llvmpipe). `XKB_CONFIG_ROOT` likewise comes from the dev shell.
 - Injected pointer input has two delivery gaps the suites do not cover (both leave a `wl_pointer` bug invisible to the harness, whose recorder stores each event in the dispatch body rather than buffering to a frame).
   `InputInjector::pointer_motion`/`pointer_button` (`src/input/injector.rs`) never call `PointerHandle::frame`, so no `wl_pointer.frame` follows an injected motion or button — only `pointer_axis` frames — a wl_pointer v5+ protocol deviation ("A wl_pointer.frame event is sent for every logical event group") that clients which only act on a completed frame may honour by dropping the motion/button.
