@@ -243,9 +243,8 @@ The workspace links with the `mold` linker on Linux: `.cargo/config.toml` adds a
   the host with the same profile can still delegate the launch to that host instance.
 - `xkbcommon`'s keymap data comes from `XKB_CONFIG_ROOT` set by the dev shell; running
   the binaries outside the shell will fail keyboard setup unless that variable is set.
-- `RendererKind::Auto`'s GL→pixman fallback arm has no test: forcing `create_gl()` to fail
-  needs either a production test seam or process-global EGL env mutation. See
-  `crates/adesk-compositor/CONTEXT.md`.
+- `RendererKind::Auto`'s GL→pixman demotion is covered by an injectable-probe unit test
+  plus an `ADESK_TEST_GL=1`-gated test that asserts a real llvmpipe is demoted to pixman.
 - GTK4/libadwaita (for `adesk-viewer-gui`) come only from the dev shell / package
   (`flake.nix` `adeskGuiLibraries`); outside it the GUI crate cannot build or link.
 - The GUI binary needs a real display to *run*, so its widget glue (window/popover
