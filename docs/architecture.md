@@ -154,9 +154,12 @@ enum RuntimeCommand {
 - Damage: the compositor accumulates per-window damage from `SurfaceCommit` events
   (Smithay's surface damage tracking). `changed_regions` in observations comes from
   this accumulator, coalesced and simplified; it is independent of the renderer.
-- The software path must render SHM-backed windows fully (that is what tests use), and
-  the Pixman renderer keeps DMA-BUF support. A buffer the active renderer cannot import
-  must surface as a structured `render_failed` error, never a panic.
+- Only a hardware GL renderer can import client DMA-BUFs; the `Pixman` software renderer
+  and a software GL rasterizer are SHM-only (clients use `wl_shm`), so the
+  `zwp_linux_dmabuf_v1` global is advertised only for hardware GL (§8). The software path
+  must still render SHM-backed windows fully (that is what tests use). A buffer the
+  active renderer cannot import must surface as a structured `render_failed` error, never
+  a panic.
 
 ## 6. Temporal observation (`adesk-observer`)
 
@@ -222,12 +225,29 @@ Protocols implemented in v1:
 
 - `wl_compositor`, `wl_subcompositor`, `wl_shm`, `xdg-shell` (+ popups),
   `wl_seat` (keyboard, pointer, touch omitted), `wl_output` (one virtual output),
-  `wl_data_device_manager` (clipboard basics), `zwp_linux_dmabuf` (DMA-BUF),
-  `xdg-decoration` (server-side only), `wl_drm`/`zwp_linux_explicit_sync` if free.
-- The `zwp_linux_dmabuf_v1` global is advertised by default; DMA-BUF import is kept by
-  the Pixman software renderer, and the global is auto-suppressed when the active
-  renderer is a software GL rasterizer (which faults on DMA-BUF import). `--dmabuf
-  on|off` (env `ADESK_DMABUF`) overrides the default; `off` forces an SHM-only runtime.
+  `wl_data_device_manager` (clipboard basics), `zwp_linux_dmabuf` (DMA-BUF, hardware GL
+  renderers only), `xdg-decoration` (server-side only), `wl_drm`/`zwp_linux_explicit_sync`
+  if free.
+- The `zwp_linux_dmabuf_v1` global is advertised only when the active renderer is a
+  hardware GL renderer (`--renderer gl` with a non-software rasterizer) and `--dmabuf` is
+  on. `auto` on a host without usable hardware GL selects the Pixman fallback (and demotes
+  a software GL rasterizer such as Mesa llvmpipe/softpipe/swrast/lavapipe to Pixman), and
+  both Pixman and software GL are SHM-only: no dmabuf global, clients use `wl_shm`.
+  `--dmabuf on|off` (env `ADESK_DMABUF`, default `on`) overrides this, with `off` forcing
+  an SHM-only runtime regardless of the renderer.
+- Why so restrictive: a DMA-BUF import failure is not recoverable for a client that used
+  `zwp_linux_buffer_params_v1.create_immed`. The linux-dmabuf-v1 spec lets the compositor
+  "terminate the client by raising a fatal error", and Smithay 0.7's
+  `ImportNotifier::failed()` does exactly that for the `create_immed` case (posting
+  `invalid_wl_buffer`); only a `create` import gets the non-fatal `failed` event. GTK4
+  applications use `create_immed`, so in an environment where client DMA-BUFs cannot be
+  mapped/imported, advertising the global makes ordinary GTK applications die on launch
+  (`dmabuf import failed … Mapping the dmabuf failed` → `Gdk-Message: Lost connection to
+  Wayland compositor`). Advertising only what the renderer can genuinely import keeps
+  clients alive; the compositor logs a WARN naming the renderer when it suppresses the
+  global.
+- Tradeoff: on a host with a working GPU but no usable GL, the desktop is SHM-only
+  (slower, zero-copy lost) — reliability wins.
 - Out of scope for v1: XWayland, layer-shell, foreign-toplevel, idle protocols,
   screencopy, fractional scale, multi-seat.
 
