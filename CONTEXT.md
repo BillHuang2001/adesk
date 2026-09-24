@@ -224,13 +224,17 @@ The workspace links with the `mold` linker on Linux: `.cargo/config.toml` adds a
 
 - The sandbox has no GPU and no system EGL on the default library path; only the dev
   shell provides them. GL rendering uses Mesa's `llvmpipe` software fallback there.
-- A reproducible SIGSEGV can occur while a GL client (e.g. ghostty) streams DMA-BUF
-  buffers on the llvmpipe/software-GL path: dmabuf import fails repeatedly
-  (`dmabuf import failed to mmap: Operation not permitted`) and the process then dies
-  inside Mesa's EGL `eglCreateImageKHR`. The compositor now validates every dmabuf
-  before import (`crates/adesk-compositor/src/protocols/dmabuf.rs`) and logs
-  format/modifier/plane geometry on failure, but the fault is in the C graphics stack,
-  so the mitigation is `--dmabuf off` (SHM-only clients) or `--renderer pixman`.
+- Mesa's software GL (`llvmpipe`) faults at raster time when a GL client (e.g. ghostty)
+  streams DMA-BUF buffers: the EGL DMA-BUF import fails (`Operation not permitted`) and
+  the process dies inside Mesa's `eglCreateImageKHR`/rasterizer, on the compositor's
+  calloop thread. No default configuration reaches that fault, because `RendererKind::Auto`
+  demotes a software GL rasterizer to pixman and the `zwp_linux_dmabuf_v1` global is
+  suppressed for a software GL renderer; every incoming dmabuf is also validated before
+  import (`crates/adesk-compositor/src/protocols/dmabuf.rs`).
+- Software-GL detection is deliberately conservative: the renderer is demoted only when
+  `GL_VENDOR` names Mesa *and* `GL_RENDERER` names llvmpipe/softpipe/swrast/lavapipe; a
+  software GL stack reporting an unrecognized identity is treated as hardware and keeps
+  the DMA-BUF global (`crates/adesk-compositor/CONTEXT.md`).
 - Launched applications are forced onto adesk's Wayland socket: `adesk-server` composes
   the child environment with `DISPLAY`/`XAUTHORITY` removed and the common Wayland
   toolkit opt-ins set (`XDG_SESSION_TYPE`, `GDK_BACKEND`, `QT_QPA_PLATFORM`,
