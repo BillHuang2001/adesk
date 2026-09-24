@@ -12,9 +12,14 @@
 //! client's buffer is gone), so the handle returned here is only used to learn
 //! whether the import succeeded.
 //!
-//! Failures are reported to the client with [`ImportNotifier::failed`] and logged:
-//! an import failure is a client error the protocol handles, never a panic and
-//! never a reason to kill the connection.
+//! Failures are reported to the client with [`ImportNotifier::failed`] and logged.
+//! The outcome is not always survivable: for an import started with `create_immed`
+//! (Smithay's `Import::Infallible`, which GTK4/GDK uses) the protocol requires the
+//! compositor to raise `invalid_wl_buffer`, a Fatal error, so a failed import
+//! disconnects that client. That is why the global is advertised only for a renderer
+//! that really imports client DMA-BUFs
+//! ([`HeadlessRenderer::imports_dmabuf`]) — advertising one a client cannot use is a
+//! client-killing configuration, not a degradable one.
 //!
 //! # Defensive descriptor validation
 //!
@@ -67,7 +72,13 @@ impl DmabufHandler for State {
         // asked to import it.
         if let Err(defect) = validate_dmabuf(&dmabuf) {
             let description = describe_dmabuf(&dmabuf);
-            tracing::warn!(defect = %defect, description = %description, "dmabuf import failed");
+            tracing::warn!(
+                defect = %defect,
+                description = %description,
+                "dmabuf import rejected before the renderer; a `create_immed` import is \
+                 terminated by the protocol, and `--dmabuf off` avoids advertising the \
+                 global at all"
+            );
             notifier.failed();
             return;
         }
@@ -90,8 +101,11 @@ impl DmabufHandler for State {
 /// Generic over the backend's texture and error type so both renderer paths share
 /// one notification path: on success the client gets its `wl_buffer`, on failure
 /// `failed()` (an implementation-dependent import failure, not a protocol error).
-/// The `notifier` is consumed on every path; `dmabuf` is only used to describe the
-/// buffer in the log, and only when a message is actually emitted.
+/// For a `create_immed` import that failure is fatal to the client — the protocol
+/// layer raises `invalid_wl_buffer` — so the log says so and names the
+/// `--dmabuf off` escape hatch; this helper never hides the failure behind a
+/// fallback. The `notifier` is consumed on every path; `dmabuf` is only used to
+/// describe the buffer in the log, and only when a message is actually emitted.
 fn notify<T, E: std::fmt::Display>(
     imported: Result<T, E>,
     dmabuf: &Dmabuf,
@@ -110,7 +124,12 @@ fn notify<T, E: std::fmt::Display>(
         }
         Err(error) => {
             let description = describe_dmabuf(dmabuf);
-            tracing::warn!(%error, description = %description, "dmabuf import failed");
+            tracing::warn!(
+                %error,
+                description = %description,
+                "dmabuf import failed; a `create_immed` import is terminated by the \
+                 protocol, and `--dmabuf off` avoids advertising the global at all"
+            );
             notifier.failed();
         }
     }

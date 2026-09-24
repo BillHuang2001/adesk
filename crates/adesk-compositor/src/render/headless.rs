@@ -48,7 +48,10 @@
 //! succeeds at surfaceless EGL setup, so the failure arm alone would never fire,
 //! yet it can segfault at raster time on a DMA-BUF import failure. The detected
 //! rasterizer is logged; an explicitly requested `Gl` is still honoured but
-//! marked so its DMA-BUF global is suppressed. The result is reported by `ping`.
+//! marked. Only a **hardware** `Gl` renderer passes
+//! [`imports_dmabuf`](HeadlessRenderer::imports_dmabuf), so both the pixman
+//! fallback and software GL advertise no DMA-BUF global. The result is reported
+//! by `ping`.
 
 use std::ffi::{c_char, CStr};
 
@@ -89,7 +92,8 @@ type PixmanTarget = PixmanImage<'static, 'static>;
 /// One variant is chosen at startup and never changes; `Auto` only decides
 /// *which* one is constructed. Both variants support the same operations, so the
 /// rest of the crate never matches on the kind — except
-/// [`dmabuf_formats`](HeadlessRenderer::dmabuf_formats), which asks the concrete
+/// [`dmabuf_formats`](HeadlessRenderer::dmabuf_formats) and
+/// [`imports_dmabuf`](HeadlessRenderer::imports_dmabuf), which ask the concrete
 /// backend.
 pub(crate) enum HeadlessRenderer {
     /// EGL/GLES renderer built on a surfaceless EGL display (boxed: it is ~6 KiB),
@@ -100,9 +104,11 @@ pub(crate) enum HeadlessRenderer {
         /// Whether the GLES renderer is a **software** rasterizer (`llvmpipe`, ...).
         ///
         /// Only `true` for an explicitly requested [`RendererKind::Gl`]; [`RendererKind::Auto`]
-        /// resolves a software GL to pixman instead of keeping it. The flag is
-        /// exposed through [`software_gl`](HeadlessRenderer::software_gl) and gates
-        /// the `zwp_linux_dmabuf_v1` global.
+        /// resolves a software GL to pixman instead of keeping it. Exposed through
+        /// [`software_gl`](HeadlessRenderer::software_gl), it is the reason such a
+        /// renderer fails [`imports_dmabuf`](HeadlessRenderer::imports_dmabuf) — so
+        /// the `zwp_linux_dmabuf_v1` global is suppressed, and suppressed
+        /// deliberately.
         software_gl: bool,
         /// Cached offscreen targets for repeated captures of the same size.
         pool: TargetPool<GlTarget>,
@@ -194,14 +200,38 @@ impl HeadlessRenderer {
     ///
     /// Only an explicitly requested [`RendererKind::Gl`] can be software — an
     /// [`RendererKind::Auto`] selection resolves a software GL to pixman, and pixman
-    /// itself is never "software GL". [`State::new`](crate::state::State::new)
-    /// suppresses the `zwp_linux_dmabuf_v1` global when this is `true`, because a
-    /// software rasterizer can segfault on a DMA-BUF import.
+    /// itself is never "software GL". This is the marker
+    /// [`imports_dmabuf`](HeadlessRenderer::imports_dmabuf) consults to exclude a
+    /// software rasterizer; it is kept separate so the suppression log can
+    /// distinguish "software GL, suppressed deliberately" from "pixman, cannot map a
+    /// client buffer".
     pub(crate) fn software_gl(&self) -> bool {
         match self {
             HeadlessRenderer::Gl { software_gl, .. } => *software_gl,
             HeadlessRenderer::Pixman { .. } => false,
         }
+    }
+
+    /// Whether the active renderer can import client DMA-BUF buffers.
+    ///
+    /// Positive capability test [`State::new`](crate::state::State::new) gates the
+    /// `zwp_linux_dmabuf_v1` global on: `true` only for a **hardware**
+    /// [`RendererKind::Gl`] renderer (`Gl { software_gl: false }`). pixman returns
+    /// `false` — its `import_dmabuf` maps the client buffer and a GPU-less or
+    /// DMA-BUF-restricted host denies the mapping — and so does a software GL
+    /// rasterizer, which is not trusted with a DMA-BUF import. Advertising the global
+    /// for either would let a client pick `create_immed`, whose failed import the
+    /// protocol answers with a fatal error (Smithay posts `invalid_wl_buffer`),
+    /// terminating the application; with the global suppressed clients attach
+    /// `wl_shm` buffers instead.
+    pub(crate) fn imports_dmabuf(&self) -> bool {
+        matches!(
+            self,
+            HeadlessRenderer::Gl {
+                software_gl: false,
+                ..
+            }
+        )
     }
 
     /// The renderer that was actually created, for [`crate::ReadyInfo`] and the
@@ -216,10 +246,12 @@ impl HeadlessRenderer {
     /// The dmabuf formats this renderer can import, as advertised by the
     /// `zwp_linux_dmabuf` global.
     ///
-    /// Both backends implement `ImportDma`: `GlesRenderer` reports the EGL
-    /// dmabuf texture formats, `PixmanRenderer` a static set of single-plane
-    /// linear formats it can map. `Format` is
-    /// `smithay::backend::allocator::Format` (a `drm_fourcc::DrmFormat`:
+    /// Only consulted when [`imports_dmabuf`](HeadlessRenderer::imports_dmabuf) is
+    /// `true`; a renderer that cannot import client DMA-BUFs advertises no global at
+    /// all (`state.rs`), so this list is never published for it. Both backends
+    /// implement `ImportDma`: `GlesRenderer` reports the EGL dmabuf texture formats,
+    /// `PixmanRenderer` a static set of single-plane linear formats it can map.
+    /// `Format` is `smithay::backend::allocator::Format` (a `drm_fourcc::DrmFormat`:
     /// fourcc + modifier), the same type `DmabufState::create_global` consumes;
     /// `FormatSet` is `smithay::backend::allocator::format::FormatSet` and
     /// converts through `IntoIterator<Item = Format>`.
@@ -631,6 +663,10 @@ mod tests {
         };
         assert_eq!(renderer.name(), RendererName::Pixman);
         assert!(!renderer.software_gl());
+        assert!(
+            !renderer.imports_dmabuf(),
+            "the pixman fallback cannot import client DMA-BUFs, so it is SHM-only"
+        );
     }
 
     #[test]
@@ -640,6 +676,10 @@ mod tests {
         };
         assert_eq!(renderer.name(), RendererName::Gl);
         assert!(!renderer.software_gl());
+        assert!(
+            renderer.imports_dmabuf(),
+            "a hardware GL renderer advertises the dmabuf global"
+        );
     }
 
     #[test]
@@ -649,6 +689,44 @@ mod tests {
         };
         assert_eq!(renderer.name(), RendererName::Gl);
         assert!(renderer.software_gl());
+        assert!(
+            !renderer.imports_dmabuf(),
+            "software GL is not trusted with DMA-BUF imports"
+        );
+    }
+
+    /// The positive capability predicate: pixman never imports client DMA-BUFs, so
+    /// its clients stay on `wl_shm` and the dmabuf global is not advertised. Needs
+    /// no EGL/GPU/display.
+    #[test]
+    fn pixman_does_not_import_dmabuf() {
+        let renderer = pixman();
+        assert_eq!(renderer.name(), RendererName::Pixman);
+        assert!(!renderer.software_gl(), "pixman is not software *GL*");
+        assert!(
+            !renderer.imports_dmabuf(),
+            "pixman maps the client buffer and a DMA-BUF-restricted host denies it"
+        );
+    }
+
+    /// The GL half of the predicate, through the injectable probe (the EGL gate
+    /// applies because `create_with` really builds the GL renderer).
+    #[test]
+    fn a_hardware_gl_imports_dmabuf_but_a_software_gl_does_not() {
+        let Some(hardware) = create_with_or_skip(RendererKind::Gl, |_| false) else {
+            return;
+        };
+        assert!(
+            hardware.imports_dmabuf(),
+            "a hardware GL renderer imports client DMA-BUFs"
+        );
+        let Some(software) = create_with_or_skip(RendererKind::Gl, |_| true) else {
+            return;
+        };
+        assert!(
+            !software.imports_dmabuf(),
+            "a software GL rasterizer is not trusted with DMA-BUF imports"
+        );
     }
 
     #[test]

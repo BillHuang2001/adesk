@@ -12,7 +12,7 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 
 - `HeadlessRenderer` (`headless.rs`, `pub(crate)`) — enum over `Gl { renderer: Box<GlesRenderer>, software_gl: bool, pool: TargetPool<GlTarget> }` / `Pixman { renderer: PixmanRenderer, pool: TargetPool<PixmanTarget> }`:
   `create(RendererKind)` / `create_with(RendererKind, probe)` (the injectable-probe test seam), `name()`,
-  `software_gl()`, `dmabuf_formats()`, `render_window(surface, …)`,
+  `software_gl()`, `imports_dmabuf()`, `dmabuf_formats()`, `render_window(surface, …)`,
   `render_output(output_size, windows, region, max_dimension)`.
   Each variant owns its backend's `adesk_render::TargetPool`, so repeated captures of the
   same size reuse the offscreen target instead of reallocating it.
@@ -27,7 +27,7 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 
 - Scene coordinates are physical pixels at `SCENE_SCALE == 1.0` (v1 has no fractional scale).
 - Renderer selection is runtime, not a Cargo feature; both backends are always compiled in.
-- `Auto` falls back to pixman both when EGL is unavailable and when the created GL renderer is a software rasterizer (`GL_VENDOR` contains `Mesa` and `GL_RENDERER` one of `llvmpipe`/`softpipe`/`swrast`/`lavapipe`, case-insensitive); `Gl` is honoured but marked, and `software_gl()` drives the `zwp_linux_dmabuf_v1` suppression in `state.rs`. A null/unknown GL string is never software.
+- `Auto` falls back to pixman both when EGL is unavailable and when the created GL renderer is a software rasterizer (`GL_VENDOR` contains `Mesa` and `GL_RENDERER` one of `llvmpipe`/`softpipe`/`swrast`/`lavapipe`, case-insensitive); `Gl` is honoured but marked. `imports_dmabuf()` is the positive capability predicate `state.rs` gates the `zwp_linux_dmabuf_v1` global on: true only for `Gl { software_gl: false }`, false for pixman and for software GL. A null/unknown GL string is never software.
 - `GlesRenderer` is `!Send`; the renderer never leaves the compositor thread.
 - Public API is exactly what `crates/adesk-compositor/CONTEXT.md` documents; everything here is `pub(crate)`.
 
@@ -39,11 +39,12 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 - `XKB_CONFIG_ROOT` and EGL exist only in the dev shell; build via `./scripts/dev.sh`.
 - A buffer the backend cannot import (a DMA-BUF pixman cannot `mmap`, a bad SHM pool, ...) is
   **dropped, never rendered**: at protocol time the `dmabuf` handler logs `dmabuf import failed`
-  and calls `notifier.failed()`; at render time Smithay's element walk logs `Failed to import
-  surface` and omits the element (`WaylandSurfaceRenderElement::from_surface` returns `Err`
-  before a texture is cached). `window_elements`/`output_scene` therefore degrade to a clear or
-  partial frame and **no dangling texture reaches `adesk_render::render_scene`** — a failed import
-  is a clean, non-fatal outcome of this module.
+  and calls `notifier.failed()` (fatal to the client on a `create_immed` import); at render time
+  Smithay's element walk logs `Failed to import surface` and omits the element
+  (`WaylandSurfaceRenderElement::from_surface` returns `Err` before a texture is cached).
+  `window_elements`/`output_scene` therefore degrade to a clear or partial frame and **no dangling
+  texture reaches `adesk_render::render_scene`** — a failed *render-time* import is a clean,
+  non-fatal outcome of this module.
 - This module's own walks are bounded (`wm::MAX_SURFACE_TREE_DEPTH` = 32 in `state.rs`/`wm.rs`).
   Smithay's walk underneath it is not: `render_elements_from_surface_tree` → `with_surface_tree_downward`
   → `PrivateSurfaceData::map` recurses once per subsurface level, and popup collection
@@ -62,6 +63,13 @@ Pixel production, damage tracking and image encoding are deliberately **not** he
 
 ## DMA-BUF format advertising & crash triage (verified against Smithay 0.7 source)
 
+- **The global is advertised only for a hardware GL renderer.** `state.rs` creates
+  `zwp_linux_dmabuf_v1` only when `HeadlessRenderer::imports_dmabuf()` is true (and the
+  operator left `--dmabuf` on): a hardware GL renderer. pixman is excluded because its
+  `import_dmabuf` maps the client buffer, which a GPU-less / DMA-BUF-restricted host denies
+  (EPERM), and a `create_immed` import failure is a fatal `invalid_wl_buffer` protocol
+  error to the client; software GL is excluded for the same reliability reason. The pixman
+  fallback and software GL therefore serve `wl_shm` clients only.
 - **The advertised set is already exactly the active renderer's own set**, so "restrict advertising
   to what the renderer supports" is already satisfied and there is no restriction left to add.
   `HeadlessRenderer::dmabuf_formats` matches on the variant `create` actually built, and

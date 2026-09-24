@@ -100,9 +100,10 @@ impl XkbSettings {
 ///
 /// `Default` is the documented runtime default: `1280x800` virtual output,
 /// renderer `Auto`, US keyboard, automatically named Wayland socket, event
-/// broadcast capacity 4096, and the `zwp_linux_dmabuf_v1` global enabled
-/// (`docs/architecture.md` §1). The dmabuf switch can be turned off to start the
-/// compositor in an SHM-only mode (see [`CompositorConfig::without_dmabuf`]).
+/// broadcast capacity 4096, and the `zwp_linux_dmabuf_v1` global requested
+/// (`docs/architecture.md` §1) — advertised only when the active renderer imports
+/// client DMA-BUFs. The dmabuf switch can be turned off to start the compositor in
+/// an SHM-only mode (see [`CompositorConfig::without_dmabuf`]).
 #[derive(Debug, Clone)]
 pub struct CompositorConfig {
     /// Size of the single virtual output; windows are tiled to fill it.
@@ -111,12 +112,16 @@ pub struct CompositorConfig {
     pub renderer: RendererKind,
     /// xkb keymap settings for the virtual keyboard.
     pub xkb: XkbSettings,
-    /// Whether the compositor creates the `zwp_linux_dmabuf_v1` global.
+    /// Whether the compositor may advertise the `zwp_linux_dmabuf_v1` global.
     ///
-    /// When `false` no dmabuf global is advertised, so only `wl_shm` clients can
-    /// attach buffers (an SHM-only fallback). This is an operator escape hatch for
-    /// a crashing client or graphics driver that streams DMA-BUF buffers: the
-    /// renderer is still created normally, only the global is skipped.
+    /// `true` (default) advertises it only when the active renderer really imports
+    /// client DMA-BUF buffers — a hardware GL renderer. The pixman fallback and a
+    /// software GL rasterizer advertise no dmabuf global, so their clients attach
+    /// `wl_shm` buffers instead of choosing `create_immed` and being terminated by a
+    /// failed import. `false` never advertises it whatever the renderer, so only
+    /// `wl_shm` clients can attach buffers (an SHM-only escape hatch for a crashing
+    /// client or graphics driver). The renderer is always created normally; only the
+    /// global is affected.
     pub dmabuf: bool,
     /// Explicit Wayland socket name (e.g. `"wayland-7"`).
     ///
@@ -170,8 +175,11 @@ impl CompositorConfig {
     ///
     /// When `enabled` is `false` the compositor creates no dmabuf global, so only
     /// `wl_shm` clients can attach buffers — an SHM-only fallback useful when a
-    /// client or graphics driver crashes while streaming DMA-BUF buffers. The
-    /// renderer itself is still created normally; only the global is skipped.
+    /// client or graphics driver crashes while streaming DMA-BUF buffers. When
+    /// `enabled` is `true` the global is still advertised only if the active renderer
+    /// imports client DMA-BUFs (a hardware GL renderer); the pixman fallback and
+    /// software GL stay SHM-only. The renderer itself is always created normally;
+    /// only the global is affected.
     pub fn with_dmabuf(mut self, enabled: bool) -> Self {
         self.dmabuf = enabled;
         self
