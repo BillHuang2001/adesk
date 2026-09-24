@@ -138,21 +138,30 @@ impl State {
         create_output(config, display);
 
         let mut dmabuf_state = DmabufState::new();
-        if !config.dmabuf {
+        if advertises_dmabuf(config, &renderer) {
+            dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
+        } else if !config.dmabuf {
             // Operator escape hatch: advertise no dmabuf global so only `wl_shm`
             // clients can attach buffers. The renderer is still created normally.
             tracing::info!("dmabuf global disabled: SHM-only clients");
-        } else if renderer.software_gl() {
-            // A software GL rasterizer (llvmpipe/...) can segfault on a DMA-BUF
-            // import, so no dmabuf global is advertised: clients fall back to
-            // `wl_shm` instead of streaming DMA-BUF. pixman is unaffected (its
-            // import path is mmap + validated), so this only gates software GL.
-            tracing::warn!(
-                "dmabuf global suppressed: the GL renderer is a software rasterizer; \
-                 only SHM clients can attach buffers (use `--renderer pixman` for DMA-BUF)"
-            );
         } else {
-            dmabuf_state.create_global::<State>(display, renderer.dmabuf_formats());
+            // The active renderer does not import client DMA-BUFs. Advertising the
+            // global anyway would let a client pick `create_immed`, whose failed
+            // import the protocol answers with a fatal `invalid_wl_buffer` error,
+            // killing the application; with the global suppressed the client attaches
+            // a `wl_shm` buffer instead. Never silent: the reason names the renderer
+            // kind, and for software GL it states that the suppression is deliberate.
+            let reason = if renderer.software_gl() {
+                "the GL renderer is a software rasterizer, whose DMA-BUF import is \
+                 deliberately not trusted"
+            } else {
+                "the pixman software renderer cannot import client DMA-BUF buffers here"
+            };
+            tracing::warn!(
+                renderer = %renderer.name(),
+                "dmabuf global suppressed ({reason}): clients fall back to wl_shm \
+                 and only SHM buffers are accepted"
+            );
         }
         let data_device_state = DataDeviceState::new::<State>(display);
         let xdg_decoration_state = XdgDecorationState::new::<State>(display);
@@ -904,6 +913,18 @@ fn create_output(config: &CompositorConfig, display: &DisplayHandle) -> Output {
     output
 }
 
+/// Whether [`State::new`] advertises the `zwp_linux_dmabuf_v1` global.
+///
+/// True only when the operator left the switch on ([`CompositorConfig::dmabuf`])
+/// **and** the active renderer really imports client DMA-BUF buffers
+/// ([`HeadlessRenderer::imports_dmabuf`], i.e. a hardware GL renderer). Advertising
+/// the global for a renderer that cannot import is a client-killing configuration:
+/// the `create_immed` import a client then picks is answered with a fatal protocol
+/// error. Suppressing it instead makes clients attach `wl_shm` buffers.
+fn advertises_dmabuf(config: &CompositorConfig, renderer: &HeadlessRenderer) -> bool {
+    config.dmabuf && renderer.imports_dmabuf()
+}
+
 /// Focus targets are `wl_surface`s: they implement [`WaylandFocus`], which
 /// `SeatState::new_wl_seat` requires of both pointer and keyboard focus types.
 const _: fn() = || {
@@ -972,5 +993,52 @@ mod tests {
         let state = State::new(&config, &display.handle(), events)
             .expect("an SHM-only compositor must initialise headless");
         assert!(!state.config.dmabuf);
+    }
+
+    /// The global gate: `zwp_linux_dmabuf_v1` is advertised only when the operator
+    /// left the switch on **and** the renderer imports client DMA-BUFs. pixman needs
+    /// no EGL/GPU, so both pixman cases run on any machine.
+    #[test]
+    fn dmabuf_global_is_not_advertised_for_pixman() {
+        let renderer =
+            HeadlessRenderer::create(crate::config::RendererKind::Pixman).expect("pixman renderer");
+        let pixman = CompositorConfig::default().with_renderer(crate::config::RendererKind::Pixman);
+        assert!(
+            !advertises_dmabuf(&pixman, &renderer),
+            "pixman cannot import client DMA-BUFs, so the global is suppressed \
+             even with `dmabuf = true`"
+        );
+        assert!(
+            !advertises_dmabuf(&pixman.clone().without_dmabuf(), &renderer),
+            "`dmabuf = false` never advertises the global"
+        );
+    }
+
+    /// The GL half of the gate. `create_with` still needs real EGL, so this is
+    /// `ADESK_TEST_GL=1`-gated like the sibling renderer-selection tests.
+    #[test]
+    fn dmabuf_global_gate_splits_hardware_from_software_gl() {
+        use crate::config::RendererKind;
+        if std::env::var("ADESK_TEST_GL").as_deref() != Ok("1") {
+            eprintln!("skipping GL test: set ADESK_TEST_GL=1 to enable it");
+            return;
+        }
+        let config = CompositorConfig::default().with_renderer(RendererKind::Gl);
+        let hardware = HeadlessRenderer::create_with(RendererKind::Gl, |_| false);
+        match hardware {
+            Ok(renderer) => assert!(
+                advertises_dmabuf(&config, &renderer),
+                "a hardware GL renderer imports client DMA-BUFs, so the global is advertised"
+            ),
+            Err(error) => eprintln!("skipping GL test: EGL/GLES unavailable: {error}"),
+        }
+        let software = HeadlessRenderer::create_with(RendererKind::Gl, |_| true);
+        match software {
+            Ok(renderer) => assert!(
+                !advertises_dmabuf(&config, &renderer),
+                "a software GL rasterizer is not trusted with DMA-BUF imports"
+            ),
+            Err(error) => eprintln!("skipping GL test: EGL/GLES unavailable: {error}"),
+        }
     }
 }

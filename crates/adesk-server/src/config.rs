@@ -160,9 +160,10 @@ impl ServerConfig {
     /// `false` is the operator escape hatch for a client or graphics driver that
     /// crashes while streaming DMA-BUF buffers: the renderer is still created
     /// normally, only the global is skipped, so only `wl_shm` clients can attach
-    /// buffers. Even with `true`, the global is suppressed automatically when the
-    /// active renderer is a software GL rasterizer (see [`parse_renderer`]); the
-    /// pixman renderer always keeps DMA-BUF.
+    /// buffers. Even with `true`, the global is advertised only when the active
+    /// renderer is a hardware GL renderer (see [`parse_renderer`]); the pixman
+    /// fallback and a software GL rasterizer suppress it, so clients fall back to
+    /// `wl_shm`.
     pub fn with_dmabuf(mut self, enabled: bool) -> ServerConfig {
         self.compositor = self.compositor.with_dmabuf(enabled);
         self
@@ -375,10 +376,14 @@ pub fn parse_accessibility(value: &str) -> std::result::Result<AccessibilityKind
 /// Parses a `--dmabuf` value: `on` or `off` (case-insensitive).
 ///
 /// `on` (the default) requests the `zwp_linux_dmabuf_v1` global, but it is advertised
-/// only when the active renderer is not a software GL rasterizer (Mesa llvmpipe/
-/// softpipe/swrast/lavapipe), whose DMA-BUF import is the crash site; the pixman
-/// renderer always keeps DMA-BUF. `off` always makes the runtime SHM-only — an escape
-/// hatch for a client or graphics driver that crashes on a DMA-BUF import.
+/// only when the active renderer is a hardware GL renderer (`--renderer gl` with a real
+/// hardware rasterizer; `auto` never demotes to `gl` and selects pixman on a GPU-less
+/// host). The pixman fallback and a software GL rasterizer (Mesa llvmpipe/softpipe/
+/// swrast/lavapipe) suppress the global and clients fall back to `wl_shm` — an advertised
+/// global there would make a GTK4 client die on `zwp_linux_buffer_params_v1.create_immed`
+/// with a fatal `invalid_wl_buffer` protocol error. `off` always makes the runtime
+/// SHM-only — an escape hatch for a client or graphics driver that crashes on a DMA-BUF
+/// import.
 ///
 /// # Errors
 ///

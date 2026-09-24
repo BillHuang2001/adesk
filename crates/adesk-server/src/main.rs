@@ -35,9 +35,11 @@ struct Cli {
     accessibility: Option<String>,
     /// DMA-BUF global (`ADESK_DMABUF`): `on` (default) or `off`. The
     /// `zwp_linux_dmabuf_v1` global is advertised only when the active renderer is
-    /// not a software GL rasterizer (Mesa llvmpipe/softpipe/swrast/lavapipe),
-    /// regardless of `on`; `off` always makes the runtime SHM-only (an escape hatch
-    /// for a client/driver that crashes on a DMA-BUF import).
+    /// a hardware GL renderer (`--renderer gl` with a real hardware rasterizer);
+    /// the pixman fallback and a software GL rasterizer (Mesa llvmpipe/softpipe/
+    /// swrast/lavapipe) suppress it, so clients use `wl_shm` instead. `off` always
+    /// makes the runtime SHM-only (an escape hatch for a client/driver that crashes
+    /// on a DMA-BUF import).
     #[arg(long, env = "ADESK_DMABUF", value_name = "MODE")]
     dmabuf: Option<String>,
     /// xkb layout list (e.g. `us`, `de,us`).
