@@ -240,7 +240,10 @@ The workspace links with the `mold` linker on Linux: `.cargo/config.toml` adds a
   toolkit opt-ins set (`XDG_SESSION_TYPE`, `GDK_BACKEND`, `QT_QPA_PLATFORM`,
   `MOZ_ENABLE_WAYLAND`, `OZONE_PLATFORM`), so Firefox/Chrome as well as GTK apps open
   inside adesk rather than on the host X server. A single-instance app already running on
-  the host with the same profile can still delegate the launch to that host instance.
+  the host with the same profile can still delegate the launch to that host instance, so a
+  test that runs an app against adesk must isolate the host session (own
+  `XDG_RUNTIME_DIR`, `DISPLAY`/`XAUTHORITY`/`WAYLAND_DISPLAY` cleared, session bus
+  unreachable) or the app attaches to the host compositor instead.
 - `xkbcommon`'s keymap data comes from `XKB_CONFIG_ROOT` set by the dev shell; running
   the binaries outside the shell will fail keyboard setup unless that variable is set.
 - `RendererKind::Auto`'s GL→pixman demotion is covered by an injectable-probe unit test
